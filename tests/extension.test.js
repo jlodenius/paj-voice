@@ -25,7 +25,7 @@ export function fixture(overrides = {}) {
         widgets.push({ name, lines: component ? component.render(80) : widget, component, options });
       } },
   };
-  const config = { python: 'fake-audio' };
+  const config = { audio: { input: 'laptop', output: 'headphones', echoCancellation: 'none' } };
   const instance = registerVoice(pi, Type, { env: {}, loadConfig: () => config,
     startCompanion(args) {
       const worker = { args, closed: false, send: frame => frames.push(frame), close() { this.closed = true; } };
@@ -196,6 +196,46 @@ test('a final answer interrupted before queue admission is still provided to the
   assert.equal(record.text, 'Should I cover Paj, Captain, Voice and paj-rc?');
   assert.equal(f.messages.length, 2);
   await f.command('off');
+});
+
+test('setup selects friendly device names while off and saves without opening audio', async () => {
+  const saved = [], menus = [];
+  const f = fixture({ saveDevices: (file, audio) => saved.push({ file, audio }) });
+  f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify([
+    { name: 'alsa_input.laptop', description: 'Laptop microphone', class: 'Audio/Source' },
+    { name: 'bluez_input.headset', description: 'Bluetooth microphone', class: 'Audio/Source' },
+    { name: 'bluez_output.sony', description: 'Sony headphones', class: 'Audio/Sink' },
+  ]) });
+  f.ctx.ui.select = async (title, labels) => { menus.push({ title, labels }); return labels[0]; };
+  await f.command('setup');
+  assert.match(menus[0].labels[0], /Laptop microphone/);
+  assert.equal(menus[0].labels.length, 1);
+  assert.match(menus[1].labels[0], /Sony headphones/);
+  assert.deepEqual(saved[0].audio, { input: 'alsa_input.laptop', output: 'bluez_output.sony' });
+  assert.equal(f.workers.length, 0);
+  assert.equal(f.controller.state().enabled, false);
+  await f.command('on'); f.audio({ type: 'ready' });
+  await f.command('setup');
+  assert.equal(saved.length, 1);
+  assert.ok(f.notices.some(([text]) => text.includes('Turn voice off')));
+  await f.command('off');
+});
+
+test('cancelled or invalidated device selection never writes preferences or opens audio', async () => {
+  for (const invalidate of [false, true]) {
+    const saved = [];
+    const f = fixture({ saveDevices: (...args) => saved.push(args) });
+    f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify([
+      { name: 'input', class: 'Audio/Source' }, { name: 'output', class: 'Audio/Sink' },
+    ]) });
+    f.ctx.ui.select = async (_title, labels) => {
+      if (invalidate) await f.command('off');
+      return invalidate ? labels[0] : undefined;
+    };
+    await f.command('setup');
+    assert.equal(saved.length, 0);
+    assert.equal(f.workers.length, 0);
+  }
 });
 
 test('blocking terminal UI is reported but speech cannot implicitly approve it', async () => {

@@ -4,6 +4,8 @@ import { createVoiceController } from './controller.js';
 import { createAdmission } from './admission.js';
 import { startCompanion } from './companion.js';
 import { spokenAnswer } from './speech-text.js';
+import { runtimePaths } from './runtime-paths.js';
+import { deviceChoices, saveDevices } from './device-settings.js';
 import { voiceStatus, voiceWidget } from './voice-ui.js';
 
 export function registerVoice(pi, Type, options = {}) {
@@ -15,6 +17,7 @@ export function registerVoice(pi, Type, options = {}) {
   let closed = false;
   let lifetime = 0;
   let arming = false;
+  let configuring = false;
   let toolExposure = 'hidden';
   let responseToken;
   let latestPrompt;
@@ -182,8 +185,8 @@ export function registerVoice(pi, Type, options = {}) {
     if (text && responseToken) controller.answer({ ...responseToken, text });
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices']
+    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
@@ -209,25 +212,56 @@ export function registerVoice(pi, Type, options = {}) {
         notify(`${JSON.stringify(controller.state())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}`);
         return;
       }
-      if (command !== 'on' && command !== 'devices') {
-        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices]', 'warning');
+      if (!['on', 'devices', 'setup'].includes(command)) {
+        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup]', 'warning');
         return;
       }
-      let ownsArming = false;
+      let ownsArming = false, ownsSetup = false;
       try {
-        const config = (options.loadConfig ?? loadConfig)(configPath(env));
-        if (command === 'devices') {
-          const result = await pi.exec(config.python, ['--devices'], { timeout: 10000, maxBuffer: 32768 });
+        if (command === 'setup' && (controller.state().generation || arming || configuring)) {
+          throw new Error('Turn voice off before selecting devices; another setup or arming must finish first');
+        }
+        if (command === 'setup' && (closed || current.mode !== 'tui' || !current.hasUI ||
+            env.PAJ_PARENT_PI_SESSION_ID || env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID ||
+            (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary'))) throw new Error('Select devices in a main Pi TUI session');
+        if (command === 'setup') { configuring = true; ownsSetup = true; }
+        if (command === 'devices' || command === 'setup') {
+          const activation = lifetime, id = current.sessionManager.getSessionId();
+          const isCurrent = () => !closed && activation === lifetime &&
+            id === ctx?.sessionManager.getSessionId() && !controller.state().generation;
+          const result = await pi.exec(runtimePaths(env).executable, ['--devices'], { timeout: 10000, maxBuffer: 32768 });
           if (result.code !== 0 || result.killed || result.truncated) throw new Error('Cannot enumerate audio devices');
-          notify(result.stdout);
+          const devices = JSON.parse(result.stdout);
+          if (command === 'devices') {
+            const inputs = deviceChoices(devices, 'Audio/Source'), outputs = deviceChoices(devices, 'Audio/Sink');
+            notify(`Microphones:\n${inputs.map(item => item.label).join('\n') || '(none)'}\n\nPlayback:\n${outputs.map(item => item.label).join('\n') || '(none)'}\nUse /paj-voice setup to select. Bluetooth microphones are excluded.`);
+            return;
+          }
+          if (!isCurrent()) return;
+          const config = (options.loadConfig ?? loadConfig)(configPath(env));
+          const inputs = deviceChoices(devices, 'Audio/Source', config.audio.input);
+          const outputs = deviceChoices(devices, 'Audio/Sink', config.audio.output);
+          if (!inputs.length || !outputs.length) throw new Error('Connect a supported microphone and headphones first');
+          const inputLabel = await current.ui.select('Voice microphone', inputs.map(item => item.label));
+          if (!inputLabel || !isCurrent()) return;
+          const outputLabel = await current.ui.select('Voice headphones / playback', outputs.map(item => item.label));
+          if (!outputLabel || !isCurrent()) return;
+          const input = inputs.find(item => item.label === inputLabel), output = outputs.find(item => item.label === outputLabel);
+          if (!input || !output) throw new Error('Invalid device selection');
+          const confirmed = await current.ui.confirm('Save voice devices?',
+            `${input.label}\n${output.label}\nUse headphones. Voice stays off; arming remains a separate confirmation.`);
+          if (!confirmed || !isCurrent()) return;
+          (options.saveDevices ?? saveDevices)(configPath(env), { input: input.name, output: output.name });
+          notify('Voice devices saved. Voice remains off.');
           return;
         }
+        const config = (options.loadConfig ?? loadConfig)(configPath(env));
         if (controller.state().enabled || controller.state().starting) { notify('Voice is already enabled for this session.'); return; }
         if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
             env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID || (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
           throw new Error('Enable voice in a main Pi TUI session');
         }
-        if (arming) throw new Error('Voice arming is already awaiting confirmation');
+        if (arming || configuring) throw new Error('Voice arming or device selection is already in progress');
         arming = true;
         ownsArming = true;
         const activation = lifetime;
@@ -240,7 +274,7 @@ export function registerVoice(pi, Type, options = {}) {
           generation: state.generation, env });
         admission.validate();
         let launched;
-        launched = (options.startCompanion ?? startCompanion)({ config, generation: state.generation,
+        launched = (options.startCompanion ?? startCompanion)({ ...runtimePaths(env), config, generation: state.generation,
           onEvent(frame, generation) {
             if (controller.state().generation === generation && frame.type === 'cancelled' && frame.reason === 'utterance_limit') {
               notify('Speech exceeded the utterance limit and was discarded; no request submitted. Use shorter turns.', 'warning');
@@ -266,7 +300,10 @@ export function registerVoice(pi, Type, options = {}) {
       } catch (error) {
         if (command === 'on') stop();
         notify(`Voice unavailable: ${error.message}`, 'error');
-      } finally { if (ownsArming) arming = false; }
+      } finally {
+        if (ownsArming) arming = false;
+        if (ownsSetup) configuring = false;
+      }
     },
   });
   return { controller, stop };

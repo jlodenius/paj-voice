@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
+import { runtimePaths } from './runtime-paths.js';
 
-export function startCompanion({ config, generation, onEvent, onExit, spawnProcess = spawn, startupMs = 120000 }) {
-  const child = spawnProcess(config.python, [], { stdio: ['pipe', 'pipe', 'pipe'], env: {
+export function startCompanion({ config, generation, onEvent, onExit, spawnProcess = spawn, startupMs = 120000,
+  executable = runtimePaths().executable, cacheDir = runtimePaths().cacheDir }) {
+  const child = spawnProcess(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], env: {
     ...process.env, HF_HUB_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1', DO_NOT_TRACK: '1',
   } });
   let closed = false;
@@ -80,6 +82,6 @@ export function startCompanion({ config, generation, onEvent, onExit, spawnProce
   });
   startupTimer = setTimeout(() => fail('Local voice runtime did not become ready in time.'), startupMs);
   startupTimer.unref?.();
-  send({ type: 'configure', generation, config });
+  send({ type: 'configure', generation, config: { ...config, cacheDir } });
   return { send, close, diagnostics: () => stderr };
 }

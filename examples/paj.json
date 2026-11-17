@@ -3,8 +3,6 @@
     "version": 1,
     "languages": ["en"],
     "responseLanguage": "en",
-    "python": "paj-voice-audio",
-    "cacheDir": "/absolute/path/to/project/.cache/paj-voice",
     "stt": { "computeType": "int8" },
     "tts": {},
     "audio": {

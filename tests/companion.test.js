@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { startCompanion } from '../src/companion.js';
 
 function run(script, callbacks = {}) {
-  return startCompanion({ config: { python: 'fake-audio' }, generation: 'g',
+  return startCompanion({ config: {}, generation: 'g',
     onEvent() {}, startupMs: 2000, ...callbacks,
     spawnProcess(_command, _args, options) { return spawn(process.execPath, ['-e', script], options); },
   });
@@ -22,6 +22,8 @@ test('inherited pipes bind configuration to the selected generation without any 
     assert.equal(generation, 'g');
     assert.equal(frame.received.type, 'configure');
     assert.equal(frame.received.generation, 'g');
+    assert.equal(Object.hasOwn(frame.received.config, 'python'), false);
+    assert.ok(frame.received.config.cacheDir.endsWith('/paj-voice'));
   } finally { worker.close(); }
 });
 
@@ -49,7 +51,7 @@ test('startup timeout terminates an unready worker', { timeout: 5000 }, async ()
 
 test('missing executable produces an actionable local runtime failure', { timeout: 5000 }, async () => {
   const message = await new Promise(resolve => {
-    startCompanion({ config: { python: '/no/such/local/voice-runtime' }, generation: 'g',
+    startCompanion({ config: {}, executable: '/no/such/local/voice-runtime', generation: 'g',
       onEvent() {}, onExit: resolve, startupMs: 500 });
   });
   assert.match(message, /Cannot start local voice runtime/);
@@ -67,7 +69,7 @@ function fakeChild() {
 
 test('backpressure overflow closes once without recursive shutdown writes', () => {
   const child = fakeChild(), failures = [];
-  const worker = startCompanion({ config: { python: 'fake' }, generation: 'g', onEvent() {},
+  const worker = startCompanion({ config: {}, generation: 'g', onEvent() {},
     onExit: message => failures.push(message), spawnProcess: () => child });
   child.stdin.writableLength = 65536;
   assert.equal(worker.send({ type: 'stop' }), false);
@@ -81,7 +83,7 @@ test('backpressure overflow closes once without recursive shutdown writes', () =
 test('startup failure retains forced termination until the child actually exits', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const child = fakeChild(), failures = [];
-  startCompanion({ config: { python: 'fake' }, generation: 'g', onEvent() {}, startupMs: 10,
+  startCompanion({ config: {}, generation: 'g', onEvent() {}, startupMs: 10,
     onExit: message => failures.push(message), spawnProcess: () => child });
   t.mock.timers.tick(10);
   assert.match(failures[0], /ready in time/);
@@ -94,7 +96,7 @@ test('startup failure retains forced termination until the child actually exits'
 
 test('callback closure stops processing the rest of an already-buffered frame batch', () => {
   const child = fakeChild(), frames = [];
-  const worker = startCompanion({ config: { python: 'fake' }, generation: 'g',
+  const worker = startCompanion({ config: {}, generation: 'g',
     onEvent: frame => { frames.push(frame); worker.close(); }, spawnProcess: () => child });
   child.stdout.emit('data', '{"type":"ready"}\n{"type":"addressed","id":"late"}\n');
   assert.equal(frames.length, 1);
@@ -104,7 +106,7 @@ test('callback closure stops processing the rest of an already-buffered frame ba
 test('stream errors fail closed instead of throwing unhandled error events', () => {
   for (const stream of ['stdin', 'stdout', 'stderr']) {
     const child = fakeChild(), failures = [];
-    startCompanion({ config: { python: 'fake' }, generation: 'g', onEvent() {},
+    startCompanion({ config: {}, generation: 'g', onEvent() {},
       onExit: message => failures.push(message), spawnProcess: () => child });
     child[stream].emit('error', new Error('broken pipe'));
     assert.equal(failures.length, 1);

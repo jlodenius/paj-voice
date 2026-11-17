@@ -49,24 +49,34 @@ weight-redistribution claim.
 ## Preferences and extension loading
 
 Merge the `voice` object from `examples/paj.json` into the shared `~/.pi/agent/paj.json`, preserving
-`subagents`, `captain` and other addon sections. Voice reads only its own section and never rewrites
-siblings. `PAJ_VOICE_CONFIG` can explicitly select another entire shared file;
+`subagents`, `captain` and other addon sections. Voice validates only its own section and preserves
+sibling settings when saving device choices. `PAJ_VOICE_CONFIG` can explicitly select another entire shared file;
 `PI_CODING_AGENT_DIR` selects the usual agent directory. There is no legacy `voice.json` fallback.
 
-Set `voice.python` to the absolute path of `result-addon/bin/paj-voice-audio` for project
-development, and `voice.cacheDir` to an absolute project cache directory. The Nix wrapper supplies
-the bundled models, so `stt.model` and `tts.model/config` may be omitted. Explicit local model
-overrides are supported, but remote identifiers and runtime downloads are not.
+The installed package supplies its own audio executable; it is not a user preference. Cache storage
+is selected automatically as `$XDG_CACHE_HOME/paj-voice`, or `~/.cache/paj-voice` when unset. Remove
+`python` and `cacheDir` from older preferences. The internal companion protocol still receives the
+resolved cache directory, but it is never read from user settings. The Nix wrapper supplies bundled
+models, so `stt.model` and `tts.model/config` may be omitted. Explicit local model overrides are
+supported, but remote identifiers and runtime downloads are not.
 
-Choose exact PipeWire node names using `paj-voice-audio --devices`, which opens no audio stream.
+With voice off, run `/paj-voice setup` to select a microphone and headphones by readable names.
+Technical PipeWire IDs remain visible for inspection and are stored for exact, fail-closed binding.
+`/paj-voice devices` lists compatible devices without opening an audio stream or requiring valid
+preferences. Selection never arms audio. Cancelling or changing sessions discards the selection.
+Saving updates only the device IDs in the latest shared file, preserving sibling settings. An
+out-of-store symlink is resolved to its owner-controlled source without replacing the link; immutable
+Nix-store settings must be changed declaratively. Malformed or unsafe files are not overwritten;
+detected concurrent changes cause saving to fail rather than overwrite them. Initial setup requires a valid Voice section from the example.
 The example names are the tested laptop input and Sony output; adjust them for another machine.
 `audio.echoCancellation` must explicitly be `none` or `external`. `none` is the tested direct-mic,
 headphone route, not a claim of echo cancellation. An external route is never installed or loaded
 by the addon. Defaults, reconnect fallback, gains and Bluetooth profiles are not changed.
 Bluetooth microphone capture is rejected so playback need not switch into headset/call mode.
 
-The addon exports `extensions/index.ts`. Configure it through the normal Pi package/extension
-loader, or explicitly launch Pi with that extension path. Loading or reloading it does not arm
+The built package exports `extensions/index.ts`. Configure it through the normal Pi package or
+extension loader. Load the built package, not the unpackaged source extension: its executable is
+resolved relative to the immutable package installation. Loading or reloading it does not arm
 capture. For this personal checkout, the host's dormant local loader points at the single combined
 preferences file. It replaces the temporary session-pinned `voice-trial` loader, without a system
 activation. Load exactly one copy of the extension; remove the development loader when switching
@@ -85,6 +95,8 @@ one-second pre-roll and a 0.001 RMS floor alongside VAD. Long pauses can split a
 In the intended main Pi TUI session:
 
 ```text
+/paj-voice setup
+/paj-voice devices
 /paj-voice on
 /paj-voice status
 /paj-voice mute

@@ -17,7 +17,7 @@ from .speech import SpeechInference
 def validate(value):
     if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
         raise ValueError("Expected version 1 open-mic preferences")
-    if set(value) - {"version", "languages", "responseLanguage", "python", "cacheDir", "stt", "tts", "audio", "turn"}:
+    if set(value) - {"version", "languages", "responseLanguage", "cacheDir", "stt", "tts", "audio", "turn"}:
         raise ValueError("Unsupported voice fields; remove wake phrases and legacy prefix settings")
     if value.get("languages", ["en"]) != ["en"] or value.get("responseLanguage", "en") != "en":
         raise ValueError("Only English speech is supported")
@@ -61,7 +61,7 @@ def validate(value):
             raise ValueError("Invalid utterance timing or speech threshold")
     cache = value.get("cacheDir")
     if not isinstance(cache, str) or not Path(cache).is_absolute():
-        raise ValueError("An absolute project cacheDir is required")
+        raise ValueError("The resolved runtime cache directory must be absolute")
     config.update(stt=stt, tts=tts, audio=dict(audio), turn=turn)
     return config
 
@@ -163,7 +163,7 @@ class Runtime:
             cache = Path(config["cacheDir"])
             cache.mkdir(parents=True, exist_ok=True, mode=0o700)
             if cache.is_symlink() or cache.stat().st_uid != os.getuid():
-                raise ValueError("Project cache must be an owned directory, not a symlink")
+                raise ValueError("Runtime cache must be an owned directory, not a symlink")
             os.environ.update(XDG_CACHE_HOME=str(cache), HF_HOME=str(cache / "huggingface"),
                               PYTHONDONTWRITEBYTECODE="1")
             self.stage = "devices"

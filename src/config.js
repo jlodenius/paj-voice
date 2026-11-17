@@ -22,7 +22,7 @@ const keys = (value, allowed, name) => {
 };
 
 export function validateConfig(value) {
-  keys(value, ['version', 'languages', 'responseLanguage', 'python', 'cacheDir', 'stt', 'tts', 'audio', 'turn'], 'unknown field; remove addressPhrases and wake/prefix settings');
+  keys(value, ['version', 'languages', 'responseLanguage', 'stt', 'tts', 'audio', 'turn'], 'unknown field; executable/cache paths are automatic; remove python, cacheDir and legacy wake settings');
   if (value.version !== 1) fail('version must be 1');
   const languages = value.languages ?? ['en'], responseLanguage = value.responseLanguage ?? 'en';
   if (!Array.isArray(languages) || languages.length !== 1 || languages[0] !== 'en' || responseLanguage !== 'en') {
@@ -54,8 +54,6 @@ export function validateConfig(value) {
   };
   return {
     version: 1, languages: ['en'], responseLanguage: 'en',
-    python: text(value.python ?? 'paj-voice-audio', 'python'),
-    cacheDir: local(value.cacheDir ?? resolve('.cache/paj-voice'), 'cacheDir'),
     stt: { ...(model ? { model } : {}), computeType },
     tts: { ...(ttsModel ? { model: ttsModel } : {}), ...(ttsConfig ? { config: ttsConfig } : {}) },
     audio: { input, output, echoCancellation: value.audio.echoCancellation },
