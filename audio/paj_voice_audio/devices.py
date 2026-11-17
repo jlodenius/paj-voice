@@ -1,0 +1,490 @@
+import array
+import ctypes
+import dataclasses
+import fcntl
+import json
+import math
+import os
+import queue
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+
+@dataclasses.dataclass(frozen=True)
+class Node:
+    name: str
+    serial: str
+    kind: str
+
+
+def command_paths():
+    paths = {name: shutil.which(name) for name in ("pw-dump", "pw-record", "pw-play")}
+    missing = [name for name, path in paths.items() if not path]
+    if missing:
+        raise RuntimeError(
+            "Install PipeWire command-line tools; missing " + ", ".join(missing)
+        )
+    return paths
+
+
+def node_properties(entry):
+    return (entry.get("info") or {}).get("props") or {}
+
+
+def select_node(entries, name, kind):
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or name != name.strip()
+        or name.lower() in ("default", "auto", "pipewire", "pulse", "0", "-1")
+        or name.startswith("@DEFAULT")
+        or (kind == "Audio/Source" and "monitor" in name.lower())
+    ):
+        raise ValueError(
+            "Select an exact native PipeWire node.name, not a default or capture monitor"
+        )
+    matches = [
+        entry
+        for entry in entries
+        if entry.get("type") == "PipeWire:Interface:Node"
+        and node_properties(entry).get("node.name") == name
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"PipeWire node {name!r} must exist exactly once")
+    entry = matches[0]
+    props = node_properties(entry)
+    if props.get("media.class") != kind:
+        raise RuntimeError(f"PipeWire node {name!r} must have media.class {kind}")
+    if entry.get("info", {}).get("state") == "error" or entry.get("info", {}).get(
+        "error"
+    ):
+        raise RuntimeError(f"PipeWire node {name!r} is in an error state")
+    if (
+        kind == "Audio/Source"
+        and str(props.get("stream.capture.sink", "false")).lower() == "true"
+    ):
+        raise ValueError("Capture monitors are not microphone sources")
+    serial = str(props.get("object.serial", ""))
+    if not serial.isascii() or not serial.isdecimal() or int(serial) <= 0:
+        raise RuntimeError(f"PipeWire node {name!r} has no stable object.serial")
+    return Node(name, serial, kind)
+
+
+class Graph:
+    def __init__(self, paths=None, run=None):
+        self.paths = paths if paths is not None else command_paths()
+        self.run = run or subprocess.run
+        self.bound = ()
+
+    def snapshot(self):
+        try:
+            result = self.run(
+                [self.paths["pw-dump"], "--no-colors"],
+                capture_output=True,
+                check=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(
+                "Cannot inspect the current user PipeWire graph with pw-dump"
+            ) from error
+        if len(result.stdout) > 16 * 1024 * 1024:
+            raise RuntimeError("PipeWire graph exceeds inspection limit")
+        entries = json.loads(result.stdout)
+        if not isinstance(entries, list):
+            raise RuntimeError("pw-dump did not return a graph array")
+        return entries
+
+    def devices(self):
+        result = []
+        entries = self.snapshot()
+        for entry in entries:
+            props = node_properties(entry)
+            name, kind = props.get("node.name"), props.get("media.class")
+            if entry.get("type") != "PipeWire:Interface:Node" or kind not in (
+                "Audio/Source",
+                "Audio/Sink",
+            ):
+                continue
+            try:
+                node = select_node(entries, name, kind)
+            except (ValueError, RuntimeError):
+                continue
+            result.append(
+                {
+                    "name": node.name,
+                    "serial": node.serial,
+                    "class": node.kind,
+                    "description": props.get("node.description", ""),
+                }
+            )
+        return result
+
+    def bind(self, source, sink):
+        entries = self.snapshot()
+        self.bound = (
+            select_node(entries, source, "Audio/Source"),
+            select_node(entries, sink, "Audio/Sink"),
+        )
+        return self.bound
+
+    def check(self):
+        entries = self.snapshot()
+        for expected in self.bound:
+            actual = select_node(entries, expected.name, expected.kind)
+            if actual != expected:
+                raise RuntimeError(
+                    f"PipeWire target {expected.name!r} was replaced; restart explicitly"
+                )
+
+
+def child_exec(parent, command):
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("Native audio child lifetime protection requires Linux")
+    # Set this in a fresh interpreter, not a preexec_fn in the threaded audio worker.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if os.getppid() != parent:
+        return 1
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "Cannot protect PipeWire child lifetime")
+    if os.getppid() != parent:
+        return 1
+    os.execv(command[0], command)
+    return 1
+
+
+class Child:
+    def __init__(self, executable, node, rate, capture):
+        properties = json.dumps(
+            {
+                "node.dont-fallback": True,
+                "node.dont-reconnect": True,
+                "node.name": "paj_voice_record" if capture else "paj_voice_play",
+            }
+        )
+        args = [
+            executable,
+            "--raw",
+            "--target",
+            node.serial,
+            "--rate",
+            str(rate),
+            "--channels",
+            "1",
+            "--format",
+            "s16",
+            "--latency",
+            "50ms",
+            "--properties",
+            properties,
+            "-",
+        ]
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                "-P",
+                "-m",
+                "paj_voice_audio.devices",
+                "--child",
+                str(os.getpid()),
+                *args,
+            ],
+            stdin=subprocess.DEVNULL if capture else subprocess.PIPE,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            start_new_session=True,
+        )
+        self.closed = False
+        self.fault = None
+        self.lock = threading.RLock()
+        self.stderr_thread = threading.Thread(
+            target=self._stderr, daemon=True, name="pipewire-errors"
+        )
+        self.stderr_thread.start()
+        if not capture:
+            fd = self.process.stdin.fileno()
+            os.set_blocking(fd, False)
+            try:
+                fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, 8192)
+            except OSError:
+                if fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ) > 65536:
+                    self.stop()
+                    raise RuntimeError("PipeWire playback pipe exceeds buffer limit")
+
+    def _stderr(self):
+        pending = b""
+        try:
+            while not self.closed:
+                data = self.process.stderr.read(4096)
+                if not data:
+                    return
+                pending = (pending + data)[-4096:]
+                if any(
+                    marker in pending.lower()
+                    for marker in (b"xrun", b"overrun", b"underrun", b"discontinu")
+                ):
+                    self.fault = (
+                        "PipeWire reported audio discontinuity; request discarded"
+                    )
+        except (OSError, ValueError):
+            if not self.closed:
+                self.fault = "PipeWire diagnostic pipe failed"
+
+    def health(self, allow_exit=False):
+        if self.fault:
+            raise RuntimeError(self.fault)
+        code = self.process.poll()
+        if not self.closed and code is not None and not (allow_exit and code == 0):
+            raise RuntimeError("PipeWire audio process exited unexpectedly")
+
+    def stop(self):
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=0.3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=1)
+            else:
+                self.process.wait(timeout=1)
+            for stream in (
+                self.process.stdin,
+                self.process.stdout,
+                self.process.stderr,
+            ):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+        if threading.current_thread() is not self.stderr_thread:
+            self.stderr_thread.join(timeout=0.2)
+
+
+class PipeSink:
+    def __init__(self, executable, node, rate, launch=Child):
+        self.executable, self.node, self.rate = executable, node, rate
+        self.launch = launch
+        self.lock = threading.RLock()
+        self.serial = 0
+        self.child = None
+        self.closed = False
+        self.draining = False
+
+    def write(self, pcm, current):
+        if len(pcm) % 2 or len(pcm) > self.rate * 2 * 60:
+            raise RuntimeError("Synthesized audio exceeds safety limit")
+        with self.lock:
+            serial = self.serial
+        pending = memoryview(pcm)
+        last_progress = time.monotonic()
+        while pending and current():
+            try:
+                with self.lock:
+                    if self.closed or serial != self.serial:
+                        return False
+                    if self.child is None:
+                        self.child = self.launch(
+                            self.executable, self.node, self.rate, False
+                        )
+                    child = self.child
+                    child.health()
+                    fd = child.process.stdin.fileno()
+                    try:
+                        count = os.write(fd, pending[:4096])
+                    except BlockingIOError:
+                        count = 0
+                    pending = pending[count:]
+                if count:
+                    last_progress = time.monotonic()
+                elif time.monotonic() - last_progress > 2:
+                    raise RuntimeError(
+                        "PipeWire playback backpressure exceeded safety limit"
+                    )
+                else:
+                    select.select([], [fd], [], 0.02)
+            except (OSError, ValueError):
+                if not current():
+                    return False
+                with self.lock:
+                    if serial != self.serial:
+                        return False
+                raise
+        valid = current()
+        with self.lock:
+            return valid and not self.closed and serial == self.serial
+
+    def drain(self, current):
+        with self.lock:
+            child = self.child
+            if child is None:
+                return
+            self.draining = True
+            child.process.stdin.close()
+        deadline = time.monotonic() + 5
+        while current() and child.process.poll() is None:
+            child.health(allow_exit=True)
+            if time.monotonic() > deadline:
+                raise RuntimeError("PipeWire playback did not drain in time")
+            time.sleep(0.02)
+        if not current():
+            return
+        child.health(allow_exit=True)
+        with self.lock:
+            if self.child is child:
+                self.child = None
+                self.draining = False
+        child.stop()
+
+    def abort(self):
+        with self.lock:
+            self.serial += 1
+            child, self.child = self.child, None
+            self.draining = False
+        if child:
+            child.stop()
+
+    def health(self):
+        with self.lock:
+            if self.child:
+                self.child.health(allow_exit=self.draining)
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+        self.abort()
+
+
+class PipeCapture:
+    def __init__(
+        self, executable, node, vad_factory, threshold, turns, fail, launch=Child
+    ):
+        self.executable, self.node = executable, node
+        self.vad = vad_factory()
+        self.threshold, self.turns, self.fail = threshold, turns, fail
+        self.launch = launch
+        self.frames = queue.Queue(maxsize=64)
+        self.closed = threading.Event()
+        self.first_pcm = threading.Event()
+        self.fault = None
+        self.child = None
+        self.threads = []
+        self.last_pcm = time.monotonic()
+
+    def start(self):
+        self.child = self.launch(self.executable, self.node, 16000, True)
+        self.last_pcm = time.monotonic()
+        self.threads = [
+            threading.Thread(target=self._read, daemon=True, name="pipewire-capture"),
+            threading.Thread(target=self._process, daemon=True, name="voice-vad"),
+        ]
+        for thread in self.threads:
+            thread.start()
+
+    def _enqueue(self, frame):
+        try:
+            self.frames.put_nowait((time.monotonic(), frame))
+        except queue.Full:
+            raise RuntimeError("Capture queue overflow; request discarded") from None
+
+    def _read(self):
+        pending = bytearray()
+        size = self.vad.chunk_bytes()
+        try:
+            while not self.closed.is_set():
+                data = os.read(self.child.process.stdout.fileno(), 4096)
+                if not data:
+                    if not self.closed.is_set():
+                        raise RuntimeError(
+                            "PipeWire capture EOF/discontinuity; request discarded"
+                        )
+                    return
+                pending.extend(data)
+                while len(pending) >= size:
+                    frame = bytes(pending[:size])
+                    del pending[:size]
+                    self.last_pcm = time.monotonic()
+                    self._enqueue(frame)
+        except (OSError, ValueError, RuntimeError) as error:
+            if not self.closed.is_set():
+                self.fault = str(error)
+        finally:
+            pending.clear()
+
+    def _process(self):
+        try:
+            while not self.closed.is_set():
+                self.health()
+                try:
+                    captured, frame = self.frames.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if time.monotonic() - captured > 2:
+                    raise RuntimeError("Capture queue is stale; request discarded")
+                samples = array.array("h", frame)
+                rms = (
+                    math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+                    / 32768
+                )
+                voiced = self.vad(frame) >= 0.5 and rms >= self.threshold
+                self.health()
+                self.first_pcm.set()
+                if not self.closed.is_set():
+                    self.turns.feed(frame, voiced)
+                del frame, samples
+        except Exception as error:
+            if not self.closed.is_set():
+                self.fail(error)
+
+    def wait_ready(self, timeout=3):
+        deadline = time.monotonic() + timeout
+        while not self.first_pcm.wait(0.05):
+            if self.closed.is_set():
+                raise RuntimeError("Capture was cancelled before receiving PCM")
+            self.health()
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    "PipeWire capture produced no PCM; check the selected microphone and PipeWire routing"
+                )
+        self.health()
+
+    def health(self):
+        if self.closed.is_set():
+            return
+        if self.fault or time.monotonic() - self.last_pcm > 2:
+            raise RuntimeError(
+                self.fault or "PipeWire capture stalled; request discarded"
+            )
+        if self.child:
+            self.child.health()
+
+    def close(self):
+        if self.closed.is_set():
+            return
+        self.closed.set()
+        if self.child:
+            self.child.stop()
+        for thread in self.threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=0.3)
+        while True:
+            try:
+                self.frames.get_nowait()
+            except queue.Empty:
+                break
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 5 or sys.argv[1] != "--child":
+        raise SystemExit("This module is an internal PipeWire child launcher")
+    raise SystemExit(child_exec(int(sys.argv[2]), sys.argv[3:]))

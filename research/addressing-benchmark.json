@@ -1,0 +1,681 @@
+{
+  "experimental": true,
+  "syntheticOnly": true,
+  "model": "fastino/gliner2-base-v1",
+  "cpuThreads": 2,
+  "fixtureSha256": "ff35e0b8ea2c2b308980ee834e57340b523a32bb5b21982f30c1ff549ca71e77",
+  "thresholds": {
+    "accept": 0.95,
+    "acceptMargin": 0.35,
+    "reject": 0.9,
+    "rejectMargin": 0.25
+  },
+  "scoreCaveat": "Independent model confidence scores, not calibrated probabilities or accuracy.",
+  "coldLoadMs": 4302.239270997234,
+  "firstInferenceMs": 430.7089209323749,
+  "warmMedianMs": 365.429310943,
+  "splits": {
+    "development": {
+      "count": 24,
+      "falseAcceptIds": [
+        "d11"
+      ],
+      "missedAcceptIds": [
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d05",
+        "d06",
+        "d23"
+      ],
+      "rejectedPositiveIds": [],
+      "uncertainFraction": 0.9583333333333334,
+      "medianMs": 350.6966035347432,
+      "p95Ms": 430.7089209323749
+    },
+    "heldout": {
+      "count": 24,
+      "falseAcceptIds": [],
+      "missedAcceptIds": [
+        "h01",
+        "h02",
+        "h03",
+        "h04",
+        "h05",
+        "h06",
+        "h23"
+      ],
+      "rejectedPositiveIds": [],
+      "uncertainFraction": 1.0,
+      "medianMs": 410.7830090797506,
+      "p95Ms": 768.2697860291228
+    }
+  },
+  "results": [
+    {
+      "id": "d01",
+      "split": "development",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.01735507883131504,
+        "not_assistant_addressed": 0.00030185963260009885,
+        "unclear_addressee": 0.995701014995575
+      },
+      "elapsedMs": 430.7089209323749
+    },
+    {
+      "id": "d02",
+      "split": "development",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.04349372535943985,
+        "not_assistant_addressed": 0.0014434478944167495,
+        "unclear_addressee": 0.9910035133361816
+      },
+      "elapsedMs": 343.22435199283063
+    },
+    {
+      "id": "d03",
+      "split": "development",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.02061614952981472,
+        "not_assistant_addressed": 0.000294904806651175,
+        "unclear_addressee": 0.9959328770637512
+      },
+      "elapsedMs": 338.1402180530131
+    },
+    {
+      "id": "d04",
+      "split": "development",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.9314083456993103,
+        "not_assistant_addressed": 0.003468372393399477,
+        "unclear_addressee": 0.5536507964134216
+      },
+      "elapsedMs": 350.5130660487339
+    },
+    {
+      "id": "d05",
+      "split": "development",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3231470584869385,
+        "not_assistant_addressed": 0.0011734187137335539,
+        "unclear_addressee": 0.9489768743515015
+      },
+      "elapsedMs": 337.46354293543845
+    },
+    {
+      "id": "d06",
+      "split": "development",
+      "category": "followup",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.99549400806427,
+        "not_assistant_addressed": 0.0006750398315489292,
+        "unclear_addressee": 0.7038463950157166
+      },
+      "elapsedMs": 341.76441305316985
+    },
+    {
+      "id": "d07",
+      "split": "development",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0005211601965129375,
+        "not_assistant_addressed": 0.00015027968038339168,
+        "unclear_addressee": 0.9996486902236938
+      },
+      "elapsedMs": 338.1830230355263
+    },
+    {
+      "id": "d08",
+      "split": "development",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.014987945556640625,
+        "not_assistant_addressed": 0.6779929399490356,
+        "unclear_addressee": 0.36630183458328247
+      },
+      "elapsedMs": 340.6755019677803
+    },
+    {
+      "id": "d09",
+      "split": "development",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.23833677172660828,
+        "not_assistant_addressed": 0.00037068137316964567,
+        "unclear_addressee": 0.9888820052146912
+      },
+      "elapsedMs": 336.25841594766825
+    },
+    {
+      "id": "d10",
+      "split": "development",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.010163885541260242,
+        "not_assistant_addressed": 0.0023549397010356188,
+        "unclear_addressee": 0.9931697845458984
+      },
+      "elapsedMs": 345.61349893920124
+    },
+    {
+      "id": "d11",
+      "split": "development",
+      "category": "game",
+      "expected": "reject",
+      "decision": "accept",
+      "scores": {
+        "assistant_addressed": 0.9524603486061096,
+        "not_assistant_addressed": 0.0024819662794470787,
+        "unclear_addressee": 0.428909033536911
+      },
+      "elapsedMs": 342.91141002904624
+    },
+    {
+      "id": "d12",
+      "split": "development",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.002954819006845355,
+        "not_assistant_addressed": 0.00047301535960286856,
+        "unclear_addressee": 0.9983564019203186
+      },
+      "elapsedMs": 349.1289019584656
+    },
+    {
+      "id": "d13",
+      "split": "development",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.07558034360408783,
+        "not_assistant_addressed": 0.0008112716022878885,
+        "unclear_addressee": 0.990016520023346
+      },
+      "elapsedMs": 344.9932299554348
+    },
+    {
+      "id": "d14",
+      "split": "development",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.8086787462234497,
+        "not_assistant_addressed": 0.038312721997499466,
+        "unclear_addressee": 0.5594441890716553
+      },
+      "elapsedMs": 362.12995694950223
+    },
+    {
+      "id": "d15",
+      "split": "development",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0022701069246977568,
+        "not_assistant_addressed": 0.7296618223190308,
+        "unclear_addressee": 0.19715341925621033
+      },
+      "elapsedMs": 362.5096930190921
+    },
+    {
+      "id": "d16",
+      "split": "development",
+      "category": "incomplete",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.00011107507452834398,
+        "not_assistant_addressed": 5.499159306054935e-05,
+        "unclear_addressee": 0.9999604225158691
+      },
+      "elapsedMs": 353.11067407019436
+    },
+    {
+      "id": "d17",
+      "split": "development",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0006066686473786831,
+        "not_assistant_addressed": 0.00016205986321438104,
+        "unclear_addressee": 0.9996678829193115
+      },
+      "elapsedMs": 350.8801410207525
+    },
+    {
+      "id": "d18",
+      "split": "development",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0008147381013259292,
+        "not_assistant_addressed": 0.00015876590623520315,
+        "unclear_addressee": 0.999574601650238
+      },
+      "elapsedMs": 352.3116969736293
+    },
+    {
+      "id": "d19",
+      "split": "development",
+      "category": "ambiguous-context",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.06227535009384155,
+        "not_assistant_addressed": 0.003026816062629223,
+        "unclear_addressee": 0.9814932942390442
+      },
+      "elapsedMs": 422.432387014851
+    },
+    {
+      "id": "d20",
+      "split": "development",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.8457894921302795,
+        "not_assistant_addressed": 0.0012199163902550936,
+        "unclear_addressee": 0.918004035949707
+      },
+      "elapsedMs": 462.46528800111264
+    },
+    {
+      "id": "d21",
+      "split": "development",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.003574912203475833,
+        "not_assistant_addressed": 0.00043758651008829474,
+        "unclear_addressee": 0.9985199570655823
+      },
+      "elapsedMs": 355.7172000873834
+    },
+    {
+      "id": "d22",
+      "split": "development",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0029054968617856503,
+        "not_assistant_addressed": 0.0006099118036217988,
+        "unclear_addressee": 0.998281717300415
+      },
+      "elapsedMs": 365.58886198326945
+    },
+    {
+      "id": "d23",
+      "split": "development",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.010614881291985512,
+        "not_assistant_addressed": 0.00037980632623657584,
+        "unclear_addressee": 0.9970671534538269
+      },
+      "elapsedMs": 405.52468795794994
+    },
+    {
+      "id": "d24",
+      "split": "development",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0029970419127494097,
+        "not_assistant_addressed": 0.0019061029888689518,
+        "unclear_addressee": 0.9965046644210815
+      },
+      "elapsedMs": 351.41938808374107
+    },
+    {
+      "id": "h01",
+      "split": "heldout",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0007857681484892964,
+        "not_assistant_addressed": 0.00018443127919454128,
+        "unclear_addressee": 0.9996188879013062
+      },
+      "elapsedMs": 357.57369396742433
+    },
+    {
+      "id": "h02",
+      "split": "heldout",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.002447863109409809,
+        "not_assistant_addressed": 0.00018277447088621557,
+        "unclear_addressee": 0.9992965459823608
+      },
+      "elapsedMs": 405.3785870783031
+    },
+    {
+      "id": "h03",
+      "split": "heldout",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.1286088228225708,
+        "not_assistant_addressed": 0.0014466432621702552,
+        "unclear_addressee": 0.9766020178794861
+      },
+      "elapsedMs": 386.30390202160925
+    },
+    {
+      "id": "h04",
+      "split": "heldout",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.011555524542927742,
+        "not_assistant_addressed": 0.0004107204731553793,
+        "unclear_addressee": 0.9970965385437012
+      },
+      "elapsedMs": 539.5900389412418
+    },
+    {
+      "id": "h05",
+      "split": "heldout",
+      "category": "followup",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.635810375213623,
+        "not_assistant_addressed": 0.0008531761122867465,
+        "unclear_addressee": 0.917326033115387
+      },
+      "elapsedMs": 352.89957490749657
+    },
+    {
+      "id": "h06",
+      "split": "heldout",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.2561187148094177,
+        "not_assistant_addressed": 0.00024294800823554397,
+        "unclear_addressee": 0.9896061420440674
+      },
+      "elapsedMs": 356.8808629643172
+    },
+    {
+      "id": "h07",
+      "split": "heldout",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0005492877680808306,
+        "not_assistant_addressed": 0.00013301758735906333,
+        "unclear_addressee": 0.999678373336792
+      },
+      "elapsedMs": 722.7943049510941
+    },
+    {
+      "id": "h08",
+      "split": "heldout",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.1099734753370285,
+        "not_assistant_addressed": 0.26144444942474365,
+        "unclear_addressee": 0.511642575263977
+      },
+      "elapsedMs": 416.18743108119816
+    },
+    {
+      "id": "h09",
+      "split": "heldout",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.004347361624240875,
+        "not_assistant_addressed": 0.00037784717278555036,
+        "unclear_addressee": 0.9978916049003601
+      },
+      "elapsedMs": 475.10887996759266
+    },
+    {
+      "id": "h10",
+      "split": "heldout",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0012494053225964308,
+        "not_assistant_addressed": 0.00046585098607465625,
+        "unclear_addressee": 0.9991773962974548
+      },
+      "elapsedMs": 426.3494359329343
+    },
+    {
+      "id": "h11",
+      "split": "heldout",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.1937902867794037,
+        "not_assistant_addressed": 0.0008751795394346118,
+        "unclear_addressee": 0.9806305766105652
+      },
+      "elapsedMs": 420.21603405009955
+    },
+    {
+      "id": "h12",
+      "split": "heldout",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0030471121426671743,
+        "not_assistant_addressed": 0.0003618176269810647,
+        "unclear_addressee": 0.9984752535820007
+      },
+      "elapsedMs": 365.429310943
+    },
+    {
+      "id": "h13",
+      "split": "heldout",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.021564245223999023,
+        "not_assistant_addressed": 0.00041120938840322196,
+        "unclear_addressee": 0.995652437210083
+      },
+      "elapsedMs": 375.56406296789646
+    },
+    {
+      "id": "h14",
+      "split": "heldout",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.48217272758483887,
+        "not_assistant_addressed": 0.0013142613461241126,
+        "unclear_addressee": 0.9834850430488586
+      },
+      "elapsedMs": 429.1877370560542
+    },
+    {
+      "id": "h15",
+      "split": "heldout",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.015923351049423218,
+        "not_assistant_addressed": 0.011124672368168831,
+        "unclear_addressee": 0.9724894165992737
+      },
+      "elapsedMs": 370.71575003210455
+    },
+    {
+      "id": "h16",
+      "split": "heldout",
+      "category": "incomplete",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.005333308130502701,
+        "not_assistant_addressed": 0.0004077169287484139,
+        "unclear_addressee": 0.9978048205375671
+      },
+      "elapsedMs": 355.36478203721344
+    },
+    {
+      "id": "h17",
+      "split": "heldout",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0006667957059107721,
+        "not_assistant_addressed": 0.00017106792074628174,
+        "unclear_addressee": 0.9996278285980225
+      },
+      "elapsedMs": 368.5488379560411
+    },
+    {
+      "id": "h18",
+      "split": "heldout",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.00514332577586174,
+        "not_assistant_addressed": 0.00033959466964006424,
+        "unclear_addressee": 0.9977815747261047
+      },
+      "elapsedMs": 482.272180961445
+    },
+    {
+      "id": "h19",
+      "split": "heldout",
+      "category": "ambiguous-context",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0008117313263937831,
+        "not_assistant_addressed": 0.00020050151215400547,
+        "unclear_addressee": 0.9994785189628601
+      },
+      "elapsedMs": 395.4202670138329
+    },
+    {
+      "id": "h20",
+      "split": "heldout",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.4416387379169464,
+        "not_assistant_addressed": 0.0010968345450237393,
+        "unclear_addressee": 0.9693357348442078
+      },
+      "elapsedMs": 405.09492508135736
+    },
+    {
+      "id": "h21",
+      "split": "heldout",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0026276358403265476,
+        "not_assistant_addressed": 0.0003686572890728712,
+        "unclear_addressee": 0.9988860487937927
+      },
+      "elapsedMs": 715.4181150253862
+    },
+    {
+      "id": "h22",
+      "split": "heldout",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.6560845375061035,
+        "not_assistant_addressed": 0.0030626668594777584,
+        "unclear_addressee": 0.9508985280990601
+      },
+      "elapsedMs": 768.2697860291228
+    },
+    {
+      "id": "h23",
+      "split": "heldout",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0017086626030504704,
+        "not_assistant_addressed": 0.0002314047160325572,
+        "unclear_addressee": 0.999144434928894
+      },
+      "elapsedMs": 852.928068023175
+    },
+    {
+      "id": "h24",
+      "split": "heldout",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.034933898597955704,
+        "not_assistant_addressed": 0.0005402491660788655,
+        "unclear_addressee": 0.9973345994949341
+      },
+      "elapsedMs": 490.70836801547557
+    }
+  ]
+}

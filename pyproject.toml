@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paj-voice-audio"
+version = "0.1.0"
+description = "Local, inherited-pipe audio companion for paj-voice"
+requires-python = ">=3.11"
+dependencies = [
+  "faster-whisper>=1.2.1,<2",
+  "piper-tts>=1.8,<2",
+  "numpy>=1.24",
+  "pysilero-vad>=3.4,<4",
+]
+
+[project.scripts]
+paj-voice-audio = "paj_voice_audio.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "audio"}
+
+[tool.setuptools.packages.find]
+where = ["audio"]
+include = ["paj_voice_audio*"]

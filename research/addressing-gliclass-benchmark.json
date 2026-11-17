@@ -1,0 +1,695 @@
+{
+  "experimental": true,
+  "syntheticOnly": true,
+  "model": "knowledgator/gliclass-edge-v3.0",
+  "cpuThreads": 2,
+  "fixtureSha256": "ff35e0b8ea2c2b308980ee834e57340b523a32bb5b21982f30c1ff549ca71e77",
+  "thresholds": {
+    "accept": 0.95,
+    "acceptMargin": 0.35,
+    "reject": 0.9,
+    "rejectMargin": 0.25
+  },
+  "scoreCaveat": "Independent model confidence scores, not calibrated probabilities or accuracy.",
+  "coldLoadMs": 2723.39691396337,
+  "firstInferenceMs": 29.107231996022165,
+  "warmMedianMs": 37.043762975372374,
+  "splits": {
+    "development": {
+      "count": 24,
+      "falseAcceptIds": [],
+      "missedAcceptIds": [
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d05",
+        "d06",
+        "d23"
+      ],
+      "rejectedPositiveIds": [],
+      "uncertainFraction": 1.0,
+      "medianMs": 36.711509979795665,
+      "p95Ms": 46.3307190220803,
+      "acceptFraction": 0.0,
+      "rejectFraction": 0.0,
+      "falseAcceptFractionOfNonPositive": 0.0,
+      "missedPositiveFraction": 1.0
+    },
+    "heldout": {
+      "count": 24,
+      "falseAcceptIds": [],
+      "missedAcceptIds": [
+        "h01",
+        "h02",
+        "h03",
+        "h04",
+        "h05",
+        "h06",
+        "h23"
+      ],
+      "rejectedPositiveIds": [],
+      "uncertainFraction": 1.0,
+      "medianMs": 37.695985462050885,
+      "p95Ms": 44.57074496895075,
+      "acceptFraction": 0.0,
+      "rejectFraction": 0.0,
+      "falseAcceptFractionOfNonPositive": 0.0,
+      "missedPositiveFraction": 1.0
+    }
+  },
+  "results": [
+    {
+      "id": "d01",
+      "split": "development",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.342640221118927,
+        "not_assistant_addressed": 0.7728304862976074,
+        "unclear_addressee": 0.46822330355644226
+      },
+      "elapsedMs": 29.107231996022165
+    },
+    {
+      "id": "d02",
+      "split": "development",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.0974535197019577,
+        "not_assistant_addressed": 0.6661388278007507,
+        "unclear_addressee": 0.9282865524291992
+      },
+      "elapsedMs": 22.07371301483363
+    },
+    {
+      "id": "d03",
+      "split": "development",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3633798658847809,
+        "not_assistant_addressed": 0.729047954082489,
+        "unclear_addressee": 0.7308603525161743
+      },
+      "elapsedMs": 21.42385207116604
+    },
+    {
+      "id": "d04",
+      "split": "development",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.23603937029838562,
+        "not_assistant_addressed": 0.86264967918396,
+        "unclear_addressee": 0.9961814880371094
+      },
+      "elapsedMs": 46.402357053011656
+    },
+    {
+      "id": "d05",
+      "split": "development",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.27030348777770996,
+        "not_assistant_addressed": 0.6686455607414246,
+        "unclear_addressee": 0.28228265047073364
+      },
+      "elapsedMs": 37.987780990079045
+    },
+    {
+      "id": "d06",
+      "split": "development",
+      "category": "followup",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.18624071776866913,
+        "not_assistant_addressed": 0.7784947752952576,
+        "unclear_addressee": 0.9972035884857178
+      },
+      "elapsedMs": 46.3307190220803
+    },
+    {
+      "id": "d07",
+      "split": "development",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3890099823474884,
+        "not_assistant_addressed": 0.7916197180747986,
+        "unclear_addressee": 0.972069501876831
+      },
+      "elapsedMs": 38.68378000333905
+    },
+    {
+      "id": "d08",
+      "split": "development",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.34579789638519287,
+        "not_assistant_addressed": 0.9096525311470032,
+        "unclear_addressee": 0.6646979451179504
+      },
+      "elapsedMs": 36.999947973527014
+    },
+    {
+      "id": "d09",
+      "split": "development",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.30029797554016113,
+        "not_assistant_addressed": 0.7312620878219604,
+        "unclear_addressee": 0.504489541053772
+      },
+      "elapsedMs": 35.98461707588285
+    },
+    {
+      "id": "d10",
+      "split": "development",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.37562206387519836,
+        "not_assistant_addressed": 0.8453691005706787,
+        "unclear_addressee": 0.7094855308532715
+      },
+      "elapsedMs": 38.656299002468586
+    },
+    {
+      "id": "d11",
+      "split": "development",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3992610573768616,
+        "not_assistant_addressed": 0.7755597233772278,
+        "unclear_addressee": 0.005792840849608183
+      },
+      "elapsedMs": 36.60610597580671
+    },
+    {
+      "id": "d12",
+      "split": "development",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.2892301678657532,
+        "not_assistant_addressed": 0.7237005233764648,
+        "unclear_addressee": 0.9939139485359192
+      },
+      "elapsedMs": 35.21695209201425
+    },
+    {
+      "id": "d13",
+      "split": "development",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.26548677682876587,
+        "not_assistant_addressed": 0.6870431303977966,
+        "unclear_addressee": 0.4473043382167816
+      },
+      "elapsedMs": 35.790284047834575
+    },
+    {
+      "id": "d14",
+      "split": "development",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3469565808773041,
+        "not_assistant_addressed": 0.7523593306541443,
+        "unclear_addressee": 0.8742022514343262
+      },
+      "elapsedMs": 37.457862053997815
+    },
+    {
+      "id": "d15",
+      "split": "development",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.24296298623085022,
+        "not_assistant_addressed": 0.9208645224571228,
+        "unclear_addressee": 0.8273319005966187
+      },
+      "elapsedMs": 36.689230939373374
+    },
+    {
+      "id": "d16",
+      "split": "development",
+      "category": "incomplete",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.33208179473876953,
+        "not_assistant_addressed": 0.701904833316803,
+        "unclear_addressee": 0.6716041564941406
+      },
+      "elapsedMs": 33.592342981137335
+    },
+    {
+      "id": "d17",
+      "split": "development",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.38244280219078064,
+        "not_assistant_addressed": 0.7334005236625671,
+        "unclear_addressee": 0.8384426832199097
+      },
+      "elapsedMs": 35.671243094839156
+    },
+    {
+      "id": "d18",
+      "split": "development",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.33185434341430664,
+        "not_assistant_addressed": 0.7141069173812866,
+        "unclear_addressee": 0.898510217666626
+      },
+      "elapsedMs": 35.66489100921899
+    },
+    {
+      "id": "d19",
+      "split": "development",
+      "category": "ambiguous-context",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3280624747276306,
+        "not_assistant_addressed": 0.8580396175384521,
+        "unclear_addressee": 0.9941397905349731
+      },
+      "elapsedMs": 44.528065947815776
+    },
+    {
+      "id": "d20",
+      "split": "development",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.1971629559993744,
+        "not_assistant_addressed": 0.8094953298568726,
+        "unclear_addressee": 0.9959484934806824
+      },
+      "elapsedMs": 44.030811986885965
+    },
+    {
+      "id": "d21",
+      "split": "development",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.20720310509204865,
+        "not_assistant_addressed": 0.8231162428855896,
+        "unclear_addressee": 0.9959233999252319
+      },
+      "elapsedMs": 43.79139991942793
+    },
+    {
+      "id": "d22",
+      "split": "development",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.4629771411418915,
+        "not_assistant_addressed": 0.8330478072166443,
+        "unclear_addressee": 0.8354683518409729
+      },
+      "elapsedMs": 34.67669105157256
+    },
+    {
+      "id": "d23",
+      "split": "development",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3578125238418579,
+        "not_assistant_addressed": 0.8157974481582642,
+        "unclear_addressee": 0.8768497705459595
+      },
+      "elapsedMs": 36.733789020217955
+    },
+    {
+      "id": "d24",
+      "split": "development",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.41358283162117004,
+        "not_assistant_addressed": 0.6950340867042542,
+        "unclear_addressee": 0.5436388850212097
+      },
+      "elapsedMs": 36.79271705914289
+    },
+    {
+      "id": "h01",
+      "split": "heldout",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3690153956413269,
+        "not_assistant_addressed": 0.7403181791305542,
+        "unclear_addressee": 0.9297557473182678
+      },
+      "elapsedMs": 31.34221094660461
+    },
+    {
+      "id": "h02",
+      "split": "heldout",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.43965837359428406,
+        "not_assistant_addressed": 0.7809186577796936,
+        "unclear_addressee": 0.8469895124435425
+      },
+      "elapsedMs": 38.9707509893924
+    },
+    {
+      "id": "h03",
+      "split": "heldout",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.17796318233013153,
+        "not_assistant_addressed": 0.8249058723449707,
+        "unclear_addressee": 0.9930171966552734
+      },
+      "elapsedMs": 44.20400608796626
+    },
+    {
+      "id": "h04",
+      "split": "heldout",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3211405873298645,
+        "not_assistant_addressed": 0.7208319902420044,
+        "unclear_addressee": 0.9549089670181274
+      },
+      "elapsedMs": 38.90340297948569
+    },
+    {
+      "id": "h05",
+      "split": "heldout",
+      "category": "followup",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.1419615000486374,
+        "not_assistant_addressed": 0.7938417196273804,
+        "unclear_addressee": 0.9965840578079224
+      },
+      "elapsedMs": 44.27934100385755
+    },
+    {
+      "id": "h06",
+      "split": "heldout",
+      "category": "direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.26508376002311707,
+        "not_assistant_addressed": 0.7809681296348572,
+        "unclear_addressee": 0.9898263216018677
+      },
+      "elapsedMs": 43.76079502981156
+    },
+    {
+      "id": "h07",
+      "split": "heldout",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.4137210547924042,
+        "not_assistant_addressed": 0.7530857920646667,
+        "unclear_addressee": 0.9853094220161438
+      },
+      "elapsedMs": 37.655174965038896
+    },
+    {
+      "id": "h08",
+      "split": "heldout",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.37240245938301086,
+        "not_assistant_addressed": 0.7078113555908203,
+        "unclear_addressee": 0.6518378257751465
+      },
+      "elapsedMs": 36.71679203398526
+    },
+    {
+      "id": "h09",
+      "split": "heldout",
+      "category": "partner-topic",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3570843040943146,
+        "not_assistant_addressed": 0.7404133081436157,
+        "unclear_addressee": 0.9817516207695007
+      },
+      "elapsedMs": 37.043762975372374
+    },
+    {
+      "id": "h10",
+      "split": "heldout",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3792102336883545,
+        "not_assistant_addressed": 0.7818010449409485,
+        "unclear_addressee": 0.9853530526161194
+      },
+      "elapsedMs": 36.67884389869869
+    },
+    {
+      "id": "h11",
+      "split": "heldout",
+      "category": "game",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.40422603487968445,
+        "not_assistant_addressed": 0.7886930704116821,
+        "unclear_addressee": 0.8284439444541931
+      },
+      "elapsedMs": 36.92166006658226
+    },
+    {
+      "id": "h12",
+      "split": "heldout",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3182508647441864,
+        "not_assistant_addressed": 0.7069976925849915,
+        "unclear_addressee": 0.9798351526260376
+      },
+      "elapsedMs": 34.71635503228754
+    },
+    {
+      "id": "h13",
+      "split": "heldout",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3060348927974701,
+        "not_assistant_addressed": 0.7251566648483276,
+        "unclear_addressee": 0.9850141406059265
+      },
+      "elapsedMs": 34.62340193800628
+    },
+    {
+      "id": "h14",
+      "split": "heldout",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.7879706025123596,
+        "not_assistant_addressed": 0.7233080267906189,
+        "unclear_addressee": 0.9945534467697144
+      },
+      "elapsedMs": 38.57251803856343
+    },
+    {
+      "id": "h15",
+      "split": "heldout",
+      "category": "quoted",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.402515172958374,
+        "not_assistant_addressed": 0.7507390975952148,
+        "unclear_addressee": 0.961305558681488
+      },
+      "elapsedMs": 37.87999600172043
+    },
+    {
+      "id": "h16",
+      "split": "heldout",
+      "category": "incomplete",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.31707850098609924,
+        "not_assistant_addressed": 0.7760796546936035,
+        "unclear_addressee": 0.23603461682796478
+      },
+      "elapsedMs": 37.99948305822909
+    },
+    {
+      "id": "h17",
+      "split": "heldout",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.43756601214408875,
+        "not_assistant_addressed": 0.6750765442848206,
+        "unclear_addressee": 0.772205650806427
+      },
+      "elapsedMs": 35.9303979203105
+    },
+    {
+      "id": "h18",
+      "split": "heldout",
+      "category": "ambiguous",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.4176538586616516,
+        "not_assistant_addressed": 0.7926741242408752,
+        "unclear_addressee": 0.9894557595252991
+      },
+      "elapsedMs": 34.43744592368603
+    },
+    {
+      "id": "h19",
+      "split": "heldout",
+      "category": "ambiguous-context",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.2531147599220276,
+        "not_assistant_addressed": 0.859049379825592,
+        "unclear_addressee": 0.9958906173706055
+      },
+      "elapsedMs": 44.92265498265624
+    },
+    {
+      "id": "h20",
+      "split": "heldout",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.22785204648971558,
+        "not_assistant_addressed": 0.8131505250930786,
+        "unclear_addressee": 0.9945429563522339
+      },
+      "elapsedMs": 44.57074496895075
+    },
+    {
+      "id": "h21",
+      "split": "heldout",
+      "category": "followup",
+      "expected": "uncertain",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.19047310948371887,
+        "not_assistant_addressed": 0.787808895111084,
+        "unclear_addressee": 0.9969887137413025
+      },
+      "elapsedMs": 42.17965598218143
+    },
+    {
+      "id": "h22",
+      "split": "heldout",
+      "category": "partner",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.3594895005226135,
+        "not_assistant_addressed": 0.8420328497886658,
+        "unclear_addressee": 0.6093274354934692
+      },
+      "elapsedMs": 36.917782039381564
+    },
+    {
+      "id": "h23",
+      "split": "heldout",
+      "category": "wakefree-direct",
+      "expected": "accept",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.5619032979011536,
+        "not_assistant_addressed": 0.867080569267273,
+        "unclear_addressee": 0.9064812064170837
+      },
+      "elapsedMs": 37.736795959062874
+    },
+    {
+      "id": "h24",
+      "split": "heldout",
+      "category": "selftalk",
+      "expected": "reject",
+      "decision": "uncertain",
+      "scores": {
+        "assistant_addressed": 0.31163981556892395,
+        "not_assistant_addressed": 0.5226213335990906,
+        "unclear_addressee": 0.6541350483894348
+      },
+      "elapsedMs": 37.11184591520578
+    }
+  ],
+  "backend": "gliclass",
+  "splitReuse": true,
+  "splitCaveat": "REUSED authored splits inspected in the GLiNER2 study; not independent heldout.",
+  "labelDescriptions": {
+    "assistant_addressed": "The speaker is directly asking the local coding assistant to answer or act now, not merely mentioning an assistant or quoting a command.",
+    "not_assistant_addressed": "The speaker is addressing a partner or game teammate, talking to themselves, or quoting or reporting an assistant command rather than issuing it.",
+    "unclear_addressee": "The utterance is ambiguous or incomplete: it could address either a person or the coding assistant, and the intended listener needs clarification."
+  }
+}

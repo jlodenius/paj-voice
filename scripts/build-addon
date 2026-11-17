@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+nix-build --no-build-output --expr 'let pkgs = import ./nix/lab-pkgs.nix; in pkgs.callPackage ./nix/package.nix {}' -o result-addon
+export XDG_CACHE_HOME="$PWD/.cache/runtime"
+export HF_HOME="$XDG_CACHE_HOME/huggingface"
+exec ./result-addon/bin/paj-voice-audio --check
