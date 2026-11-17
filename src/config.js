@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export function configPath(env = process.env) {
   if (env.PAJ_VOICE_CONFIG) return env.PAJ_VOICE_CONFIG;
@@ -13,54 +13,56 @@ export function configPath(env = process.env) {
 
 const fail = message => { throw new Error(`Invalid voice configuration: ${message}`); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
-const text = (value, name, max = 1024) => {
-  if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u001f\u007f]/u.test(value)) fail(name);
-  return value;
-};
 const keys = (value, allowed, name) => {
   if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) fail(name);
 };
+const number = (value, fallback, low, high, name) => {
+  const result = value === undefined ? fallback : value;
+  if (typeof result !== 'number' || !Number.isFinite(result) || result < low || result > high) fail(name);
+  return result;
+};
+const boolean = (value, fallback, name) => {
+  if (value !== undefined && typeof value !== 'boolean') fail(name);
+  return value ?? fallback;
+};
+const receipt = (value, fallback, name) => {
+  const result = value === undefined ? fallback : value;
+  if (typeof result !== 'string' || !result.trim() || result.length > 60 ||
+      result.trim().split(/\s+/u).length > 8 || /[\u0000-\u001f\u007f-\u009f]/u.test(result)) fail(name);
+  return result.trim();
+};
 
 export function validateConfig(value) {
-  keys(value, ['version', 'languages', 'responseLanguage', 'stt', 'tts', 'audio', 'turn'], 'unknown field; executable/cache paths are automatic; remove python, cacheDir and legacy wake settings');
-  if (value.version !== 1) fail('version must be 1');
-  const languages = value.languages ?? ['en'], responseLanguage = value.responseLanguage ?? 'en';
-  if (!Array.isArray(languages) || languages.length !== 1 || languages[0] !== 'en' || responseLanguage !== 'en') {
-    fail('this runtime supports English only');
-  }
-  const stt = value.stt ?? {}, tts = value.tts ?? {};
-  keys(stt, ['model', 'computeType'], 'stt; recognition hints are not supported');
-  keys(tts, ['model', 'config'], 'tts');
-  const local = (path, name) => {
-    if (path === undefined) return undefined;
-    if (!isAbsolute(text(path, name))) fail(name + ' must be an absolute local path');
-    return path;
-  };
-  const model = local(stt.model, 'stt.model');
-  const ttsModel = local(tts.model, 'tts.model');
-  const ttsConfig = local(tts.config ?? (ttsModel ? ttsModel + '.json' : undefined), 'tts.config');
-  const computeType = stt.computeType ?? 'int8';
-  if (!['int8', 'float32'].includes(computeType)) fail('stt.computeType');
-  keys(value.audio, ['input', 'output', 'echoCancellation'], 'audio');
-  const input = text(value.audio.input, 'audio.input'), output = text(value.audio.output, 'audio.output');
-  if (input === 'default' || output === 'default' || input.startsWith('bluez')) fail('use exact nodes and a non-Bluetooth microphone');
-  if (!['none', 'external'].includes(value.audio.echoCancellation)) fail('audio.echoCancellation must explicitly be none or external; headphones are required');
-  const turn = value.turn ?? {};
-  keys(turn, ['silenceMs', 'maxSeconds', 'speechThreshold'], 'turn; prefix detection is not supported');
-  const number = (key, fallback, min, max) => {
-    const result = turn[key] ?? fallback;
-    if (!Number.isFinite(result) || result < min || result > max) fail('turn.' + key);
-    return result;
-  };
+  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback'],
+    'use only voice, volume, speed, pauseSeconds, maxMessageSeconds and feedback; device IDs and runtime tuning are not preferences');
+  const voice = value.voice === undefined ? 'ljspeech' : value.voice;
+  if (typeof voice !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/u.test(voice)) fail('voice must name an installed voice');
+  const feedback = value.feedback === undefined ? {} : value.feedback;
+  keys(feedback, ['receipt', 'steeringReceipt', 'progressUpdates', 'idleReminders'], 'feedback');
   return {
-    version: 1, languages: ['en'], responseLanguage: 'en',
-    stt: { ...(model ? { model } : {}), computeType },
-    tts: { ...(ttsModel ? { model: ttsModel } : {}), ...(ttsConfig ? { config: ttsConfig } : {}) },
-    audio: { input, output, echoCancellation: value.audio.echoCancellation },
-    turn: { silenceMs: number('silenceMs', 800, 300, 5000),
-      maxSeconds: number('maxSeconds', 12, 5, 30),
-      speechThreshold: number('speechThreshold', 0.001, 0.001, 0.2) },
+    voice,
+    volume: number(value.volume, 40, 0, 100, 'volume must be 0–100'),
+    speed: number(value.speed, 1, 0.5, 2, 'speed must be 0.5–2'),
+    pauseSeconds: number(value.pauseSeconds, 0.8, 0.3, 5, 'pauseSeconds must be 0.3–5'),
+    maxMessageSeconds: number(value.maxMessageSeconds, 20, 5, 30, 'maxMessageSeconds must be 5–30'),
+    feedback: {
+      receipt: receipt(feedback.receipt, 'Got it.', 'feedback.receipt must be 1–8 words, at most 60 characters'),
+      steeringReceipt: receipt(feedback.steeringReceipt, 'Steering received.',
+        'feedback.steeringReceipt must be 1–8 words, at most 60 characters'),
+      progressUpdates: boolean(feedback.progressUpdates, true, 'feedback.progressUpdates'),
+      idleReminders: boolean(feedback.idleReminders, true, 'feedback.idleReminders'),
+    },
   };
+}
+
+export function runtimeConfig(preferences, devices) {
+  const settings = validateConfig(preferences);
+  return { version: 1, languages: ['en'], responseLanguage: 'en',
+    stt: { computeType: 'int8' },
+    tts: { voice: settings.voice, volume: settings.volume / 100, lengthScale: 1 / settings.speed },
+    audio: { input: devices.input, output: devices.output, echoCancellation: 'none' },
+    turn: { silenceMs: settings.pauseSeconds * 1000, maxSeconds: settings.maxMessageSeconds,
+      speechThreshold: 0.001 } };
 }
 
 export function loadConfig(path = configPath()) {
@@ -71,6 +73,5 @@ export function loadConfig(path = configPath()) {
   if (!Object.hasOwn(value, 'voice')) {
     fail(`missing voice section in ${path}; merge a "voice" object from examples/paj.json into this file`);
   }
-  if (!object(value.voice)) fail(`voice section in ${path} must be an object`);
   return validateConfig(value.voice);
 }

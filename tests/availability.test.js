@@ -42,6 +42,31 @@ function fixture(overrides = {}) {
   return { controller, event, advance, speeches, finish, timers };
 }
 
+test('user feedback switches disable unsolicited notices and receipt wording stays configurable', () => {
+  const f = fixture();
+  f.controller.stop();
+  f.controller.configureFeedback({ receipt: 'Received.', steeringReceipt: 'Updating direction.',
+    progressUpdates: false, idleReminders: false });
+  f.controller.start('session');
+  f.event({ type: 'ready' });
+  f.advance(600_000);
+  assert.equal(f.speeches().length, 0);
+  f.event({ type: 'addressed', id: 'first' });
+  f.event({ type: 'utterance', id: 'first', text: 'A request.' });
+  assert.equal(f.speeches().at(-1).text, 'Received.');
+  f.finish();
+  f.controller.newRun();
+  f.advance(600_000);
+  assert.equal(f.speeches().length, 1);
+  f.controller.settled();
+  assert.equal(f.speeches().at(-1).key, 'fallback');
+  f.finish();
+  const before = f.speeches().length;
+  f.advance(600_000);
+  assert.equal(f.speeches().length, before);
+  f.controller.dispose();
+});
+
 test('long work gets minute-spaced progress from active tool status, not stale output', () => {
   const f = fixture();
   f.controller.newRun();

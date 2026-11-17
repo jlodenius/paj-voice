@@ -33,10 +33,11 @@ async function fixture(t, fakeAudio = true) {
   }
   writeFileSync(join(agent, 'paj.json'), JSON.stringify({
     subagents: { opaqueFixture: true }, captain: { opaqueFixture: true },
-    voice: { version: 1, languages: ['en'], responseLanguage: 'en',
-      stt: { model: '/nonexistent/stt' }, tts: { model: '/nonexistent/tts.onnx' },
-      audio: { input: 'fake', output: 'fake', echoCancellation: 'external' } },
+    voice: {},
   }));
+  mkdirSync(join(root, 'config/paj-voice'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(root, 'config/paj-voice/devices.json'),
+    JSON.stringify({ version: 1, input: 'fake', output: 'fake' }), { mode: 0o600 });
   writeFileSync(join(agent, 'settings.json'), JSON.stringify({ defaultProjectTrust: 'always',
     cacheWarming: 'off', enableInstallTelemetry: false, retry: { enabled: false },
     compaction: { enabled: false } }));
@@ -340,7 +341,8 @@ test('real Pi projects voice custom context and executes only intentional concis
   assertHidden(starting);
   assert.equal(starting.replies[0].starting, true);
   const opened = starting.journal.find(frame => frame.type === 'opened');
-  assert.equal(opened.config.stt.model, '/nonexistent/stt');
+  assert.equal(opened.config.stt.model, undefined);
+  assert.equal(opened.config.tts.voice, 'ljspeech');
   assert.equal(opened.config.stt.hotwords, undefined);
   assert.equal(Object.hasOwn(opened.config, 'voice'), false);
   assert.equal(Object.hasOwn(opened.config, 'subagents'), false);

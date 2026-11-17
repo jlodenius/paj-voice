@@ -4,7 +4,7 @@ import time
 
 
 class SpeechInference:
-    def __init__(self, root=None, *, stt=None, tts=None, tts_config=None, compute_type="int8"):
+    def __init__(self, root=None, *, stt=None, tts=None, tts_config=None, compute_type="int8", volume=0.4, length_scale=1):
         for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY", "DO_NOT_TRACK"):
             os.environ[name] = "1"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -20,6 +20,7 @@ class SpeechInference:
         vad = SileroVoiceActivityDetector()
         if not isinstance(vad.chunk_bytes(), int) or not 0 < vad.chunk_bytes() <= 4096:
             raise ValueError("Unsupported packaged VAD frame size")
+        self.volume, self.length_scale = volume, length_scale
         self.np = np
         self.whisper = WhisperModel(str(stt), device="cpu", compute_type=compute_type,
                                     cpu_threads=2, num_workers=1, local_files_only=True)
@@ -43,7 +44,7 @@ class SpeechInference:
         from piper import SynthesisConfig
 
         config = (SynthesisConfig(noise_scale=0, noise_w_scale=0) if deterministic
-                  else SynthesisConfig(volume=0.4))
+                  else SynthesisConfig(volume=self.volume, length_scale=self.length_scale))
         result = bytearray()
         for chunk in self.voice.synthesize(text, syn_config=config):
             if (chunk.sample_channels != 1 or chunk.sample_width != 2

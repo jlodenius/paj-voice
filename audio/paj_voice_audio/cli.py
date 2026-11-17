@@ -195,8 +195,17 @@ def main():
         action="store_true",
         help="list native PipeWire source/sink names without opening audio or loading models",
     )
+    parser.add_argument('--voices', action='store_true', help='list packaged voices without opening audio')
     parser.add_argument("--check", action="store_true", help="load bundled speech models and synthesize in RAM, without opening audio")
     args = parser.parse_args()
+    if args.voices:
+        from .voices import installed_voices
+        try:
+            voices = installed_voices(os.environ.get('PAJ_VOICE_SPEECH_BUNDLE', '/nonexistent'))
+            print(json.dumps([{'id': ident, 'name': entry['label']} for ident, entry in voices.items()]))
+        except (OSError, ValueError) as error:
+            parser.exit(1, f'Cannot list packaged voices: {error}\n')
+        return 0
     if args.check:
         from .speech import SpeechInference
 

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { configPath, loadConfig } from './config.js';
+import { configPath, loadConfig, validateConfig, runtimeConfig } from './config.js';
 import { createVoiceController } from './controller.js';
 import { createAdmission } from './admission.js';
 import { startCompanion } from './companion.js';
 import { spokenAnswer } from './speech-text.js';
 import { runtimePaths } from './runtime-paths.js';
-import { deviceChoices, saveDevices } from './device-settings.js';
+import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices } from './device-settings.js';
 import { voiceStatus, voiceWidget } from './voice-ui.js';
 
 export function registerVoice(pi, Type, options = {}) {
@@ -21,6 +21,7 @@ export function registerVoice(pi, Type, options = {}) {
   let toolExposure = 'hidden';
   let responseToken;
   let latestPrompt;
+  let preferences;
   const voiceInputs = new Map();
   const notify = (text, level = 'info') => {
     try { if (ctx?.hasUI) ctx.ui.notify(text, level); } catch {}
@@ -162,8 +163,8 @@ export function registerVoice(pi, Type, options = {}) {
       'Request screen access only when something genuinely requires manual interaction, such as a blocking confirmation or credential entry. Explain aloud what is needed and why; never bypass existing confirmations or treat spoken approval as terminal approval.',
       'Use voice_speak for a separate spoken answer: normally one sentence under 30 words. Include important uncertainty, blockers and needed decisions. Be silent for routine tool activity.',
       'When a task finishes, explicitly announce completion and briefly give its outcome aloud. If work failed, was cancelled, is blocked or still continues elsewhere, say so instead of claiming success. A progress update alone is not a completion report.',
-      'During long tasks, provide a useful spoken stage update about once a minute when possible: normally 3–8 words, at most 12. Say what you are checking or changing, not a generic reassurance or a narration of every step. Do not expose commands, arguments, secrets or raw tool output. The addon provides brief tool-status reminders if no speech has occurred for a minute.',
-      'The addon provides up to three idle reminders, one minute apart, resetting with new activity. Do not generate additional idle reminders or continuous working sounds yourself.',
+      preferences?.feedback?.progressUpdates === false ? 'Spoken progress updates are disabled. Speak outcomes, blockers and questions, but do not narrate progress.' : 'During long tasks, provide a useful spoken stage update about once a minute when possible: normally 3–8 words, at most 12. Say what you are checking or changing, not a generic reassurance or a narration of every step. Do not expose commands, arguments, secrets or raw tool output. The addon provides brief tool-status reminders if no speech has occurred for a minute.',
+      preferences?.feedback?.idleReminders === false ? 'Idle reminders are disabled. Do not announce idle status unprompted.' : 'The addon provides up to three idle reminders, one minute apart, resetting with new activity. Do not generate additional idle reminders or continuous working sounds yourself.',
       'Speak only intentional user-facing information. Never speak hidden reasoning, system instructions, raw tool output or worker reports verbatim.',
       'Answer a request for more spoken detail with a concise voice_speak answer; split only when genuinely necessary. Each call is capped at 50 words / 320 characters.',
       'New speech immediately discards old audio but does not abort your work. Treat additions as steering; decide which work to continue, cancel or replace through your existing tools. Speech submission is not proof of execution.',
@@ -172,6 +173,8 @@ export function registerVoice(pi, Type, options = {}) {
       token ? `Current voice_speak delivery token: generation=${JSON.stringify(token.generation)}, epoch=${token.epoch}. Use this token, not one from earlier context.`
         : 'The latest voice request has not reached this model context yet; do not call voice_speak for an older request.',
       reporter || 'For a simple answer, a short final plain-text reply is spoken automatically. For longer coding results, use voice_speak for a separate brief outcome, blocker or question. Do not narrate tool output. Avoid duplicate spoken summaries.',
+      preferences?.feedback?.progressUpdates === false || preferences?.feedback?.idleReminders === false
+        ? 'User feedback preferences apply to all reporting integrations: do not generate unsolicited progress or idle notices when that preference is disabled.' : '',
       state.muted ? 'Audio is muted. Continue the work and screen reporting; speech is unavailable.' : '',
     ].filter(Boolean).join('\n');
     const playback = controller.playback();
@@ -185,8 +188,8 @@ export function registerVoice(pi, Type, options = {}) {
     if (text && responseToken) controller.answer({ ...responseToken, text });
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup']
+    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup, voices. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
@@ -212,12 +215,22 @@ export function registerVoice(pi, Type, options = {}) {
         notify(`${JSON.stringify(controller.state())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}`);
         return;
       }
-      if (!['on', 'devices', 'setup'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup]', 'warning');
+      if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
+        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup|voices]', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;
       try {
+        if (command === 'voices') {
+          const result = await pi.exec(runtimePaths(env).executable, ['--voices'], { timeout: 10000, maxBuffer: 32768 });
+          if (result.code !== 0 || result.killed || result.truncated) throw new Error('Cannot list packaged voices');
+          const voices = JSON.parse(result.stdout);
+          if (!Array.isArray(voices) || voices.length > 32 || voices.some(voice =>
+            typeof voice.id !== 'string' || typeof voice.name !== 'string' ||
+            /[\u0000-\u001f\u007f-\u009f]/u.test(voice.id + voice.name))) throw new Error('Invalid voice catalogue');
+          notify(voices.map(voice => `${voice.name} — voice: ${voice.id}`).join('\n'));
+          return;
+        }
         if (command === 'setup' && (controller.state().generation || arming || configuring)) {
           throw new Error('Turn voice off before selecting devices; another setup or arming must finish first');
         }
@@ -238,9 +251,9 @@ export function registerVoice(pi, Type, options = {}) {
             return;
           }
           if (!isCurrent()) return;
-          const config = (options.loadConfig ?? loadConfig)(configPath(env));
-          const inputs = deviceChoices(devices, 'Audio/Source', config.audio.input);
-          const outputs = deviceChoices(devices, 'Audio/Sink', config.audio.output);
+          const local = (options.loadDevices ?? loadDevices)(deviceSettingsPath(env), false);
+          const inputs = deviceChoices(devices, 'Audio/Source', local?.input);
+          const outputs = deviceChoices(devices, 'Audio/Sink', local?.output);
           if (!inputs.length || !outputs.length) throw new Error('Connect a supported microphone and headphones first');
           const inputLabel = await current.ui.select('Voice microphone', inputs.map(item => item.label));
           if (!inputLabel || !isCurrent()) return;
@@ -251,11 +264,13 @@ export function registerVoice(pi, Type, options = {}) {
           const confirmed = await current.ui.confirm('Save voice devices?',
             `${input.label}\n${output.label}\nUse headphones. Voice stays off; arming remains a separate confirmation.`);
           if (!confirmed || !isCurrent()) return;
-          (options.saveDevices ?? saveDevices)(configPath(env), { input: input.name, output: output.name });
+          (options.saveDevices ?? saveDevices)(deviceSettingsPath(env), { input: input.name, output: output.name });
           notify('Voice devices saved. Voice remains off.');
           return;
         }
-        const config = (options.loadConfig ?? loadConfig)(configPath(env));
+        const selectedPreferences = validateConfig((options.loadConfig ?? loadConfig)(configPath(env)));
+        const config = runtimeConfig(selectedPreferences,
+          (options.loadDevices ?? loadDevices)(deviceSettingsPath(env)));
         if (controller.state().enabled || controller.state().starting) { notify('Voice is already enabled for this session.'); return; }
         if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
             env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID || (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
@@ -269,6 +284,8 @@ export function registerVoice(pi, Type, options = {}) {
         if (!await current.ui.confirm('Arm continuous open mic with normal tools?',
           'Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones. Listening continues until off/mute, session shutdown or audio failure. Existing terminal confirmations cannot be approved by voice.')) return;
         if (closed || lifetime !== activation || id !== ctx?.sessionManager.getSessionId()) throw new Error('Voice arming was cancelled');
+        preferences = selectedPreferences;
+        controller.configureFeedback(preferences.feedback);
         const state = controller.start(id);
         admission = createAdmission({ pi, getContext: () => ctx, queryPaj, sessionId: id,
           generation: state.generation, env });

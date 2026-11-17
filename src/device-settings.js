@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { constants, openSync, fstatSync, readFileSync, realpathSync, writeFileSync, fsyncSync,
-  closeSync, renameSync, unlinkSync, lstatSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { validateConfig } from './config.js';
+import { constants, openSync, fstatSync, readFileSync, writeFileSync, fsyncSync, closeSync,
+  renameSync, unlinkSync, lstatSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 
 export function deviceChoices(devices, kind, current) {
   if (!Array.isArray(devices) || devices.length > 1024) throw new Error('Invalid audio device list');
@@ -21,38 +21,65 @@ export function deviceChoices(devices, kind, current) {
   }).sort((left, right) => Number(right.name === current) - Number(left.name === current));
 }
 
-export function saveDevices(file, { input, output }) {
-  const target = realpathSync(file);
-  if (target.startsWith('/nix/store/')) throw new Error('Edit the declarative device settings at their source');
-  let fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-  let info, raw;
-  try {
-    info = fstatSync(fd);
-    if (!info.isFile() || info.uid !== process.getuid() || info.nlink !== 1 || info.size > 65536 || (info.mode & 0o022)) {
-      throw new Error('Settings must be a bounded, owner-controlled regular file');
+export function deviceSettingsPath(env = process.env, home = homedir()) {
+  const root = env.XDG_CONFIG_HOME || join(home, '.config');
+  if (!isAbsolute(root) || /[\u0000-\u001f\u007f]/u.test(root)) throw new Error('XDG_CONFIG_HOME must be absolute');
+  return join(root, 'paj-voice', 'devices.json');
+}
+
+function validate(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
+      Object.keys(value).some(key => !['version', 'input', 'output'].includes(key))) throw new Error('Invalid local device selection');
+  for (const key of ['input', 'output']) {
+    const name = value[key];
+    if (typeof name !== 'string' || !name.trim() || name !== name.trim() || name.length > 1024 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(name) || ['default', 'auto'].includes(name)) {
+      throw new Error('Select exact audio devices using /paj-voice setup');
     }
-    raw = readFileSync(fd, 'utf8');
+  }
+  if (value.input.startsWith('bluez') || value.input.toLowerCase().includes('monitor')) {
+    throw new Error('Bluetooth microphones and capture monitors are not supported');
+  }
+  return { version: 1, input: value.input, output: value.output };
+}
+
+export function loadDevices(file = deviceSettingsPath(), required = true) {
+  let fd;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    if (!required) return undefined;
+    throw new Error('No local audio devices selected. Run /paj-voice setup while voice is off.');
+  }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.uid !== process.getuid() || info.nlink !== 1 ||
+        (info.mode & 0o077) || info.size > 8192) throw new Error('Unsafe local device file');
+    const raw = readFileSync(fd, 'utf8');
+    if (Buffer.byteLength(raw) > 8192) throw new Error('Local device file is too large');
+    return validate(JSON.parse(raw));
   } finally { closeSync(fd); }
-  if (Buffer.byteLength(raw) > 65536) throw new Error('Settings file is too large');
-  const root = JSON.parse(raw);
-  if (!root || typeof root !== 'object' || Array.isArray(root) || !root.voice ||
-      typeof root.voice !== 'object' || Array.isArray(root.voice)) throw new Error('Missing voice preferences');
-  const audio = { ...root.voice.audio, input, output };
-  validateConfig({ ...root.voice, audio });
-  root.voice.audio = audio;
-  const data = `${JSON.stringify(root, null, 2)}\n`;
-  if (Buffer.byteLength(data) > 65536) throw new Error('Settings file is too large');
-  const temporary = join(dirname(target), `.paj-voice-${randomUUID()}.json`);
+}
+
+export function saveDevices(file, devices) {
+  const value = validate({ version: 1, ...devices });
+  const directory = dirname(file);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const info = lstatSync(directory);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() ||
+      (info.mode & 0o077)) throw new Error('Local device directory must be private and user-owned');
+  const before = loadDevices(file, false);
+  const temporary = join(directory, `.devices-${randomUUID()}.json`);
+  let fd;
   try {
-    fd = openSync(temporary, 'wx', info.mode & 0o777);
-    try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
-    const latest = lstatSync(target);
-    if (realpathSync(file) !== target || !latest.isFile() || latest.ino !== info.ino ||
-        latest.dev !== info.dev || readFileSync(target, 'utf8') !== raw) {
-      throw new Error('Settings changed during selection; retry without overwriting them');
+    fd = openSync(temporary, 'wx', 0o600);
+    try { writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fsyncSync(fd); }
+    finally { closeSync(fd); }
+    if (JSON.stringify(loadDevices(file, false)) !== JSON.stringify(before)) {
+      throw new Error('Local device selection changed; retry without overwriting it');
     }
-    renameSync(temporary, target);
-    fd = openSync(dirname(target), constants.O_RDONLY | constants.O_DIRECTORY);
+    renameSync(temporary, file);
+    fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY);
     try { fsyncSync(fd); } finally { closeSync(fd); }
   } finally {
     try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; }

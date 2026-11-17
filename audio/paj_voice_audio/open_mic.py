@@ -24,10 +24,20 @@ def validate(value):
     config = dict(value)
     bundle = Path(os.environ.get("PAJ_VOICE_SPEECH_BUNDLE", "/nonexistent"))
     stt, tts = dict(value.get("stt", {})), dict(value.get("tts", {}))
-    if set(stt) - {"model", "computeType"} or set(tts) - {"model", "config"}:
+    if set(stt) - {"model", "computeType"} or set(tts) - {"model", "config", "voice", "volume", "lengthScale"}:
         raise ValueError("Unsupported speech model fields; spelling hints are not used")
     stt.setdefault("model", str(bundle / "stt"))
     stt.setdefault("computeType", "int8")
+    if "voice" in tts:
+        from .voices import installed_voices
+        catalog = installed_voices(bundle)
+        if not isinstance(tts['voice'], str) or tts['voice'] not in catalog:
+            raise ValueError('Voice is not installed; use /paj-voice voices to list packaged choices')
+        tts.update({key: catalog[tts['voice']][key] for key in ('model', 'config')})
+    for key, default, low, high in (("volume", 0.4, 0, 1), ("lengthScale", 1, 0.5, 2)):
+        tts.setdefault(key, default)
+        if type(tts[key]) not in (int, float) or not math.isfinite(tts[key]) or not low <= tts[key] <= high:
+            raise ValueError('Invalid speech volume or speed')
     tts.setdefault("model", str(bundle / "tts/model.onnx"))
     tts.setdefault("config", tts["model"] + ".json")
     if stt["computeType"] not in ("int8", "float32"):
@@ -173,7 +183,8 @@ class Runtime:
                 raise ValueError("Use the laptop microphone, not a Bluetooth headset microphone")
             self.stage = "models"
             models = SpeechInference(stt=config["stt"]["model"], tts=config["tts"]["model"],
-                                     tts_config=config["tts"]["config"], compute_type=config["stt"]["computeType"])
+                                     tts_config=config["tts"]["config"], compute_type=config["stt"]["computeType"],
+                                     volume=config["tts"]["volume"], length_scale=config["tts"]["lengthScale"])
             from pysilero_vad import SileroVoiceActivityDetector
             with self.lock:
                 if self.closed or self.muted:

@@ -4,8 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { runtimePaths } from '../src/runtime-paths.js';
 import { validateConfig } from '../src/config.js';
 
-const valid = () => ({ version: 1,
-  audio: { input: 'microphone', output: 'headphones', echoCancellation: 'none' } });
+const valid = () => ({});
 
 test('the installed package owns its executable and cache uses XDG defaults', () => {
   const paths = runtimePaths({}, '/home/test');

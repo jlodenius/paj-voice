@@ -25,8 +25,9 @@ export function fixture(overrides = {}) {
         widgets.push({ name, lines: component ? component.render(80) : widget, component, options });
       } },
   };
-  const config = { audio: { input: 'laptop', output: 'headphones', echoCancellation: 'none' } };
+  const config = {};
   const instance = registerVoice(pi, Type, { env: {}, loadConfig: () => config,
+    loadDevices: () => ({ version: 1, input: 'laptop', output: 'headphones' }),
     startCompanion(args) {
       const worker = { args, closed: false, send: frame => frames.push(frame), close() { this.closed = true; } };
       workers.push(worker);
@@ -236,6 +237,18 @@ test('cancelled or invalidated device selection never writes preferences or open
     assert.equal(saved.length, 0);
     assert.equal(f.workers.length, 0);
   }
+});
+
+test('disabled feedback is respected in automatic timers and reporter-independent model policy', async () => {
+  const f = fixture({ loadConfig: () => ({ feedback: { progressUpdates: false, idleReminders: false } }) });
+  await f.command('on'); f.audio({ type: 'ready' });
+  const context = await f.event('context', { messages: [] });
+  const policy = context.messages.at(-1).content;
+  assert.match(policy, /Spoken progress updates are disabled/);
+  assert.match(policy, /Idle reminders are disabled/);
+  assert.match(policy, /preferences apply to all reporting integrations/);
+  assert.doesNotMatch(policy, /During long tasks, provide/);
+  await f.command('off');
 });
 
 test('blocking terminal UI is reported but speech cannot implicitly approve it', async () => {

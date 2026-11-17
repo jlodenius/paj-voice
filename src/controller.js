@@ -28,6 +28,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   let progressTimer = null;
   let progressAnnouncement = false;
   let agentActive = false;
+  let feedback = { receipt: 'Got it.', steeringReceipt: 'Steering received.',
+    progressUpdates: true, idleReminders: true };
   const activeTools = new Map();
   const playback = createPlaybackHistory();
   const pendingSpeech = new Set();
@@ -50,7 +52,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   };
   const activity = () => { clearIdle(); clearProgress(); idleReminders = 0; };
   const syncIdle = () => {
-    if (!idle() || idleReminders >= 3) { clearIdle(); return; }
+    if (!feedback.idleReminders || !idle() || idleReminders >= 3) { clearIdle(); return; }
     if (idleTimer !== null) return;
     const target = generation, turn = epoch;
     const timer = setTimer(() => {
@@ -69,7 +71,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
     timer?.unref?.();
   };
   const syncProgress = () => {
-    const available = () => enabled && ready && !muted && !disposed && running && agentActive &&
+    const available = () => feedback.progressUpdates && enabled && ready && !muted && !disposed && running && agentActive &&
       !blocked && !captureId && !speaking && pendingSpeech.size === 0;
     if (!available()) { clearProgress(); return; }
     if (progressTimer !== null) return;
@@ -172,6 +174,12 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   return {
     api,
     state,
+    configureFeedback(value) {
+      if (enabled) throw new Error('Change feedback preferences while voice is off');
+      feedback = { ...feedback, ...value };
+      activity();
+      emit();
+    },
     instructions() { return reporters.values().next().value?.instructions ?? null; },
     playback() { return playback.snapshot(); },
     start(id) {
@@ -349,7 +357,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
           record.status = 'submitted';
           running = true;
           inform(result?.steering ? 'Voice addition submitted as steering.' : 'Voice request submitted.', 'info');
-          api.speak({ text: result?.steering ? 'Steering received.' : 'Got it.',
+          api.speak({ text: result?.steering ? feedback.steeringReceipt : feedback.receipt,
             generation, epoch, key: 'receipt' });
           turnSpoken = false;
           finalAnswerSpoken = false;

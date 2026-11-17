@@ -5,8 +5,10 @@
   pipewire,
   nodejs,
   python3,
+  voiceModels ? {},
 }: let
   speech = import ./continuous.nix {
+    inherit voiceModels;
     pkgs = import (import ./lab-source.nix) {
       system = stdenvNoCC.hostPlatform.system;
       config = {

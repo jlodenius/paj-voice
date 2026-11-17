@@ -50,7 +50,7 @@ class OpenMicTests(unittest.TestCase):
         executable.chmod(0o700)
         load_entered, release_load = threading.Event(), threading.Event()
         config = {"cacheDir": str(root / "cache"), "stt": {"model": "/fake/stt", "computeType": "int8"},
-                  "tts": {"model": "/fake/voice", "config": "/fake/voice.json"},
+                  "tts": {"model": "/fake/voice", "config": "/fake/voice.json", "volume": 0.4, "lengthScale": 1},
                   "audio": {"input": "laptop", "output": "headphones"},
                   "turn": {"silenceMs": 800, "maxSeconds": 12, "speechThreshold": 0.001}}
         graph = types.SimpleNamespace(paths={"pw-record": "FAKE", "pw-play": "FAKE"},

@@ -1,10 +1,30 @@
-{pkgs ? import ./lab-pkgs.nix}: let
+{
+  pkgs ? import ./lab-pkgs.nix,
+  voiceModels ? {},
+}:
+assert builtins.length (builtins.attrNames voiceModels) <= 31;
+assert builtins.all (name: builtins.match "[a-z][a-z0-9_-]{0,63}" name != null) (builtins.attrNames voiceModels);
+let
   manifest = builtins.fromJSON (builtins.readFile ../models/lab-manifest.json);
   assets = builtins.filter (entry:
     pkgs.lib.hasPrefix "stt/" entry.path || pkgs.lib.hasPrefix "tts/" entry.path)
   manifest.assets;
+  packagedPath = path: let value = "${path}"; in
+    assert pkgs.lib.hasPrefix "${builtins.storeDir}/" value && builtins.hasContext value;
+    value;
+  voiceCatalog = {
+    ljspeech = { label = "LJSpeech — US English"; model = "tts/model.onnx"; config = "tts/model.onnx.json"; };
+  } // pkgs.lib.mapAttrs (_: voice: {
+    inherit (voice) label;
+    model = packagedPath voice.model;
+    config = packagedPath voice.config;
+  }) voiceModels;
   models = pkgs.runCommand "paj-voice-speech-models" {} ''
     mkdir -p "$out"
+    cp ${pkgs.writeText "paj-voice-catalog.json" (builtins.toJSON voiceCatalog)} "$out/voices.json"
+    mkdir -p "$out/voice-notices"
+    ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (name: voice:
+      "ln -s ${pkgs.lib.escapeShellArg (packagedPath voice.notice)} $out/voice-notices/${pkgs.lib.escapeShellArg name}.txt") voiceModels)}
     ${pkgs.lib.concatMapStringsSep "\n" (entry: let
         source = pkgs.fetchurl {
           inherit (entry) url;

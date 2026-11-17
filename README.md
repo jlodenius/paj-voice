@@ -46,49 +46,130 @@ code is GPL-licensed; a model card's dataset license is not an independent grant
 weights. The existing local-evaluation licensing caveat remains; this is not a new
 weight-redistribution claim.
 
-## Preferences and extension loading
+## Preferences
 
-Merge the `voice` object from `examples/paj.json` into the shared `~/.pi/agent/paj.json`, preserving
-`subagents`, `captain` and other addon sections. Voice validates only its own section and preserves
-sibling settings when saving device choices. `PAJ_VOICE_CONFIG` can explicitly select another entire shared file;
-`PI_CODING_AGENT_DIR` selects the usual agent directory. There is no legacy `voice.json` fallback.
+Voice preferences are ordinary user choices, not engine or hardware configuration. They live in
+the `voice` section of the shared `~/.pi/agent/paj.json`. Preserve the other addon sections.
+Every preference is optional; this is a complete, valid minimal configuration:
 
-The installed package supplies its own audio executable; it is not a user preference. Cache storage
-is selected automatically as `$XDG_CACHE_HOME/paj-voice`, or `~/.cache/paj-voice` when unset. Remove
-`python` and `cacheDir` from older preferences. The internal companion protocol still receives the
-resolved cache directory, but it is never read from user settings. The Nix wrapper supplies bundled
-models, so `stt.model` and `tts.model/config` may be omitted. Explicit local model overrides are
-supported, but remote identifiers and runtime downloads are not.
+```json
+{
+  "voice": {}
+}
+```
 
-With voice off, run `/paj-voice setup` to select a microphone and headphones by readable names.
-Technical PipeWire IDs remain visible for inspection and are stored for exact, fail-closed binding.
-`/paj-voice devices` lists compatible devices without opening an audio stream or requiring valid
-preferences. Selection never arms audio. Cancelling or changing sessions discards the selection.
-Saving updates only the device IDs in the latest shared file, preserving sibling settings. An
-out-of-store symlink is resolved to its owner-controlled source without replacing the link; immutable
-Nix-store settings must be changed declaratively. Malformed or unsafe files are not overwritten;
-detected concurrent changes cause saving to fail rather than overwrite them. Initial setup requires a valid Voice section from the example.
-The example names are the tested laptop input and Sony output; adjust them for another machine.
-`audio.echoCancellation` must explicitly be `none` or `external`. `none` is the tested direct-mic,
-headphone route, not a claim of echo cancellation. An external route is never installed or loaded
-by the addon. Defaults, reconnect fallback, gains and Bluetooth profiles are not changed.
-Bluetooth microphone capture is rejected so playback need not switch into headset/call mode.
+The full example is [examples/paj.json](examples/paj.json). Unknown settings are rejected rather
+than silently ignored. Changes take effect the next time you explicitly arm voice; off/on is
+required, and a package upgrade also requires Pi's `/reload`. Nothing automatically rearms.
 
-The built package exports `extensions/index.ts`. Configure it through the normal Pi package or
-extension loader. Load the built package, not the unpackaged source extension: its executable is
-resolved relative to the immutable package installation. Loading or reloading it does not arm
-capture. For this personal checkout, the host's dormant local loader points at the single combined
-preferences file. It replaces the temporary session-pinned `voice-trial` loader, without a system
-activation. Load exactly one copy of the extension; remove the development loader when switching
-to a Home Manager-installed copy. The development loader resolves the build link to its immutable
-Nix store path before importing, avoiding stale transitive JavaScript after rebuild/reload; status
-prints the loaded extension build identity. Direct imports from mutable source paths may remain
-cached across a Pi reload.
+### Complete preference reference
 
-Wake phrases, spelling hints and prefix timing options are no longer production preferences:
-remove `addressPhrases`, `stt.hotwords` and `turn.prefixIntervalMs` from older Voice sections.
-Default utterance settings match the tested path: 800 ms endpoint silence, twelve-second maximum,
-one-second pre-roll and a 0.001 RMS floor alongside VAD. Long pauses can split an utterance.
+Names below are relative to the shared file's `voice` object. These are **all** supported
+preferences; there is no hidden advanced-settings object.
+
+| Preference                 | Default                | Accepted values and meaning                              |
+| -------------------------- | ---------------------- | -------------------------------------------------------- |
+| `voice`                    | `"ljspeech"`           | Installed voice ID; see `/paj-voice voices`.             |
+| `volume`                   | `40`                   | Number 0–100: spoken-reply volume, not system volume.    |
+| `speed`                    | `1`                    | Number 0.5–2: 1 is normal, 2 is twice as fast.           |
+| `pauseSeconds`             | `0.8`                  | Number 0.3–5: silence needed before submitting speech.   |
+| `maxMessageSeconds`        | `20`                   | Number 5–30: maximum duration of one spoken message.     |
+| `feedback.receipt`         | `"Got it."`            | Nonempty plain text: at most 8 words and 60 characters.  |
+| `feedback.steeringReceipt` | `"Steering received."` | Same text limits; used for additions during active work. |
+| `feedback.progressUpdates` | `true`                 | Boolean: brief updates during long-running requests.     |
+| `feedback.idleReminders`   | `true`                 | Boolean: reminders when this session has no active work. |
+
+All omitted values use their defaults. Values must have the types shown; strings are not numbers.
+Receipts cannot contain control characters or line breaks. The two receipt phrases should remain
+distinct so you can distinguish a new request from steering. A receipt means submitted, not that an
+action succeeded.
+
+Volume zero silences synthesized speech but does not mute the microphone; use `mute` or `off`
+for privacy. The startup ready beep is separate from speech volume. Speed and volume change local
+synthesis only; system gains and Bluetooth profiles are never changed.
+
+Longer pauses can prevent sentences being split, but delay submission. A message exceeding the
+duration limit is discarded through its endpoint rather than submitted as a truncated command.
+The limit does not cap how long the microphone can remain armed.
+
+Progress updates are normally 3–8 words, at most about once a minute while work is active. When a
+model cannot give a specific update, the addon uses current tool status, never tool arguments or
+output. Idle reminders occur after a quiet minute, repeat at minute intervals at most three times,
+and reset with new activity. These intervals and the three-reminder safety limit are fixed.
+Disabling either preference also instructs the model not to generate that kind of unsolicited
+update. Completion outcomes, important questions and blockers remain enabled. Panel colors follow
+your active Pi theme; there is no separate Voice color setting.
+
+### Voice models
+
+`/paj-voice voices` lists voices included in the installed package without loading inference models
+or opening audio. Set `voice` to an ID from that list. The default package currently includes only
+`ljspeech` (US English); the setting does not imply other voices are preinstalled. Unknown IDs fail
+before capture opens. A different voice must first be packaged with its configuration and reviewed
+license/provenance. Selecting one never downloads anything at runtime.
+
+Recognition is currently the packaged English Whisper base model, using tested CPU settings.
+Language, numerical precision, VAD thresholds, engine flags and model filesystem paths are not user
+preferences. English is the only supported language. Do not add `stt`, `tts`, `languages`,
+`responseLanguage` or raw model paths to `paj.json`.
+
+### Local microphone and headphones
+
+With voice off, run `/paj-voice setup` to choose readable device names. It saves exact PipeWire IDs
+**locally**, outside the shared settings and Git:
+
+- `$XDG_CONFIG_HOME/paj-voice/devices.json`, or `~/.config/paj-voice/devices.json`.
+- The directory is owner-private (0700) and the file is owner-private (0600).
+- The addon maintains this internal file; it is not another user-edited preference schema.
+- Setup opens no audio, loads no inference models and never arms the microphone.
+- Cancelling or changing sessions discards the selection. Malformed or unsafe local files are
+  refused rather than overwritten.
+- Missing selection requires setup; there is no automatic device or reconnect fallback.
+- Bluetooth microphone capture and capture monitors are rejected. Use headphones; no echo
+  canceller, system default, gain or Bluetooth profile is installed or changed.
+
+`/paj-voice devices` lists compatible devices and their inspectable IDs. Device choices are
+machine-specific: copying your shared preferences to another machine does not copy these IDs.
+Setup never changes `paj.json`, including when it is a declarative Nix-store file.
+
+### Automatic paths and environment
+
+The installed package supplies its own audio executable. Cache storage is
+`$XDG_CACHE_HOME/paj-voice`, or `~/.cache/paj-voice`. No audio recordings are written there.
+Executable, cache, device IDs and internal protocol versions are not preferences.
+
+| Environment variable  | Purpose                                                         |
+| --------------------- | --------------------------------------------------------------- |
+| `PAJ_VOICE_CONFIG`    | Explicit path to the entire shared preferences file.            |
+| `PI_CODING_AGENT_DIR` | Pi agent directory; defaults to `~/.pi/agent`.                  |
+| `XDG_CONFIG_HOME`     | Base directory for the private, machine-local device selection. |
+| `XDG_CACHE_HOME`      | Base directory for disposable runtime cache storage.            |
+
+XDG base paths must be absolute. Package-owned model-bundle variables are implementation details,
+not supported overrides for selecting remote or arbitrary local models.
+
+### Upgrading older preferences
+
+Old `version`, `audio`, `stt`, `tts`, `turn`, language, executable and cache fields are no longer
+accepted in the shared Voice section. There are no legacy aliases or silent migrations.
+
+1. Turn voice off, update the package and reload Pi.
+2. Run `/paj-voice setup` to save local microphone/headphone choices.
+3. Replace only the shared `voice` section with the new example or `{}`.
+4. Carry over message timing intentionally: old `turn.silenceMs / 1000` becomes `pauseSeconds`;
+   old `turn.maxSeconds` becomes `maxMessageSeconds`. Model paths become packaged voice IDs.
+5. Arm voice manually and test a short request.
+
+Moving current device choices to local storage does not rewrite old Git history.
+
+## Extension loading
+
+Load the built package's `extensions/index.ts` through the normal Pi package or extension loader,
+not the unpackaged source extension. The executable is resolved relative to the immutable package.
+Loading/reloading never arms capture. Load exactly one copy; remove the personal development
+loader when switching to a Home Manager-installed copy. The personal loader resolves the build
+link to its immutable Nix store path before importing, preventing stale transitive JavaScript;
+status prints the loaded build identity.
 
 ## Use
 
@@ -97,6 +178,7 @@ In the intended main Pi TUI session:
 ```text
 /paj-voice setup
 /paj-voice devices
+/paj-voice voices
 /paj-voice on
 /paj-voice status
 /paj-voice mute
@@ -149,8 +231,8 @@ including with a reporting integration. Screen access is reserved for genuinely 
 as blocking confirmations or credential entry, with a spoken explanation; voice cannot approve them.
 If no spoken outcome is produced, a brief spoken notice invites a summary request instead of
 referring the user to the screen. This notice does not itself summarize or verify the result.
-New submissions get the brief spoken receipt “Got it.” Busy-session steering additions say
-“Steering received.” Both mean submitted, not executed or successfully completed; rejected or
+By default, new submissions say “Got it.” Busy-session steering additions say “Steering received.”
+These phrases are configurable. Both mean submitted, not executed or successfully completed; rejected or
 uncertain delivery keeps its explicit warning instead.
 
 Task outcomes should explicitly say when work finishes, fails, stops or needs input. At Pi's actual
@@ -167,7 +249,7 @@ blocking confirmations, and stop when the agent settles or audio is muted/off. A
 speech postpones the next automatic reminder by another minute after playback ends. No separate
 model call is made for the timer; a request awaiting agent startup is not described as active work.
 
-After a minute idle, the addon says “I’m available and have nothing in progress.” It repeats at
+With idle reminders enabled, after a minute idle the addon says “I’m available and have nothing in progress.” It repeats at
 one-minute intervals, at most three times per idle stretch. New requests, work or intentional speech
 reset the count. The reminder's own playback does not reset it; intervals start after playback ends.
 Reminders wait for capture/recognition, queued requests, agent work, pending playback and blocking
@@ -233,6 +315,25 @@ installs the extension and companion, not a microphone service. Activation still
 supplies inner Voice preferences and generates `{ voice = settings; }`. They are exclusive and own
 the whole file. When the host already manages combined addon settings, leave both unset (their
 defaults) to avoid overwriting sibling sections. Use locked inputs for deployed configurations.
+
+### Packaging additional voices
+
+This is a package-maintainer interface, not another runtime-settings format. The optional
+`voiceModels` argument to `nix/package.nix` is an attribute set keyed by installed voice ID. Each
+entry supplies `label`, `model`, `config` and `notice`. Model/config/notice values must be Nix-store
+assets with tracked dependencies, such as pinned `fetchurl` outputs or packaged files. Raw host
+paths and runtime downloads are not accepted. `notice` records the reviewed model provenance and
+license information; a dataset notice alone is not a grant to redistribute voice weights.
+
+The package emits its voice catalogue and retains notices alongside the models. The default
+LJSpeech voice remains included. At most 31 extra voices are supported, with IDs matching
+`[a-z][a-z0-9_-]{0,63}`. Only compatible English Piper voices are supported; the runtime checks
+selected model metadata before opening capture. These assets are fetched only during Nix builds.
+
+Home Manager deployment options are `programs.paj-voice.enable` (default false), `package` (the
+bundled package), `settings` (inner preferences, default null), and `configFile` (entire shared
+file source, default null). Only one module may own the shared file. These are installation
+options, separate from the nine user preferences documented above.
 
 ## Checks and historical labs
 
