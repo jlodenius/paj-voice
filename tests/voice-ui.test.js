@@ -22,8 +22,20 @@ test('voice mode has a themed panel with an explicit hot microphone badge and co
   assert.doesNotMatch(lines.join(''), /\x1b\[(31|32|36)m/);
   assert.match(plain(lines[1]), /READY.*listening/);
   assert.match(plain(lines[2]), /recognized speech.*normal tools/);
-  assert.match(plain(lines[3]), /\/paj-voice mute.*\/paj-voice off/);
+  assert.match(plain(lines[3]), /\/paj-voice pause.*\/paj-voice off/);
   assert.match(voiceStatus(active, theme), /\x1b\[33m/);
+});
+
+test('paused audio uses Resume controls and a selected Audio label without claiming an active route', () => {
+  for (const processing of [false, true]) {
+    const state = { muted: true, processing, route: 'desk', routeActive: false };
+    const text = render(state, 100).map(plain).join('\n');
+    assert.match(text, /Audio: desk \(selected\)/);
+    assert.match(text, /Voice paused|audio paused/);
+    assert.match(text, /Resume: \/paj-voice resume/);
+    assert.doesNotMatch(text, /unmute|Mute|Route:|Selected:/);
+    assert.match(voiceStatus(state), /Audio: desk \(selected\)/);
+  }
 });
 
 test('missing endpoints show suspension rather than readiness while retaining route and controls', () => {
@@ -36,8 +48,8 @@ test('missing endpoints show suspension rather than readiness while retaining ro
     const text = render(state, 80).map(plain).join('\n');
     assert.ok(text.includes(badge), text);
     assert.ok(text.includes(activity), text);
-    assert.match(text, /Route: desk/);
-    assert.match(text, /\/paj-voice mute/);
+    assert.match(text, /Audio: desk/);
+    assert.match(text, /\/paj-voice pause/);
     assert.doesNotMatch(text, /READY -|OPEN MIC/);
     assert.ok(plain(voiceStatus(state, theme)).includes(badge));
     for (const width of [4, 12, 40]) assert.ok(render(state, width).every(line => visibleWidth(line) <= width));
@@ -77,9 +89,10 @@ test('route is shown only in its bottom row, never beside the open-mic panel hea
       assert.ok(lines.every(line => visibleWidth(line) <= width));
       assert.doesNotMatch(lines[0], /desk|headset|Laptop|你好/u);
       const compact = lines.join('').replaceAll(/[│ ]/gu, '');
-      assert.ok(compact.includes(`Route:${route.replaceAll(' ', '')}`), compact);
+      assert.ok(compact.includes(`Audio:${route.replaceAll(' ', '')}`), compact);
+      assert.doesNotMatch(compact, /\(selected\)/);
     }
-    assert.match(voiceStatus(state), /Route:/);
+    assert.match(voiceStatus(state), /Audio:/);
     assert.deepEqual(state, before);
   }
 });

@@ -275,6 +275,52 @@ test('throwing state subscribers and API replies cannot prevent shutdown or reta
   assert.equal(f.events.listenerCount('paj:external:changed:v1'), 0);
 });
 
+test('help and completion use pause/resume while keeping compatibility aliases discoverable', async () => {
+  const f = fixture();
+  const definition = f.commands.get('paj-voice');
+  assert.match(definition.description, /pause, resume/);
+  for (const command of ['pause', 'resume', 'mute', 'unmute']) {
+    const choices = definition.getArgumentCompletions(command);
+    assert.ok(choices.some(choice => choice.value === command));
+  }
+  await f.command('help');
+  assert.match(f.notices.at(-1)[0], /on\|off\|pause\|resume/);
+  await f.command('on'); f.audio({ type: 'ready' });
+  await f.command('pause');
+  const context = await f.event('context', { messages: [] });
+  assert.match(context.messages[0].content, /Audio is paused/);
+  assert.doesNotMatch(context.messages[0].content, /Audio is muted/);
+  await f.command('off');
+});
+
+test('pause closes audio without stopping work; resume requires fresh consent and fences old callbacks', async () => {
+  const f = fixture();
+  await f.command('on'); f.audio({ type: 'ready' });
+  await f.event('agent_start');
+  const old = f.workers[0];
+  await f.command('pause');
+  assert.equal(old.closed, true);
+  assert.equal(f.controller.state().muted, true);
+  assert.equal(f.controller.state().processing, true);
+  f.ctx.ui.confirm = async () => false;
+  await f.command('resume');
+  assert.equal(f.workers.length, 1);
+  assert.equal(f.controller.state().enabled, false);
+  f.ctx.ui.confirm = async () => true;
+  await f.command('on'); f.audio({ type: 'ready' });
+  await f.command('pause');
+  await f.command('resume');
+  assert.equal(f.workers.length, 3);
+  assert.notEqual(f.controller.state().generation, old.args.generation);
+  old.args.onEvent({ type: 'ready' }, old.args.generation);
+  assert.equal(f.controller.state().enabled, false);
+  f.audio({ type: 'ready' });
+  assert.equal(f.controller.state().enabled, true);
+  await f.command('off');
+  await f.command('resume');
+  assert.equal(f.workers.length, 3);
+});
+
 test('mute terminates audio and unmute uses a fresh generation with stale callbacks fenced', async () => {
   const f = fixture();
   await f.command('on'); f.audio({ type: 'ready' });

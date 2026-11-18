@@ -21,8 +21,8 @@ function appearance(state: VoiceDisplayState): {
   badge: string; tone: Tone; activity: string; detail: string; controls: string;
 } | null {
   if (state.muted) return { badge: 'MIC CLOSED', tone: 'muted',
-    activity: state.processing ? 'Agent working - audio muted' : 'Voice paused - microphone closed',
-    detail: 'Mute does not stop agent work.', controls: 'Resume: /paj-voice unmute   Off: /paj-voice off' };
+    activity: state.processing ? 'Agent working - audio paused' : 'Voice paused - microphone closed',
+    detail: 'Pause does not stop agent work.', controls: 'Resume: /paj-voice resume   Off: /paj-voice off' };
   if (state.starting) return { badge: 'warming up', tone: 'warning',
     activity: 'STARTING - preparing local speech', detail: 'Remain quiet until the ready beep.',
     controls: 'Cancel: /paj-voice off' };
@@ -33,25 +33,25 @@ function appearance(state: VoiceDisplayState): {
       activity: input ? state.listening === false ? 'RECOGNITION PAUSED - playback suspended' : 'LISTENING - playback suspended'
         : output ? 'LISTENING SUSPENDED' : 'LISTENING AND PLAYBACK SUSPENDED',
       detail: 'Waiting for verified endpoints. No unconfigured microphone or speech replay.',
-      controls: 'Mute: /paj-voice mute   Off: /paj-voice off' };
+      controls: 'Pause: /paj-voice pause   Off: /paj-voice off' };
   }
   if (state.speakerMode) return { badge: 'SPEAKER MODE', tone: 'warning',
     activity: state.speaking ? 'SPEAKING - recognition paused' : state.listening === false
       ? 'WAITING FOR QUIET - recognition paused' : 'LISTENING - speaker-safe microphone',
     detail: 'Wait for LISTENING before speaking. Use /paj-voice stop to interrupt readouts.',
-    controls: 'Mute: /paj-voice mute   Off: /paj-voice off' };
+    controls: 'Pause: /paj-voice pause   Off: /paj-voice off' };
   return { badge: 'OPEN MIC', tone: 'warning',
     activity: state.capturing ? 'RECEIVING SPEECH - agent work may continue'
       : state.speaking ? 'SPEAKING - interrupt with your voice'
         : state.processing ? 'WORKING - microphone still listening' : 'READY - listening for your request',
     detail: 'All recognized speech is actionable with normal tools.',
-    controls: 'Mute: /paj-voice mute   Off: /paj-voice off' };
+    controls: 'Pause: /paj-voice pause   Off: /paj-voice off' };
 }
 
 const fg = (theme: Theme | undefined, color: Tone, text: string) => theme?.fg?.(color, text) ?? text;
 const bold = (theme: Theme | undefined, text: string) => theme?.bold?.(text) ?? text;
 const routeLabel = (state: VoiceDisplayState) => state.route
-  ? `${state.routeActive ? 'Route' : 'Selected'}: ${state.route}${state.usingFallback ? ` (fallback) | Preferred: ${state.preferredRoute ?? 'saved route'}` : ''}${state.switchingRoute ? ` → ${state.switchingRoute} (switching)` : ''}`
+  ? `Audio: ${state.route}${state.routeActive ? '' : ' (selected)'}${state.usingFallback ? ` (fallback) | Preferred: ${state.preferredRoute ?? 'saved route'}` : ''}${state.switchingRoute ? ` → ${state.switchingRoute} (switching)` : ''}`
   : undefined;
 
 export function voiceRequestMarkdown(markdown: string, theme?: Theme): string {

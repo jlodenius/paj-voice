@@ -86,7 +86,7 @@ Messages support up to two minutes of continuous speech. At the limit, stop spea
 portion is transcribed and kept in memory, never submitted as an incomplete command. Use
 `/paj-voice recover` to load it into an empty Pi editor, then review and complete it before sending.
 Up to four incomplete transcripts are retained; Voice stops when that recovery buffer fills.
-Recovery survives Voice off/mute, but session changes and quitting Pi clear it.
+Recovery survives Voice off/pause, but session changes and quitting Pi clear it.
 
 `/paj-voice voices` lists installed choices; the default package includes only LJSpeech. Other
 voices must be packaged first; nothing downloads at runtime. Language, compute precision and
@@ -163,9 +163,14 @@ The shared file remains `~/.pi/agent/paj.json`; preserve sibling addon settings 
 
 ## Usage
 
-- `/paj-voice mute` closes audio; `unmute` asks for fresh confirmation.
+- `/paj-voice pause` closes audio without stopping agent work; `resume` asks for fresh confirmation.
+  `mute` and `unmute` remain compatibility aliases. Pause/resume are distinct from off/on.
 - `/paj-voice stop` stops speech only; `off` closes audio without cancelling agent work.
 - `/paj-voice status`, `devices`, and `voices` inspect state, hardware IDs, and packaged voices.
+
+The panel's `Audio:` row shows the active saved audio name, or marks a selection as `(selected)`
+while paused or preparing audio. Active fallback audio is marked `(fallback)` alongside the preferred
+name; the saved route names and `/paj-voice route` commands are unchanged.
 
 After arming, device loss suspends unavailable endpoints instead of ending the session. Without a
 configured fallback, available endpoints keep working and the same verified devices recover on return.
@@ -182,7 +187,7 @@ stays active until an explicit route switch or rearm, rather than bouncing back 
 Speaker mode pauses recognition during Voice readouts and until quiet to reduce self-transcription;
 wait for LISTENING before speaking, or use `/paj-voice stop` to interrupt. Speaker-safety flags remain
 on saved routes when automatic fallback is disabled. This is not qualified acoustic echo cancellation.
-Off, mute and session changes cancel recovery. Unverifiable endpoints remain suspended.
+Off, pause and session changes cancel device recovery. Unverifiable endpoints remain suspended.
 
 No wake word or classifier: **all recognized speech while armed can use normal agent tools**.
 Existing terminal confirmations remain manual. Audio stays local and is not recorded; recognized

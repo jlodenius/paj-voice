@@ -8,7 +8,8 @@ const headset = { input: 'private-headset-source', output: 'private-headset-sink
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function routes() {
   const saved = { version: 2, active: 'desk', routes: { desk, headset } };
-  const f = fixture({ loadDevices: () => ({ version: 1, ...saved.routes[saved.active] }),
+  const f = fixture({ env: { XDG_CONFIG_HOME: '/dev/null' },
+    loadDevices: () => ({ version: 1, ...saved.routes[saved.active] }),
     loadRoutes: () => structuredClone(saved), saveRoute: (_path, name) => { saved.active = name; } });
   f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify(Object.values(saved.routes)
     .flatMap(route => [{ name: route.input, class: 'Audio/Source' },
@@ -24,24 +25,26 @@ test('route visuals distinguish saved selection from ready audio through startup
   const f = routes();
   await f.command('on');
   assert.match(panel(f), /warming up/);
-  assert.match(panel(f), /Selected: desk/);
-  assert.doesNotMatch(panel(f), /Route: desk/);
+  assert.match(panel(f), /Audio: desk \(selected\)/);
+  assert.doesNotMatch(panel(f), /Audio: desk (?!\(selected\))/);
   ready(f);
+  assert.doesNotMatch(panel(f), /\(selected\)/);
   assert.match(panel(f), /VOICE MODE \| OPEN MIC/);
   assert.doesNotMatch(panel(f).split('\n')[0], /desk/);
-  assert.match(panel(f), /Route: desk/);
-  assert.match(status(f), /Route: desk/);
+  assert.match(panel(f), /Audio: desk/);
+  assert.match(status(f), /Audio: desk/);
   await f.command('mute');
   assert.match(panel(f), /MIC CLOSED/);
-  assert.match(panel(f), /Selected: desk/);
+  assert.match(panel(f), /Audio: desk \(selected\)/);
   await f.command('route headset');
-  assert.match(panel(f), /Selected: headset/);
+  assert.match(panel(f), /Audio: headset \(selected\)/);
   assert.equal(f.workers.length, 1);
   await f.command('unmute');
-  assert.match(panel(f), /Selected: headset/);
-  assert.doesNotMatch(panel(f), /Route: headset/);
+  assert.match(panel(f), /Audio: headset \(selected\)/);
+  assert.doesNotMatch(panel(f), /Audio: headset (?!\(selected\))/);
   ready(f);
-  assert.match(panel(f), /Route: headset/);
+  assert.match(panel(f), /Audio: headset/);
+  assert.doesNotMatch(panel(f), /\(selected\)/);
   await f.command('off');
   assert.equal(f.widgets.at(-1).lines, undefined);
   assert.equal(status(f), undefined);
@@ -55,14 +58,14 @@ test('active badges follow the armed selection rather than later saved-route cha
   const f = routes();
   f.ctx.ui.confirm = async () => { f.saved.active = 'headset'; return true; };
   await f.command('on');
-  assert.match(panel(f), /Selected: headset/);
+  assert.match(panel(f), /Audio: headset \(selected\)/);
   ready(f);
-  assert.match(panel(f), /Route: desk/);
-  assert.doesNotMatch(panel(f), /Route: headset/);
+  assert.match(panel(f), /Audio: desk/);
+  assert.doesNotMatch(panel(f), /Audio: headset/);
   await f.event('agent_start');
-  assert.match(status(f), /Route: desk/);
+  assert.match(status(f), /Audio: desk/);
   await f.command('mute');
-  assert.match(panel(f), /Selected: headset/);
+  assert.match(panel(f), /Audio: headset \(selected\)/);
   await f.command('off');
 });
 
@@ -72,24 +75,28 @@ test('switch and rollback never advertise a target as active before readiness or
     await arm(f);
     const pending = f.command('route headset');
     await tick();
-    assert.match(panel(f), /Selected: desk → headset \(switching\)/);
-    assert.doesNotMatch(status(f), /Route: headset/);
+    assert.match(panel(f), /Audio: desk \(selected\) → headset \(switching\)/);
+    assert.doesNotMatch(status(f), /Audio: headset (?!\(selected\))/);
     if (outcome === 'success') {
       ready(f); await pending;
-      assert.match(panel(f), /Route: headset/);
+      assert.match(panel(f), /Audio: headset/);
+      assert.doesNotMatch(panel(f), /\(selected\)/);
     } else if (outcome === 'cancel') {
       await f.command('mute'); await pending;
       ready(f);
       assert.match(panel(f), /MIC CLOSED/);
-      assert.match(panel(f), /Selected: desk/);
-      assert.doesNotMatch(panel(f), /switching|Route: headset/);
+      assert.match(panel(f), /Audio: desk \(selected\)/);
+      assert.doesNotMatch(panel(f), /switching|Audio: headset/);
     } else {
       f.audio({ type: 'error' }); await tick();
-      assert.doesNotMatch(panel(f), /Route: headset|Route: desk/);
+      assert.doesNotMatch(panel(f), /Audio: (?:headset|desk) (?!\(selected\))/);
       if (outcome === 'rollback') ready(f);
       else f.audio({ type: 'error' });
       await pending;
-      if (outcome === 'rollback') assert.match(panel(f), /Route: desk/);
+      if (outcome === 'rollback') {
+        assert.match(panel(f), /Audio: desk/);
+        assert.doesNotMatch(panel(f), /\(selected\)/);
+      }
       else assert.equal(f.widgets.at(-1).lines, undefined);
     }
     const visuals = JSON.stringify([f.widgets.map(widget => widget.lines), f.statuses]);
@@ -106,7 +113,7 @@ test('route names remain available in narrow panels and every rendered line stay
     const lines = component.render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width), `${width}: ${lines.join('\n')}`);
     const text = lines.join('').replaceAll(/[│ ]/gu, '');
-    assert.match(text, /Route:desk/);
+    assert.match(text, /Audio:desk/);
   }
   component.invalidate();
   assert.deepEqual(component.render(80), f.widgets.at(-1).lines);

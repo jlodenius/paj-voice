@@ -141,7 +141,7 @@ test('arming discloses same-device recovery and continued capture when only outp
   await f.command('on');
   assert.match(confirmation, /resume automatically/);
   assert.match(confirmation, /Output loss does not stop the selected microphone/);
-  assert.match(confirmation, /Off\/mute.*recovery/);
+  assert.match(confirmation, /Off\/pause.*recovery/);
 });
 
 test('missing playback does not wake update-only summaries or accept unsafe alternate capture events', async t => {

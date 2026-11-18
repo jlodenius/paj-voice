@@ -80,7 +80,7 @@ test('fallback is active runtime state, not a saved preference change, and speak
   assert.equal(result.details.preferred, 'headset');
   assert.equal(result.details.usingFallback, true);
   const widget = f.widgets.at(-1).component.render(100).map(plain).join('\n');
-  assert.match(widget, /Route: laptop \(fallback\).*Preferred: headset/);
+  assert.match(widget, /Audio: laptop \(fallback\).*Preferred: headset/);
   assert.match(widget, /SPEAKER MODE/);
   f.audio({ type: 'capture_state', listening: false });
   assert.equal(f.controller.state().inputAvailable, true);

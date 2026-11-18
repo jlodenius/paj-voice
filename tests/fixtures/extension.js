@@ -55,6 +55,6 @@ export function fixture(overrides = {}) {
   };
   const command = args => commands.get('paj-voice').handler(args, ctx);
   const audio = frame => workers.at(-1).args.onEvent(frame, workers.at(-1).args.generation);
-  return { ...instance, events, event, tools, pi, ctx, notices, messages, frames, workers, widgets, transformers, statuses, command, audio,
+  return { ...instance, events, event, tools, commands, pi, ctx, notices, messages, frames, workers, widgets, transformers, statuses, command, audio,
     idle() { busy = false; }, replace() { id = 'session-two'; } };
 }
