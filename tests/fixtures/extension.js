@@ -26,14 +26,28 @@ export function fixture(overrides = {}) {
       } },
   };
   const config = {};
-  const instance = registerVoice(pi, Type, { layout: { truncateToWidth, visibleWidth, wrapTextWithAnsi }, env: {}, loadConfig: () => config,
+  const forbidden = () => { throw new Error('Fixture requires an explicit fake for this dependency'); };
+  const defaults = { layout: { truncateToWidth, visibleWidth, wrapTextWithAnsi }, env: { XDG_CONFIG_HOME: '/dev/null' },
+    loadConfig: () => config,
     loadDevices: () => ({ version: 1, input: 'laptop', output: 'headphones' }),
     loadRoutes: () => undefined,
+    saveDevices: forbidden, saveRoute: forbidden, saveFallback: forbidden,
+    startAudioFocus: forbidden, previewBackgroundAudio: forbidden,
     startCompanion(args) {
       const worker = { args, closed: false, send: frame => frames.push(frame), close() { this.closed = true; } };
       workers.push(worker);
       return worker;
-    }, ...overrides });
+    } };
+  for (const key of Object.keys(overrides)) {
+    if (!Object.hasOwn(defaults, key) && !['uuid', 'buildId'].includes(key)) {
+      throw new Error(`Unknown fixture override: ${key}`);
+    }
+  }
+  const options = { ...defaults, ...overrides };
+  for (const [key, value] of Object.entries(defaults)) {
+    options[key] ??= value;
+  }
+  const instance = registerVoice(pi, Type, options);
   const event = async (name, data = {}) => {
     let result;
     for (const handler of handlers.get(name) ?? []) result = await handler(data, ctx) ?? result;
