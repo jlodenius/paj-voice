@@ -10,12 +10,14 @@ interface ControllerOptions {
   send(frame: CompanionCommand): boolean | void;
   changed?(state: VoiceState): void;
   notify?(text: string, level: NotificationLevel): void;
+  recover?(text: string): 'saved' | 'full';
+  close?(): void;
   uuid?: () => string;
   setTimer?: (callback: () => void, milliseconds: number) => Timer;
   clearTimer?: (timer: Timer) => void;
 }
 
-export function createVoiceController({ submit, send, changed = () => {}, notify = () => {}, uuid = randomUUID,
+export function createVoiceController({ submit, send, recover, close, changed = () => {}, notify = () => {}, uuid = randomUUID,
   setTimer = setTimeout, clearTimer = clearTimeout }: ControllerOptions) {
   let sessionId: string | null = null;
   let generation: string | null = null;
@@ -32,6 +34,11 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   let fallbackSent = false;
   let summaryExpected = true;
   let pendingUserSummary = false;
+  let run = 0;
+  let turnSilent = false;
+  let inboxEpoch: number | null = null;
+  let inboxSummaryEpoch: number | null = null;
+  let userOutcomeExpected = false;
   let disposed = false;
   let running = false;
   let lastError: string | null = null;
@@ -52,8 +59,16 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   const playback = createPlaybackHistory();
   const pendingSpeech = new Set<string>();
   const captures = new Set<string>();
+  const limitedCaptures = new Set<string>();
+  let recoveryStopSpeech: string | null = null;
+  let recoveryStopTimer: Timer | null = null;
+  const clearRecoveryStop = () => {
+    if (recoveryStopTimer !== null) clearTimer(recoveryStopTimer);
+    recoveryStopTimer = null;
+    recoveryStopSpeech = null;
+  };
   const reporters = new Map<string, { instructions: string }>();
-  const submissions = new Map<string, { status: 'uncertain' | 'submitted' | 'rejected' }>();
+  const submissions = new Map<string, { status: 'uncertain' | 'submitted' | 'rejected' | 'recovered' }>();
   const announcements = new Map<string, string>();
   const state = (): VoiceState => ({ enabled: enabled && ready, starting: enabled && !ready, eyesFree: enabled && ready,
     sessionId, generation, epoch, muted, listening, speaking, capturing: !!captureId, processing: running,
@@ -144,7 +159,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
         emit();
       };
     },
-    speak({ text, generation: target, epoch: turn, priority = 'normal', key, id = uuid() } = {}) {
+    speak({ text, generation: target, epoch: turn, priority = 'normal', purpose, key, id = uuid() } = {}) {
       if (!enabled || !ready || muted) return unavailable();
       const rememberUnplayed = (reason: string) => {
         if (target !== generation || announcements.has(id) || typeof text !== 'string' ||
@@ -160,12 +175,12 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       if (captureId) { rememberUnplayed('new_speech'); return { status: 'listening' }; }
       if (typeof text !== 'string' || !text.trim() || text.length > 320 ||
           text.trim().split(/\s+/u).length > 50 || /[\u0000-\u001f\u007f]/u.test(text) ||
-          !['normal', 'urgent'].includes(priority) || typeof id !== 'string' || !/^[\w-]{1,128}$/.test(id) ||
+          !['normal', 'urgent'].includes(priority) || (purpose !== undefined && purpose !== 'inbox-summary') || typeof id !== 'string' || !/^[\w-]{1,128}$/.test(id) ||
           (key !== undefined && (typeof key !== 'string' || !key || key.length > 128))) {
         throw new Error('Speech must be plain text, at most 320 characters / 50 words, with a valid priority/key');
       }
       const previous = announcements.get(id);
-      const signature = JSON.stringify([text, priority, key, target, turn]);
+      const signature = JSON.stringify([text, priority, purpose, key, target, turn]);
       if (previous) {
         if (previous !== signature) throw new Error('Announcement ID conflict');
         return { status: 'duplicate', id };
@@ -183,7 +198,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       }
       if (!idleAnnouncement && !statusAnnouncement) {
         activity();
-        turnSpoken = true;
+        if (purpose === 'inbox-summary' && inboxEpoch === epoch) inboxSummaryEpoch = epoch;
+        else turnSpoken = true;
       }
       syncTimers();
       return { status: 'queued', id };
@@ -204,6 +220,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       listening = false;
       captureId = null;
       captures.clear();
+      limitedCaptures.clear();
+      clearRecoveryStop();
       stopSpeech('route_switch');
       activity();
       emit();
@@ -225,6 +243,30 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       return { status: 'acknowledged' as const };
     },
     instructions() { return reporters.values().next().value?.instructions ?? null; },
+    turn() { return run; },
+    inboxPending() { return inboxEpoch === epoch; },
+    incoming() {
+      if (!enabled || !ready || muted || disposed) return false;
+      statusAnnouncement = true;
+      try { api.speak({ text: 'A Paj agent message arrived.', generation, epoch, key: 'paj-arrival' }); }
+      finally { statusAnnouncement = false; }
+      return true;
+    },
+    requireInboxSummary(token: VoiceToken) {
+      if (token.generation !== generation || token.epoch !== epoch) return;
+      inboxEpoch = epoch;
+      inboxSummaryEpoch = null;
+      turnSilent = false;
+      summaryExpected = true;
+    },
+    silenceTurn(token: VoiceToken & { turn: number }) {
+      if (token.generation !== generation || token.epoch !== epoch || token.turn !== run || !running) {
+        return { status: 'stale' as const };
+      }
+      if (!enabled || !ready || muted) return { status: 'unavailable' as const };
+      turnSilent = true;
+      return { status: 'silenced' as const };
+    },
     playback() { return playback.snapshot(); },
     start(id: string) {
       if (disposed) throw new Error('Voice interface was closed');
@@ -240,12 +282,18 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       captureId = null;
       submissions.clear();
       captures.clear();
+      limitedCaptures.clear();
+      clearRecoveryStop();
       announcements.clear();
       playback.clear();
       turnSpoken = false;
       finalAnswerSpoken = false;
       fallbackSent = false;
       pendingUserSummary = false;
+      turnSilent = false;
+      inboxEpoch = null;
+      inboxSummaryEpoch = null;
+      userOutcomeExpected = false;
       idleDismissed = false;
       idleAcknowledgementEpoch = null;
       running = false;
@@ -266,6 +314,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       muted = false;
       captureId = null;
       captures.clear();
+      limitedCaptures.clear();
+      clearRecoveryStop();
       stopSpeech('off');
       playback.clear();
       generation = null;
@@ -283,6 +333,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       muted = value;
       captureId = null;
       captures.clear();
+      limitedCaptures.clear();
+      clearRecoveryStop();
       listening = !value && ready;
       epoch++;
       stopSpeech('mute');
@@ -312,7 +364,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       if (target === generation && (turn !== epoch || captureId)) {
         return api.speak({ text, generation: target, epoch: turn, key: 'answer' });
       }
-      if (!turnSpoken && (!reporters.size || idleAcknowledgementEpoch === epoch) && text) {
+      if (!turnSilent && !turnSpoken && !(inboxSummaryEpoch === epoch && !userOutcomeExpected) && (!reporters.size || idleAcknowledgementEpoch === epoch || inboxEpoch === epoch) && text) {
         const result = api.speak({ text, generation: target, epoch: turn, key: 'answer' });
         if (result.status === 'queued') {
           finalAnswerSpoken = true;
@@ -329,19 +381,25 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       running = false;
       agentActive = false;
       activeTools.clear();
-      if (wasRunning && summaryExpected && enabled && ready && !muted && !blocked && !captureId && !fallbackSent &&
+      const inboxSatisfied = inboxEpoch === epoch && inboxSummaryEpoch === epoch && !userOutcomeExpected;
+      if (wasRunning && !turnSilent && !inboxSatisfied && summaryExpected && enabled && ready && !muted && !blocked && !captureId && !fallbackSent &&
           (!turnSpoken || !finalAnswerSpoken || aborted)) {
         fallbackSent = true;
         const text = aborted ? 'The agent stopped.' : turnSpoken ? 'I’m finished for now.'
           : 'I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.';
         api.speak({ text, generation, epoch, key: turnSpoken ? 'completion' : 'fallback' });
       }
+      inboxEpoch = null;
+      inboxSummaryEpoch = null;
+      userOutcomeExpected = false;
       emit();
     },
     expectSummary({ fromUser = false } = {}) {
       summaryExpected = true;
       pendingUserSummary ||= fromUser;
       if (fromUser) {
+        userOutcomeExpected = true;
+        turnSilent = false;
         idleDismissed = false;
         idleAcknowledgementEpoch = null;
       }
@@ -349,13 +407,16 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
     newRun({ summaryExpected: expected = true } = {}) {
       deliveryUncertain = false;
       if (!running) {
-        summaryExpected = expected || pendingUserSummary;
+        run++;
+        turnSilent = false;
+        userOutcomeExpected = expected || pendingUserSummary;
+        summaryExpected = userOutcomeExpected || inboxEpoch === epoch;
         if (summaryExpected) {
           idleDismissed = false;
           idleAcknowledgementEpoch = null;
         }
       }
-      else if (expected) summaryExpected = true;
+      else if (expected) { summaryExpected = true; userOutcomeExpected = true; }
       pendingUserSummary = false;
       if (!running) activity();
       agentActive = true;
@@ -394,9 +455,14 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
           speechId = null;
           speaking = false;
         }
+        if (frame.id === recoveryStopSpeech) {
+          clearRecoveryStop();
+          return { fatal: true };
+        }
         if (ended) emit();
       }
       if (frame.type === 'addressed') {
+        if (recoveryStopSpeech) return { fatal: true };
         if (muted || typeof frame.id !== 'string' || !/^[\w-]{1,128}$/.test(frame.id) ||
             submissions.has(frame.id) || captures.has(frame.id)) return;
         if (captures.size >= 4) return { fatal: true };
@@ -409,8 +475,52 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
         fallbackSent = true;
         emit();
       }
-      if (frame.type === 'cancelled' && captures.delete(frame.id)) {
+      if (frame.type === 'limit' && !muted && captures.has(frame.id) && !limitedCaptures.has(frame.id)) {
+        limitedCaptures.add(frame.id);
+        inform('Voice duration limit reached. Stop speaking. The captured portion will be transcribed for manual review, not submitted.', 'warning');
+      }
+      if (frame.type === 'review' || (frame.type === 'utterance' && limitedCaptures.has(frame.id))) {
+        if (muted || !captures.has(frame.id) || typeof frame.text !== 'string' ||
+            !frame.text.trim() || frame.text.length > 16384) return;
+        captures.delete(frame.id);
         captureId = [...captures].at(-1) ?? null;
+        limitedCaptures.delete(frame.id);
+        submissions.set(frame.id, { status: 'recovered' });
+        while (submissions.size > 512) submissions.delete(submissions.keys().next().value!);
+        let saved: 'saved' | 'full' | undefined;
+        try { saved = recover?.(frame.text.trim()); } catch {}
+        if (!saved) {
+          inform('Incomplete voice message was not submitted and transcript recovery failed. Voice stopped.', 'error');
+          return { fatal: true };
+        }
+        inform('Incomplete voice message was not submitted. Its captured portion is saved in memory; use /paj-voice recover to review and complete it before sending.', 'warning');
+        const full = saved === 'full';
+        if (full) inform('Recovery storage is full. Voice will stop; review saved drafts before rearming.', 'warning');
+        statusAnnouncement = true;
+        let notice: SpeechResult;
+        try {
+          notice = api.speak({ text: full
+            ? 'Your incomplete message is saved, not sent. Recovery storage is full, so Voice is stopping. Use the voice recover command to review your drafts.'
+            : 'Your message reached the time limit and was not sent. Its captured portion is saved for review. Use the voice recover command.',
+            generation, epoch, key: 'limit-review' });
+        } finally { statusAnnouncement = false; }
+        if (full) {
+          if (notice.status !== 'queued' || !notice.id) return { fatal: true };
+          recoveryStopSpeech = notice.id;
+          const target = generation, id = notice.id;
+          recoveryStopTimer = setTimer(() => {
+            if (generation === target && recoveryStopSpeech === id) close?.();
+          }, 30_000);
+          recoveryStopTimer?.unref?.();
+        }
+        emit();
+        return;
+      }
+      if (frame.type === 'cancelled' && captures.delete(frame.id)) {
+        limitedCaptures.delete(frame.id);
+        captureId = [...captures].at(-1) ?? null;
+        if (frame.reason === 'empty') inform('No speech could be transcribed from that capture. Nothing was submitted.', 'warning');
+        else if (frame.reason === 'utterance_limit') inform('Voice message exceeded the duration limit and was not submitted.', 'warning');
         emit();
       }
       if (frame.type === 'utterance') {
@@ -426,6 +536,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
           const result = submit({ requestId: frame.id, text: frame.text.trim(), sessionId, generation });
           record.status = 'submitted';
           running = true;
+          turnSilent = false;
+          userOutcomeExpected = true;
           summaryExpected = true;
           idleDismissed = false;
           idleAcknowledgementEpoch = null;

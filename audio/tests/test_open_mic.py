@@ -52,7 +52,7 @@ class OpenMicTests(unittest.TestCase):
         config = {"cacheDir": str(root / "cache"), "stt": {"model": "/fake/stt", "computeType": "int8"},
                   "tts": {"model": "/fake/voice", "config": "/fake/voice.json", "volume": 0.4, "lengthScale": 1},
                   "audio": {"input": "laptop", "output": "headphones"},
-                  "turn": {"silenceMs": 800, "maxSeconds": 12, "speechThreshold": 0.001}}
+                  "turn": {"silenceMs": 800, "maxSeconds": 120, "speechThreshold": 0.001}}
         graph = types.SimpleNamespace(paths={"pw-record": "FAKE", "pw-play": "FAKE"},
                                       bind=lambda *args, **kwargs: (Node('laptop', '1', 'Audio/Source', bluetooth=bluetooth),
                                                                     Node('headphones', '2', 'Audio/Sink', bluetooth=bluetooth)),
@@ -148,6 +148,145 @@ class OpenMicTests(unittest.TestCase):
         runtime._segment({"type": "onset", "id": ident}, runtime.epoch)
         runtime._segment({"type": "endpoint", "id": ident, "pcm": pcm, "truncated": False}, runtime.epoch)
 
+    def feed_speech(self, runtime, seconds):
+        now = [0]
+        runtime.segments.clock = lambda: now[0]
+        for _ in range(seconds * 10):
+            now[0] += 0.1
+            runtime.segments.feed(b"\0\0" * 1600, True)
+        return now
+
+    def test_long_normal_speech_is_one_complete_actionable_utterance(self):
+        for seconds in (25, 45, 120):
+            with self.subTest(seconds=seconds):
+                runtime, events, _, _, models, *_ = self.fixture()
+                now = self.feed_speech(runtime, seconds)
+                models.transcribe.assert_not_called()
+                self.assertFalse(any(event["type"] == "limit" for event in events))
+                now[0] += 0.9
+                runtime.segments.feed(b"\0\0" * 1600, False)
+                wait_for(lambda: any(event["type"] == "utterance" for event in events))
+                models.transcribe.assert_called_once()
+                self.assertEqual(len(models.transcribe.call_args.args[0]), (seconds * 10 + 1) * 3200)
+                self.assertEqual(sum(event["type"] == "utterance" for event in events), 1)
+                runtime.shutdown()
+
+    def test_limit_is_immediate_and_prefix_is_review_only_at_physical_endpoint(self):
+        runtime, events, _, _, models, *_ = self.fixture()
+        now = self.feed_speech(runtime, 130)
+        limits = [event for event in events if event["type"] == "limit"]
+        self.assertEqual(len(limits), 1)
+        models.transcribe.assert_not_called()
+        retained = bytes(runtime.segments.current["pcm"])
+        self.assertTrue(retained)
+        self.assertLessEqual(len(retained), 121 * 32000)
+        now[0] += 0.9
+        runtime.segments.feed(b"\0\0" * 1600, False)
+        wait_for(lambda: any(event["type"] == "review" for event in events))
+        models.transcribe.assert_called_once_with(retained)
+        self.assertFalse(any(event["type"] == "utterance" for event in events))
+        self.assertEqual(next(event for event in events if event["type"] == "review"),
+                         {"type": "review", "id": limits[0]["id"], "text": "a request"})
+        self.assertFalse(runtime.pending)
+
+    def test_truncated_empty_transcript_is_cancelled_empty(self):
+        runtime, events, _, _, models, *_ = self.fixture()
+        models.transcribe.return_value = ("  ", 1)
+        runtime._segment({"type": "onset", "id": 1}, runtime.epoch)
+        runtime._segment({"type": "truncated", "id": 1}, runtime.epoch)
+        runtime._segment({"type": "endpoint", "id": 1, "pcm": b"\0\0", "truncated": True}, runtime.epoch)
+        wait_for(lambda: any(event["type"] == "cancelled" for event in events))
+        self.assertEqual(next(event["reason"] for event in events if event["type"] == "cancelled"), "empty")
+        self.assertFalse(any(event["type"] in ("review", "utterance") for event in events))
+
+    def test_mute_and_shutdown_fence_inflight_review(self):
+        for action in ("mute", "shutdown"):
+            with self.subTest(action=action):
+                runtime, events, _, _, models, *_ = self.fixture()
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def transcribe(pcm):
+                    entered.set()
+                    release.wait(2)
+                    return "do not submit", 1
+                models.transcribe.side_effect = transcribe
+                epoch = runtime.epoch
+                runtime._segment({"type": "onset", "id": 1}, epoch)
+                runtime._segment({"type": "endpoint", "id": 1, "pcm": b"\0\0", "truncated": True}, epoch)
+                self.assertTrue(entered.wait(1))
+                runtime.command({"type": action, "muted": True})
+                runtime._segment({"type": "truncated", "id": 1}, epoch)
+                release.set()
+                wait_for(lambda: runtime.busy["recognition"] is None)
+                self.assertFalse(any(event["type"] in ("review", "utterance", "limit") for event in events))
+                self.assertFalse(runtime.pending)
+
+    def test_model_lock_wait_does_not_count_toward_either_watchdog(self):
+        for kind in ("recognition", "synthesis"):
+            with self.subTest(kind=kind):
+                runtime, events, _, _, models, *_ = self.fixture()
+                now = [time.monotonic()]
+                runtime.clock = lambda: now[0]
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def compute(value):
+                    entered.set()
+                    release.wait(2)
+                    return ("result", 1) if kind == "recognition" else b"\0\0"
+                model = models.transcribe if kind == "recognition" else models.synthesize
+                model.side_effect = compute
+                with runtime.model_lock:
+                    if kind == "recognition":
+                        self.utterance(runtime, 1)
+                        wait_for(runtime.jobs.empty)
+                    else:
+                        runtime.command({"type": "speak", "id": "wait", "text": "Wait safely."})
+                        wait_for(runtime.speeches.empty)
+                    now[0] += 30
+                    time.sleep(0.15)
+                    self.assertIsNone(runtime.busy[kind])
+                    self.assertFalse(runtime.closed)
+                    model.assert_not_called()
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(runtime.busy[kind], (now[0], 10))
+                now[0] += 11
+                wait_for(lambda: runtime.closed)
+                self.assertTrue(any(event["type"] == "error" and "budget" in event["message"]
+                                    for event in events))
+                release.set()
+
+    def test_long_recognition_budget_scales_with_audio_and_still_times_out(self):
+        for seconds, budget in ((30, 60), (121, 240)):
+            with self.subTest(seconds=seconds):
+                runtime, events, _, _, models, *_ = self.fixture()
+                now = [time.monotonic()]
+                runtime.clock = lambda: now[0]
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def transcribe(pcm):
+                    entered.set()
+                    release.wait(2)
+                    return "too late", 1
+                models.transcribe.side_effect = transcribe
+                self.utterance(runtime, 1, b"\0\0" * (16000 * seconds))
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(runtime.busy["recognition"], (now[0], budget))
+                now[0] += 11
+                time.sleep(0.15)
+                self.assertFalse(runtime.closed)
+                now[0] += budget
+                wait_for(lambda: runtime.closed)
+                release.set()
+                self.assertTrue(any(event["type"] == "error" for event in events))
+                self.assertFalse(any(event["type"] in ("utterance", "review") for event in events))
+
+    def test_empty_pcm_is_cancelled_without_recognition(self):
+        runtime, events, _, _, models, *_ = self.fixture()
+        self.utterance(runtime, 1, b"")
+        models.transcribe.assert_not_called()
+        self.assertEqual(next(event["reason"] for event in events if event["type"] == "cancelled"), "empty")
+        self.assertFalse(runtime.pending)
+
     def test_bluetooth_capture_accepts_same_device_transition_only_during_intentional_start(self):
         runtime, events, captures, played, _, graph, _ = self.fixture(bluetooth=True, transition=True)
         self.assertEqual(len(captures), 2)
@@ -196,7 +335,13 @@ class OpenMicTests(unittest.TestCase):
             with patch.dict("os.environ", {"PAJ_VOICE_SPEECH_BUNDLE": str(root)}):
                 config = open_mic.validate(base)
                 self.assertEqual(config["stt"]["model"], str(root / "stt"))
-                self.assertEqual(config["turn"]["maxSeconds"], 12)
+                self.assertEqual(config["turn"]["maxSeconds"], 120)
+                for maximum in (5, 30, 120):
+                    self.assertEqual(open_mic.validate({**base, "turn": {"maxSeconds": maximum}})
+                                     ["turn"]["maxSeconds"], maximum)
+                for maximum in (4.9, 120.1, True):
+                    with self.assertRaises(ValueError):
+                        open_mic.validate({**base, "turn": {"maxSeconds": maximum}})
                 for change in ({"addressPhrases": ["paj"]}, {"stt": {"hotwords": "pie"}},
                                {"turn": {"prefixIntervalMs": 500}}):
                     with self.assertRaises(ValueError):

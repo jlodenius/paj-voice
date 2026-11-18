@@ -71,19 +71,30 @@ These are all supported preferences, relative to the shared file's `voice` secti
 | `volume`                    | `40`                    | Speech volume, 0–100; not system volume.  |
 | `speed`                     | `1`                     | Speaking speed, 0.5–2; 1 is normal.       |
 | `pauseSeconds`              | `0.8`                   | Silence before submitting, 0.3–5 sec.    |
-| `maxMessageSeconds`         | `20`                    | One utterance limit, 5–30 sec.           |
+| `maxMessageSeconds`         | `120`                   | One utterance limit, 5–120 sec.          |
 | `feedback.receipt`          | `"Got it."`             | New request acknowledgement.             |
 | `feedback.steeringReceipt`  | `"Steering received."`  | Addition during active work.             |
 | `feedback.progressUpdates`  | `true`                  | Brief updates during long tasks.         |
 | `feedback.idleReminders`    | `true`                  | Up to three idle reminders.              |
 
 Receipt phrases allow 1–8 words and at most 60 characters, without control characters. Progress
-and idle notices are roughly one minute apart; activity resets idle reminders. An overlong
-utterance is discarded, not truncated into a command. Changes apply on the next off/on.
+and idle notices are roughly one minute apart; activity resets idle reminders. Changes apply on
+the next off/on.
+
+Messages support up to two minutes of continuous speech. At the limit, stop speaking: the captured
+portion is transcribed and kept in memory, never submitted as an incomplete command. Use
+`/paj-voice recover` to load it into an empty Pi editor, then review and complete it before sending.
+Up to four incomplete transcripts are retained; Voice stops when that recovery buffer fills.
+Recovery survives Voice off/mute, but session changes and quitting Pi clear it.
 
 `/paj-voice voices` lists installed choices; the default package includes only LJSpeech. Other
 voices must be packaged first; nothing downloads at runtime. Language, compute precision and
 engine tuning are internal, not preferences. See [examples/paj.json](examples/paj.json) for all defaults.
+
+With an updated Paj addon, incoming agent messages request concise spoken summaries, including
+progress updates. Messages follow Paj's normal delivery queue; raw worker reports are not read aloud.
+An explicitly requested silent response suppresses automatic speech for that run, not future inbox
+announcements.
 
 ## Usage
 

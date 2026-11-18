@@ -48,7 +48,7 @@ export function validateConfig(value: unknown) {
     volume: number(value.volume, 40, 0, 100, 'volume must be 0–100'),
     speed: number(value.speed, 1, 0.5, 2, 'speed must be 0.5–2'),
     pauseSeconds: number(value.pauseSeconds, 0.8, 0.3, 5, 'pauseSeconds must be 0.3–5'),
-    maxMessageSeconds: number(value.maxMessageSeconds, 20, 5, 30, 'maxMessageSeconds must be 5–30'),
+    maxMessageSeconds: number(value.maxMessageSeconds, 120, 5, 120, 'maxMessageSeconds must be 5–120'),
     feedback: {
       receipt: receipt(feedback.receipt, 'Got it.', 'feedback.receipt must be 1–8 words, at most 60 characters'),
       steeringReceipt: receipt(feedback.steeringReceipt, 'Steering received.',

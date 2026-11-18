@@ -43,14 +43,66 @@ class SegmentsTests(unittest.TestCase):
         for _ in range(5):
             self.feed(True)
         self.assertEqual(len(self.pauses), 1)
-        self.assertEqual(self.segments.current["pcm"], bytearray())
+        retained = bytes(self.segments.current["pcm"])
+        self.assertTrue(retained)
         self.feed(False, 0.9)
         self.assertEqual([event["type"] for event in self.events],
                          ["onset", "truncated", "endpoint"])
         self.assertTrue(self.events[-1]["truncated"])
-        self.assertFalse(self.events[-1]["pcm"])
+        self.assertEqual(self.events[-1]["pcm"], retained)
         self.feed(True)
         self.assertEqual(len(self.pauses), 2)
+
+    def test_default_accepts_long_speech_without_chunking(self):
+        self.segments = Segments(self.events.append, lambda: self.pauses.append(True),
+                                 lambda: 7, self.clock)
+        for _ in range(650):
+            self.feed(True)
+        self.assertEqual([event["type"] for event in self.events], ["onset"])
+        self.feed(False, 0.9)
+        self.assertEqual([event["type"] for event in self.events], ["onset", "endpoint"])
+        self.assertFalse(self.events[-1]["truncated"])
+        self.assertEqual(len(self.events[-1]["pcm"]), 651 * 3200)
+
+    def test_retained_prefix_includes_preroll_is_bounded_and_not_extended(self):
+        for _ in range(10):
+            self.feed(False)
+        for _ in range(40):
+            self.feed(True)
+        retained = bytes(self.segments.current["pcm"])
+        self.assertEqual(len(retained), 3 * 32000)
+        self.assertEqual([event["type"] for event in self.events], ["onset", "truncated"])
+        for _ in range(100):
+            self.feed(True)
+        self.assertEqual(bytes(self.segments.current["pcm"]), retained)
+        self.feed(False, 0.9)
+        self.assertEqual(self.events[-1]["pcm"], retained)
+        self.assertTrue(self.events[-1]["truncated"])
+        self.assertEqual(len(self.events), 3)
+
+    def test_oversized_crossing_frame_is_sliced_to_the_retained_prefix_bound(self):
+        self.feed(True)
+        self.clock.now += 0.1
+        self.segments.feed(b"\1\0" * 100000, True)
+        retained = bytes(self.segments.current["pcm"])
+        self.assertEqual(retained, b"\0" * 3200 + b"\1\0" * 46400)
+        self.assertEqual([event["type"] for event in self.events], ["onset", "truncated"])
+        self.feed(False, 0.9)
+        self.assertEqual(self.events[-1]["pcm"], retained)
+
+    def test_two_and_a_half_second_pause_keeps_natural_continuations_in_one_turn(self):
+        self.segments.silence = 2.5
+        self.segments.maximum = 120
+        self.feed(True)
+        self.feed(False, 2)
+        self.feed(True, 0.1)
+        self.assertEqual([event['type'] for event in self.events], ['onset'])
+        self.feed(False, 2.4)
+        self.assertEqual(len(self.events), 1)
+        self.feed(False, 0.11)
+        self.assertEqual([event['type'] for event in self.events], ['onset', 'endpoint'])
+        self.assertFalse(self.events[-1]['truncated'])
+        self.assertEqual(len(self.pauses), 1)
 
     def test_clearing_prompt_preroll_does_not_mint_new_onset(self):
         self.feed(True)

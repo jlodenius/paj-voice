@@ -4,7 +4,7 @@
     "volume": 40,
     "speed": 1,
     "pauseSeconds": 0.8,
-    "maxMessageSeconds": 20,
+    "maxMessageSeconds": 120,
     "feedback": {
       "receipt": "Got it.",
       "steeringReceipt": "Steering received.",

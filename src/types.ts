@@ -10,6 +10,7 @@ export interface VoiceToken {
 export interface SpeechRequest extends Partial<VoiceToken> {
   text?: string;
   priority?: SpeechPriority;
+  purpose?: 'inbox-summary';
   key?: string;
   id?: string;
 }
@@ -87,6 +88,12 @@ export interface PajIdentity {
   child?: boolean;
   parentSessionId?: string;
   childTaskId?: string;
+}
+
+export interface PajMessageDelivery {
+  sessionId: string;
+  messageIds: string[];
+  requestTurn(): void;
 }
 
 export interface PajApi {

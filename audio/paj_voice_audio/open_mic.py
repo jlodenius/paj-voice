@@ -63,7 +63,7 @@ def validate(value):
     turn = dict(value.get("turn", {}))
     if set(turn) - {"silenceMs", "maxSeconds", "speechThreshold"}:
         raise ValueError("Prefix/wake timing settings are not supported")
-    for key, default, low, high in (("silenceMs", 800, 300, 5000), ("maxSeconds", 12, 5, 30),
+    for key, default, low, high in (("silenceMs", 800, 300, 5000), ("maxSeconds", 120, 5, 120),
                                      ("speechThreshold", 0.001, 0.001, 0.2)):
         turn.setdefault(key, default)
         number = turn[key]
@@ -341,13 +341,16 @@ class Runtime:
                         raise RuntimeError("Too many pending utterances")
                     self.pending.add(ident)
                     self.emit({"type": "addressed", "id": ident})
+                elif event["type"] == "truncated":
+                    self.emit({"type": "limit", "id": ident})
                 elif event["type"] == "endpoint":
                     self.input_active = False
-                    if event["truncated"] or not event["pcm"]:
+                    if not event["pcm"]:
                         self.pending.discard(ident)
-                        self.emit({"type": "cancelled", "id": ident, "reason": "utterance_limit"})
+                        self.emit({"type": "cancelled", "id": ident, "reason": "empty"})
                     else:
-                        self.jobs.put_nowait({"id": ident, "epoch": epoch, "pcm": event["pcm"]})
+                        self.jobs.put_nowait({"id": ident, "epoch": epoch, "pcm": event["pcm"],
+                                             "truncated": event["truncated"]})
         except Exception as error:
             self.fail(error)
 
@@ -361,16 +364,24 @@ class Runtime:
                 with self.lock:
                     if self.closed or self.muted or job["epoch"] != self.epoch:
                         continue
-                    self.busy["recognition"] = self.clock()
                 with self.model_lock:
-                    text, _ = self.models.transcribe(job.pop("pcm"))
+                    with self.lock:
+                        if self.closed or self.muted or job["epoch"] != self.epoch:
+                            continue
+                        seconds = min(120, len(job["pcm"]) / 32000)
+                        self.busy["recognition"] = (self.clock(), max(10, 2 * seconds))
+                    try:
+                        text, _ = self.models.transcribe(job.pop("pcm"))
+                    finally:
+                        self.busy["recognition"] = None
                 if not isinstance(text, str) or len(text) > 16384:
                     raise RuntimeError("Recognition output exceeded the text bound")
                 with self.lock:
                     if self.closed or self.muted or job["epoch"] != self.epoch:
                         continue
                     self.pending.discard(job["id"])
-                    self.emit({"type": "utterance", "id": job["id"], "text": text} if text.strip()
+                    self.emit({"type": "review" if job["truncated"] else "utterance",
+                               "id": job["id"], "text": text} if text.strip()
                               else {"type": "cancelled", "id": job["id"], "reason": "empty"})
             except Exception as error:
                 self.fail(error)
@@ -396,9 +407,15 @@ class Runtime:
                 with self.lock:
                     if not self._speech_current(job):
                         continue
-                    self.busy["synthesis"] = self.clock()
                 with self.model_lock:
-                    pcm = self.models.synthesize(job["text"])
+                    with self.lock:
+                        if not self._speech_current(job):
+                            continue
+                        self.busy["synthesis"] = (self.clock(), 10)
+                    try:
+                        pcm = self.models.synthesize(job["text"])
+                    finally:
+                        self.busy["synthesis"] = None
                 with self.lock:
                     if self._speech_current(job):
                         done = threading.Event()
@@ -465,9 +482,9 @@ class Runtime:
                 capture = self.capture
                 if capture:
                     capture.health()
-                for started in self.busy.values():
-                    if started is not None and self.clock() - started > 10:
-                        raise RuntimeError("Local inference exceeded ten seconds")
+                for active in self.busy.values():
+                    if active is not None and self.clock() - active[0] > active[1]:
+                        raise RuntimeError("Local inference exceeded its active computation budget")
             except Exception as error:
                 self.fail(error)
                 return

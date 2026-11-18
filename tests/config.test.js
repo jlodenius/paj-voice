@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { configPath, loadConfig, validateConfig, runtimeConfig } from '../src/config.ts';
 
 export const valid = () => ({ voice: 'ljspeech', volume: 40, speed: 1,
-  pauseSeconds: 0.8, maxMessageSeconds: 20, feedback: { receipt: 'Got it.',
+  pauseSeconds: 0.8, maxMessageSeconds: 120, feedback: { receipt: 'Got it.',
     steeringReceipt: 'Steering received.', progressUpdates: true, idleReminders: true } });
 
 test('empty preferences provide only normal user choices with documented defaults', () => {
@@ -27,7 +27,7 @@ test('technical settings and unknown preferences are rejected rather than silent
 test('user preference types, ranges and short receipt limits are enforced', () => {
   for (const change of [{ volume: null }, { voice: null }, { feedback: null }, { volume: -1 }, { volume: 101 }, { volume: '40' }, { volume: NaN },
     { speed: 0.4 }, { speed: 2.1 }, { pauseSeconds: 0.2 }, { pauseSeconds: 6 },
-    { maxMessageSeconds: 4 }, { maxMessageSeconds: 31 }, { voice: '/path/to/voice' },
+    { maxMessageSeconds: 4 }, { maxMessageSeconds: 121 }, { voice: '/path/to/voice' },
     { voice: 'https://remote/voice' }, { feedback: { progressUpdates: 1 } },
     { feedback: { idleReminders: 'yes' } }, { feedback: { receipt: '' } },
     { feedback: { receipt: 'a '.repeat(9) } }, { feedback: { receipt: 'x'.repeat(61) } },
@@ -45,8 +45,13 @@ test('runtime compilation hides compute, language, thresholds and local device b
   assert.deepEqual(config.stt, { computeType: 'int8' });
   assert.deepEqual(config.tts, { voice: 'ljspeech', volume: 0.25, lengthScale: 0.5 });
   assert.deepEqual(config.audio, { input: 'laptop', output: 'headphones', echoCancellation: 'none' });
-  assert.deepEqual(config.turn, { silenceMs: 1200, maxSeconds: 20, speechThreshold: 0.001 });
+  assert.deepEqual(config.turn, { silenceMs: 1200, maxSeconds: 120, speechThreshold: 0.001 });
   assert.deepEqual(config.languages, ['en']);
+});
+
+test('a two-and-a-half-second endpoint preserves fractional preference and compiles to milliseconds', () => {
+  assert.equal(validateConfig({ pauseSeconds: 2.5 }).pauseSeconds, 2.5);
+  assert.equal(runtimeConfig({ pauseSeconds: 2.5 }, { input: 'mic', output: 'speaker' }).turn.silenceMs, 2500);
 });
 
 function configFile(t, value) {

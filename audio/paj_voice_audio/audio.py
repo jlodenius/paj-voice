@@ -31,7 +31,7 @@ class Capture(PipeCapture):
 
 
 class Segments:
-    def __init__(self, emit, pause, epoch, clock=time.monotonic, silence=0.8, maximum=12):
+    def __init__(self, emit, pause, epoch, clock=time.monotonic, silence=0.8, maximum=120):
         self.emit, self.pause, self.epoch, self.clock = emit, pause, epoch, clock
         self.silence, self.maximum = silence, maximum
         self.lock = threading.RLock()
@@ -75,13 +75,14 @@ class Segments:
                            "epoch": self.current["epoch"], "at": now})
             else:
                 turn = self.current
+                limit = int((self.maximum + 1) * 16000) * 2
+                overflow = len(turn["pcm"]) + len(pcm) > limit
                 if not turn["discard"]:
-                    turn["pcm"].extend(pcm)
+                    turn["pcm"].extend(pcm[:max(0, limit - len(turn["pcm"]))])
                 if voiced:
                     turn["last"] = now
-                if not turn["discard"] and (now - turn["start"] > self.maximum
-                                             or len(turn["pcm"]) > (self.maximum + 1) * 32000):
-                    turn["pcm"].clear()
+                # Endpoint silence must not turn an otherwise complete utterance into a partial one.
+                if not turn["discard"] and voiced and (now - turn["start"] > self.maximum or overflow):
                     turn["discard"] = True
                     self.emit({"type": "truncated", "id": turn["id"]})
                 if not voiced and now - turn["last"] >= self.silence:
