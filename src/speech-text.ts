@@ -8,6 +8,6 @@ export function spokenAnswer(message?: AnswerMessage | null): string | null {
       part.type === 'text' && typeof part.text === 'string')
     .map((part: { text: string }) => part.text).join(' ').trim();
   if (!text || text.length > 320 || text.split(/\s+/u).length > 50 ||
-      /[\u0000-\u001f\u007f]|https?:\/\/|[*_`#<>\[\]]/u.test(text)) return null;
+      /[\u0000-\u001f\u007f]|https?:\/\/|[*_`#<>]|\[[^\]]*\](?:\(|\[)|^\s*\[[^\]]+\]:/u.test(text)) return null;
   return text;
 }

@@ -103,7 +103,7 @@ test('an explicit inbox summary tool call is the only completion for an inbox-on
 });
 
 test('inbox progress or its summary cannot discharge a real user outcome obligation', async t => {
-  for (const purpose of [undefined, 'inbox-summary']) {
+  for (const purpose of [undefined, 'progress', 'inbox-summary']) {
     const f = await armed(t);
     await f.event('input', { source: 'extension', text: 'Finish the actual task.' });
     await f.event('before_agent_start', { messageType: 'user' });
@@ -114,7 +114,7 @@ test('inbox progress or its summary cannot discharge a real user outcome obligat
       text: 'The worker is still reviewing.', ...(purpose ? { purpose } : {}) });
     await f.event('message_end', { message: reply('') });
     await f.event('agent_settled');
-    assert.match(speech(f).at(-1).text, purpose ? /did not produce a spoken summary/ : /finished for now/);
+    assert.match(speech(f).at(-1).text, purpose === 'progress' ? /finished for now/ : /did not produce a spoken summary/);
     assert.equal(speech(f).length, 3);
   }
 });

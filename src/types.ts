@@ -10,7 +10,7 @@ export interface VoiceToken {
 export interface SpeechRequest extends Partial<VoiceToken> {
   text?: string;
   priority?: SpeechPriority;
-  purpose?: 'inbox-summary';
+  purpose?: 'answer' | 'progress' | 'inbox-summary';
   key?: string;
   id?: string;
 }

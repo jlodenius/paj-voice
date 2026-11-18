@@ -175,7 +175,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       if (captureId) { rememberUnplayed('new_speech'); return { status: 'listening' }; }
       if (typeof text !== 'string' || !text.trim() || text.length > 320 ||
           text.trim().split(/\s+/u).length > 50 || /[\u0000-\u001f\u007f]/u.test(text) ||
-          !['normal', 'urgent'].includes(priority) || (purpose !== undefined && purpose !== 'inbox-summary') || typeof id !== 'string' || !/^[\w-]{1,128}$/.test(id) ||
+          !['normal', 'urgent'].includes(priority) || (purpose !== undefined && !['answer', 'progress', 'inbox-summary'].includes(purpose)) || typeof id !== 'string' || !/^[\w-]{1,128}$/.test(id) ||
           (key !== undefined && (typeof key !== 'string' || !key || key.length > 128))) {
         throw new Error('Speech must be plain text, at most 320 characters / 50 words, with a valid priority/key');
       }
@@ -199,7 +199,10 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       if (!idleAnnouncement && !statusAnnouncement) {
         activity();
         if (purpose === 'inbox-summary' && inboxEpoch === epoch) inboxSummaryEpoch = epoch;
-        else turnSpoken = true;
+        else {
+          turnSpoken = true;
+          if (purpose === 'answer') finalAnswerSpoken = true;
+        }
       }
       syncTimers();
       return { status: 'queued', id };

@@ -361,7 +361,7 @@ test('real Pi projects voice custom context and executes only intentional concis
   spoken = (await f.inspect()).journal.filter(frame => frame.type === 'speak');
   assert.deepEqual(spoken.map(frame => frame.text),
     ['I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.',
-      'The isolated test passed.', 'I’m finished for now.']);
+      'The isolated test passed.']);
   const result = f.events.find(event => event.type === 'tool_execution_end' && event.toolName === 'voice_speak');
   assert.equal(result.isError, false);
   assert.equal(result.result.details.status, 'queued');
@@ -375,7 +375,7 @@ test('real Pi projects voice custom context and executes only intentional concis
   assertHidden(await f.inspect());
   await f.prompt('Voice is now off.');
   assertVoiceContext(f.requests.at(-1), false);
-  assert.equal((await f.inspect()).journal.filter(frame => frame.type === 'speak').length, 3);
+  assert.equal((await f.inspect()).journal.filter(frame => frame.type === 'speak').length, 2);
 });
 
 test('real Pi without Paj admits fake speech and reload disposes worker and event subscriptions', realPi, async t => {
