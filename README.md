@@ -10,7 +10,8 @@ Both models are packaged for CPU use. Pi handles the conversation with your conf
 ## Install
 
 Requires Linux, Nix, PipeWire, Pi 1.5.2 or newer, a non-Bluetooth microphone, and headphones.
-The package includes the audio runtime and speech models; no Python or model setup is needed.
+Nix is currently the only supported installation method. It packages Python, native speech libraries,
+audio tools, and pinned models together, so no separate Python or model setup is needed.
 
 ### NixOS
 
