@@ -40,7 +40,7 @@ def wait_for(predicate):
 
 
 class OpenMicTests(unittest.TestCase):
-    def fixture(self, hold_load=False, capture_process=False, bluetooth=False, transition=False):
+    def fixture(self, hold_load=False, capture_process=False, bluetooth=False, transition=False, prepare=None):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
@@ -57,6 +57,7 @@ class OpenMicTests(unittest.TestCase):
                                       bind=lambda *args, **kwargs: (Node('laptop', '1', 'Audio/Source', bluetooth=bluetooth),
                                                                     Node('headphones', '2', 'Audio/Sink', bluetooth=bluetooth)),
                                       check=Mock(), profile_transition=Mock(return_value=transition))
+        graph.recover = Mock(side_effect=lambda frozen: frozen)
         if bluetooth:
             config['audio'].update(input='bluez_input.old', output='bluez_output.old',
                                    inputDevice='bluez_card.chosen', outputDevice='bluez_card.chosen')
@@ -134,13 +135,15 @@ class OpenMicTests(unittest.TestCase):
             stack.enter_context(patch.object(open_mic, name, replacement))
         stack.enter_context(patch.dict(sys.modules, {"pysilero_vad":
                             types.SimpleNamespace(SileroVoiceActivityDetector=object)}))
+        if prepare:
+            prepare(config, graph, models)
         runtime = open_mic.Runtime(events.append)
         self.addCleanup(runtime.shutdown)
         self.addCleanup(release_load.set)
         runtime.command({"type": "configure", "config": {}})
         self.assertTrue(load_entered.wait(1))
         if not hold_load:
-            wait_for(lambda: runtime.ready and "ready" in played)
+            wait_for(lambda: runtime.ready and ("ready" in played or runtime.target is None))
         return runtime, events, captures, played, models, graph, release_load
 
     def utterance(self, runtime, ident, pcm=b"\0\0" * 512):
@@ -287,6 +290,99 @@ class OpenMicTests(unittest.TestCase):
         self.assertEqual(next(event["reason"] for event in events if event["type"] == "cancelled"), "empty")
         self.assertFalse(runtime.pending)
 
+    def test_real_recognition_and_synthesis_errors_remain_fatal(self):
+        for kind in ['recognition', 'synthesis']:
+            with self.subTest(kind=kind):
+                runtime, events, _, _, models, graph, _ = self.fixture()
+                if kind == 'recognition':
+                    graph.recover.side_effect = None
+                    graph.recover.return_value = (runtime.frozen[0], None)
+                    wait_for(lambda: not runtime.output_available)
+                    models.transcribe.side_effect = RuntimeError('Real model failure')
+                    self.utterance(runtime, 1)
+                else:
+                    models.synthesize.side_effect = RuntimeError('Real model failure')
+                    runtime.command({'type': 'speak', 'id': 'fail', 'text': 'Fail loudly.'})
+                wait_for(lambda: runtime.closed)
+                self.assertTrue(any(e['type'] == 'error' and 'Real model failure' in e['message'] for e in events))
+
+    def test_watchdog_runs_even_when_recovery_graph_inspection_is_blocked(self):
+        runtime, events, _, _, models, graph, _ = self.fixture()
+        graph_entered, graph_release = threading.Event(), threading.Event()
+        model_entered, model_release = threading.Event(), threading.Event()
+        self.addCleanup(graph_release.set)
+        self.addCleanup(model_release.set)
+        now = [time.monotonic()]
+        runtime.clock = lambda: now[0]
+        def transcribe(pcm):
+            model_entered.set()
+            model_release.wait(4)
+            return 'Too late', 1
+        def recover(frozen):
+            graph_entered.set()
+            graph_release.wait(4)
+            return frozen
+        models.transcribe.side_effect = transcribe
+        graph.recover.side_effect = recover
+        self.utterance(runtime, 1)
+        self.assertTrue(model_entered.wait(1))
+        now[0] += 2
+        self.assertTrue(graph_entered.wait(1))
+        now[0] += 11
+        wait_for(lambda: runtime.closed)
+        self.assertTrue(any(e['type'] == 'error' and 'budget' in e['message'] for e in events))
+
+    def test_output_loss_keeps_input_and_pending_then_rebinds_without_replay(self):
+        runtime, events, captures, played, _, graph, _ = self.fixture()
+        epoch = runtime.epoch
+        runtime._interrupt(epoch)
+        runtime._segment({'type': 'onset', 'id': 1}, epoch)
+        pending = set(runtime.pending)
+        source, target = runtime.frozen
+        graph.recover.side_effect = None
+        graph.recover.return_value = (source, None)
+        wait_for(lambda: not runtime.output_available)
+        self.assertTrue(runtime.input_available and runtime.ready)
+        self.assertFalse(captures[0].closed)
+        self.assertEqual(runtime.pending, pending)
+        runtime._segment({'type': 'endpoint', 'id': 1, 'pcm': b'\0\0', 'truncated': False}, epoch)
+        wait_for(lambda: any(e['type'] == 'utterance' for e in events))
+        runtime.command({'type': 'speak', 'id': 'lost', 'text': 'Never replay.'})
+        graph.recover.return_value = (source, target)
+        wait_for(lambda: runtime.output_available)
+        self.assertNotIn('lost', played)
+        self.assertEqual(runtime.epoch, epoch)
+        self.assertEqual([e for e in events if e['type'] == 'availability'], [
+            {'type': 'availability', 'input': True, 'output': False, 'fallback': False,
+             'listening': True, 'speakerMode': False},
+            {'type': 'availability', 'input': True, 'output': True, 'fallback': False,
+             'listening': True, 'speakerMode': False}])
+
+    def test_input_loss_cancels_partial_and_recovery_uses_fresh_epoch_and_gate(self):
+        runtime, events, captures, _, _, graph, _ = self.fixture()
+        epoch, gate = runtime.epoch, runtime.gate
+        runtime._interrupt(epoch)
+        runtime._segment({'type': 'onset', 'id': 1}, epoch)
+        source, target = runtime.frozen
+        graph.recover.side_effect = None
+        graph.recover.return_value = (None, target)
+        wait_for(lambda: not runtime.input_available)
+        self.assertTrue(runtime.ready and runtime.output_available)
+        self.assertFalse(runtime.pending)
+        self.assertTrue(captures[0].closed)
+        self.assertTrue(any(e['type'] == 'cancelled' and e['reason'] == 'input_disconnected' for e in events))
+        runtime._segment({'type': 'endpoint', 'id': 1, 'pcm': b'\0\0', 'truncated': False}, epoch)
+        self.assertFalse(any(e['type'] == 'utterance' for e in events))
+        graph.recover.return_value = (source, target)
+        wait_for(lambda: runtime.input_available)
+        self.assertIsNot(runtime.gate, gate)
+        self.assertGreater(runtime.epoch, epoch)
+        runtime._capture_fault(RuntimeError('Old recorder'), epoch)
+        self.assertTrue(runtime.input_available)
+        self.utterance(runtime, 1)
+        wait_for(lambda: any(e['type'] == 'utterance' for e in events))
+        self.assertEqual(sum(e['type'] == 'ready' for e in events), 1)
+
     def test_bluetooth_capture_accepts_same_device_transition_only_during_intentional_start(self):
         runtime, events, captures, played, _, graph, _ = self.fixture(bluetooth=True, transition=True)
         self.assertEqual(len(captures), 2)
@@ -296,10 +392,110 @@ class OpenMicTests(unittest.TestCase):
         old_epoch = runtime.epoch - 1
         runtime._capture_fault(RuntimeError('Obsolete capture error'), old_epoch)
         self.assertFalse(runtime.closed)
-        graph.check.side_effect = RuntimeError('Disconnected after readiness')
-        wait_for(lambda: runtime.closed)
+        graph.recover.side_effect = RuntimeError('Disconnected after readiness')
+        wait_for(lambda: not runtime.input_available)
+        self.assertFalse(runtime.closed)
+        self.assertTrue(runtime.ready)
         self.assertEqual(len(captures), 2)
         self.assertTrue(all(capture.closed for capture in captures))
+
+    def test_output_loss_discards_inflight_and_queued_speech_even_if_synthesis_finishes_after_return(self):
+        runtime, events, _, played, models, graph, _ = self.fixture()
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def synthesize(text):
+            if text == 'Old speech.':
+                entered.set()
+                release.wait(4)
+            return b'\0\0' * 100
+        models.synthesize.side_effect = synthesize
+        runtime.command({'type': 'speak', 'id': 'old', 'text': 'Old speech.'})
+        self.assertTrue(entered.wait(1))
+        runtime.command({'type': 'speak', 'id': 'queued', 'text': 'Queued speech.'})
+        source, target = runtime.frozen
+        old_output_epoch = runtime.output_epoch
+        graph.recover.side_effect = None
+        graph.recover.return_value = (source, None)
+        wait_for(lambda: not runtime.output_available)
+        wait_for(lambda: any(e['type'] == 'speech_end' and e['id'] == 'old' for e in events))
+        self.assertFalse(release.is_set())
+        graph.recover.return_value = (source, target)
+        wait_for(lambda: runtime.output_available)
+        runtime._speaker_event({'type': 'fault', 'message': 'Old output'}, old_output_epoch)
+        self.assertTrue(runtime.output_available)
+        release.set()
+        wait_for(lambda: any(e['type'] == 'speech_end' and e['id'] == 'old' for e in events))
+        self.assertNotIn('old', played)
+        self.assertNotIn('queued', played)
+        for ident in ['old', 'queued']:
+            self.assertEqual([e for e in events if e['type'] == 'speech_end' and e['id'] == ident],
+                             [{'type': 'speech_end', 'id': ident, 'completed': False}])
+        runtime.command({'type': 'speak', 'id': 'future', 'text': 'New speech.'})
+        wait_for(lambda: 'future' in played)
+
+    def test_slow_input_warmup_does_not_block_independent_output_recovery(self):
+        runtime, events, captures, _, _, graph, _ = self.fixture()
+        source, target = runtime.frozen
+        graph.recover.side_effect = None
+        graph.recover.return_value = (None, None)
+        wait_for(lambda: not runtime.input_available and not runtime.output_available)
+        with patch.object(type(captures[0]), 'start', lambda capture: None):
+            graph.recover.return_value = (source, None)
+            wait_for(lambda: len(captures) == 2)
+            self.assertFalse(runtime.input_available)
+            graph.recover.return_value = (source, target)
+            wait_for(lambda: runtime.output_available)
+            self.assertFalse(runtime.input_available)
+            self.assertFalse(runtime.closed)
+            self.assertEqual(len(captures), 2)
+
+    def test_input_recovery_never_replaces_valid_answer_or_stalls_future_speech(self):
+        runtime, events, _, played, models, graph, _ = self.fixture()
+        source, target = runtime.frozen
+        graph.recover.side_effect = None
+        graph.recover.return_value = (None, target)
+        wait_for(lambda: not runtime.input_available)
+        runtime.command({'type': 'speak', 'id': 'answer', 'text': 'Keep this answer playing.'})
+        wait_for(lambda: 'answer' in played)
+        answer_done = runtime.current_playback[1]
+        graph.recover.return_value = (source, target)
+        wait_for(lambda: runtime.input_available)
+        self.assertEqual(played, ['ready', 'answer'])
+        self.assertFalse(answer_done.is_set())
+        self.assertEqual(runtime.current_playback[0], 'answer')
+        runtime._speaker_event({'type': 'played', 'id': 'ready'})
+        runtime.command({'type': 'speak', 'id': 'next', 'text': 'Play this answer next.'})
+        self.assertFalse(answer_done.is_set())
+        runtime._speaker_event({'type': 'played', 'id': 'answer'})
+        wait_for(lambda: 'next' in played)
+        self.assertTrue(answer_done.is_set())
+        self.assertEqual(models.synthesize.call_count, 2)
+        self.assertEqual([e for e in events if e['type'] == 'speech_end' and e['id'] == 'answer'],
+                         [{'type': 'speech_end', 'id': 'answer', 'completed': True}])
+
+    def test_input_can_recover_without_output_and_recovery_creator_stays_alive(self):
+        runtime, events, captures, played, _, graph, _ = self.fixture(capture_process=True)
+        source, target = runtime.frozen
+        old_output_epoch = runtime.output_epoch
+        old_epoch = runtime.epoch
+        graph.recover.side_effect = None
+        graph.recover.return_value = (None, None)
+        wait_for(lambda: not runtime.input_available and not runtime.output_available)
+        graph.recover.return_value = (source, None)
+        wait_for(lambda: runtime.input_available)
+        self.assertFalse(runtime.output_available)
+        self.assertEqual(played, ['ready'])
+        self.assertEqual(len(captures), 2)
+        time.sleep(0.15)
+        self.assertIsNone(captures[-1].child.process.poll())
+        runtime._speaker_event({'type': 'fault', 'message': 'Old sink'}, old_output_epoch)
+        runtime._capture_fault(RuntimeError('Old capture'), old_epoch)
+        self.assertTrue(runtime.input_available)
+        graph.recover.return_value = (source, target)
+        wait_for(lambda: runtime.output_available)
+        self.assertEqual(played, ['ready'])
+        runtime.shutdown()
+        self.assertIsNotNone(captures[-1].child.process.poll())
 
     def test_bluetooth_start_fault_without_expected_graph_transition_never_retries(self):
         runtime, events, captures, _, _, graph, release = self.fixture(hold_load=True, bluetooth=True)
@@ -336,6 +532,20 @@ class OpenMicTests(unittest.TestCase):
                 config = open_mic.validate(base)
                 self.assertEqual(config["stt"]["model"], str(root / "stt"))
                 self.assertEqual(config["turn"]["maxSeconds"], 120)
+                fallback = {'name': 'Built-in', 'input': 'builtin-mic', 'output': 'builtin-speakers',
+                            'inputDevice': 'alsa_card.builtin', 'outputDevice': 'alsa_card.builtin'}
+                selected = {**base, 'audio': {**base['audio'], 'fallback': fallback}}
+                self.assertEqual(open_mic.validate(selected)['audio']['fallback'], fallback)
+                marked = {**selected, 'audio': {**selected['audio'], 'speakerMode': True,
+                                               'fallback': {**fallback, 'speakerMode': True}}}
+                self.assertTrue(open_mic.validate(marked)['audio']['fallback']['speakerMode'])
+                for invalid in (None, [], {}, {**fallback, 'name': ''}, {**fallback, 'name': 'bad\nname'},
+                                {**fallback, 'input': 'default'}, {**fallback, 'input': 'sink.monitor'},
+                                {**fallback, 'output': 'auto'}, {**fallback, 'inputDevice': 17},
+                                {**fallback, 'outputDevice': 'bad\nidentity'}, {**fallback, 'other': True},
+                                {**fallback, 'speakerMode': 'true'}):
+                    with self.assertRaises(ValueError):
+                        open_mic.validate({**base, 'audio': {**base['audio'], 'fallback': invalid}})
                 for maximum in (5, 30, 120):
                     self.assertEqual(open_mic.validate({**base, "turn": {"maxSeconds": maximum}})
                                      ["turn"]["maxSeconds"], maximum)

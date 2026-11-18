@@ -17,7 +17,8 @@ test('empty preferences provide only normal user choices with documented default
 test('technical settings and unknown preferences are rejected rather than silently retained', () => {
   for (const change of [{ version: 1 }, { languages: ['en'] }, { responseLanguage: 'en' },
     { stt: { computeType: 'int8' } }, { tts: { model: '/voice.onnx' } },
-    { audio: { input: 'microphone' } }, { turn: { speechThreshold: 0.001 } },
+    { audio: { input: 'microphone' } }, { fallback: 'desk' }, { speakerMode: true },
+    { turn: { speechThreshold: 0.001 } },
     { python: '/program' }, { cacheDir: '/cache' }, { addressPhrases: ['paj'] },
     { feedback: { unknown: true } }]) {
     assert.throws(() => validateConfig(change), /Invalid voice configuration/);
@@ -47,6 +48,32 @@ test('runtime compilation hides compute, language, thresholds and local device b
   assert.deepEqual(config.audio, { input: 'laptop', output: 'headphones', echoCancellation: 'none' });
   assert.deepEqual(config.turn, { silenceMs: 1200, maxSeconds: 120, speechThreshold: 0.001 });
   assert.deepEqual(config.languages, ['en']);
+});
+
+test('runtime compilation includes only explicitly configured private fallback targets', () => {
+  const preferred = { input: 'headset-mic', output: 'headset-output' };
+  const fallback = { name: 'desk', input: 'builtin-mic', output: 'builtin-speakers',
+    inputDevice: 'builtin-input-card', outputDevice: 'builtin-output-card' };
+  assert.equal(Object.hasOwn(runtimeConfig({}, preferred).audio, 'fallback'), false);
+  assert.deepEqual(runtimeConfig({}, preferred, fallback).audio, {
+    ...preferred, echoCancellation: 'none', fallback });
+  assert.deepEqual(runtimeConfig({}, preferred, { name: 'desk', input: 'mic', output: 'speakers' }).audio.fallback,
+    { name: 'desk', input: 'mic', output: 'speakers' });
+  assert.equal(runtimeConfig({}, preferred, fallback).turn.maxSeconds, 120);
+  assert.equal(runtimeConfig({}, preferred, fallback).turn.silenceMs, 800);
+});
+
+test('runtime emits speaker mode only for explicitly guarded local routes', () => {
+  const devices = { input: 'mic', output: 'speaker' };
+  for (const speakerMode of [undefined, false]) {
+    const audio = runtimeConfig({}, { ...devices, speakerMode }, { ...devices, name: 'desk', speakerMode }).audio;
+    assert.equal(Object.hasOwn(audio, 'speakerMode'), false);
+    assert.equal(Object.hasOwn(audio.fallback, 'speakerMode'), false);
+  }
+  const audio = runtimeConfig({}, { ...devices, speakerMode: true },
+    { ...devices, name: 'desk', speakerMode: true }).audio;
+  assert.equal(audio.speakerMode, true);
+  assert.equal(audio.fallback.speakerMode, true);
 });
 
 test('a two-and-a-half-second endpoint preserves fractional preference and compiles to milliseconds', () => {

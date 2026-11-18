@@ -43,6 +43,8 @@ def exact_name(name, kind):
         not isinstance(name, str)
         or not name.strip()
         or name != name.strip()
+        or len(name) > 1024
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
         or name.lower() in ("default", "auto", "pipewire", "pulse", "0", "-1")
         or name.startswith("@DEFAULT")
         or (kind == "Audio/Source" and "monitor" in name.lower())
@@ -182,6 +184,16 @@ class Graph:
         )
         return self.bound
 
+    def available(self, source, sink, input_device=None, output_device=None, deadline=None):
+        entries = self.snapshot(deadline)
+        result = []
+        for name, kind, device in ((source, 'Audio/Source', input_device), (sink, 'Audio/Sink', output_device)):
+            try:
+                result.append(resolve_node(entries, name, kind, device))
+            except (ValueError, RuntimeError):
+                result.append(None)
+        return tuple(result)
+
     def profile_transition(self, device, deadline=None):
         entries = self.snapshot(deadline)
         if not bluetooth_device(entries, device):
@@ -208,6 +220,28 @@ class Graph:
                 return False
             changed = changed or actual != expected
         return changed
+
+    def recover(self, frozen, deadline=None):
+        entries = self.snapshot(deadline)
+        result = []
+        for expected in frozen:
+            try:
+                if not expected.serial:
+                    actual = resolve_node(entries, expected.name, expected.kind, expected.device)
+                elif expected.bluetooth:
+                    if not expected.device or not bluetooth_device(entries, expected.device):
+                        raise RuntimeError('Bluetooth physical identity is unavailable')
+                    actual = resolve_node(entries, expected.name, expected.kind, expected.device)
+                else:
+                    actual = select_node(entries, expected.name, expected.kind)
+                    if actual.bluetooth or actual.device != expected.device:
+                        raise RuntimeError('Physical audio device changed')
+                    if expected.device is None and actual.serial != expected.serial:
+                        raise RuntimeError('Cannot verify replacement audio device')
+                result.append(actual)
+            except (RuntimeError, ValueError):
+                result.append(None)
+        return tuple(result)
 
     def check(self, deadline=None):
         entries = self.snapshot(deadline)

@@ -8,7 +8,7 @@ import { errorCode } from './types.ts';
 import type { DeviceSelection, Environment } from './types.ts';
 
 type AudioDevice = { name: string; class?: unknown; description?: unknown; device?: unknown; bluetooth?: unknown };
-export interface LocalRoutes { version: 2; active: string; routes: Record<string, DeviceSelection> }
+export interface LocalRoutes { version: 2; active: string; fallback?: string; routes: Record<string, DeviceSelection> }
 export function routeName(name: string) {
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(name) || ['constructor', 'prototype', '__proto__'].includes(name)) {
     throw new Error('Route names must be 1–32 lowercase letters, digits or hyphens, starting with a letter');
@@ -46,7 +46,7 @@ export function deviceSettingsPath(env: Environment = process.env, home = homedi
 function validate(input: unknown): LocalDevices {
   const value = input as Record<string, unknown> | null;
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
-      Object.keys(value).some(key => !['version', 'input', 'output', 'inputDevice', 'outputDevice'].includes(key))) throw new Error('Invalid local device selection');
+      Object.keys(value).some(key => !['version', 'input', 'output', 'inputDevice', 'outputDevice', 'speakerMode'].includes(key))) throw new Error('Invalid local device selection');
   for (const key of ['input', 'output']) {
     const name = value[key];
     if (typeof name !== 'string' || !name.trim() || name !== name.trim() || name.length > 1024 ||
@@ -66,7 +66,11 @@ function validate(input: unknown): LocalDevices {
     }
     physical[key] = identity;
   }
-  return { version: 1, input: inputName, output: outputName, ...physical };
+  if (value.speakerMode !== undefined && typeof value.speakerMode !== 'boolean') {
+    throw new Error('Invalid local speaker mode');
+  }
+  return { version: 1, input: inputName, output: outputName, ...physical,
+    ...(value.speakerMode !== undefined ? { speakerMode: value.speakerMode } : {}) };
 }
 
 export function loadDevices(file?: string, required?: true): LocalDevices;
@@ -113,20 +117,32 @@ export function saveDevices(file: string, devices: DeviceSelection) {
 
 function validateRoutes(input: unknown): LocalRoutes {
   const value = input as Partial<LocalRoutes> | null;
-  if (!value || value.version !== 2 || Object.keys(value).some(key => !['version', 'active', 'routes'].includes(key)) ||
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 2 ||
+      Object.keys(value).some(key => !['version', 'active', 'fallback', 'routes'].includes(key)) ||
       typeof value.active !== 'string' || !value.routes || typeof value.routes !== 'object' || Array.isArray(value.routes) ||
       Object.keys(value.routes).length < 1 || Object.keys(value.routes).length > 16) throw new Error('Invalid local routes');
   const routes: Record<string, DeviceSelection> = Object.create(null);
   for (const [name, selection] of Object.entries(value.routes)) {
     routeName(name);
-    if (!selection || typeof selection !== 'object' || Array.isArray(selection) || 'version' in selection) {
-      throw new Error('Invalid local route selection');
-    }
-    const { version: _, ...devices } = validate({ ...selection, version: 1 });
-    routes[name] = devices;
+    routes[name] = validateSelection(selection);
   }
+  routeName(value.active);
   if (!Object.hasOwn(routes, value.active)) throw new Error('Invalid current route');
-  return { version: 2, active: value.active, routes };
+  if (Object.hasOwn(value, 'fallback')) {
+    if (typeof value.fallback !== 'string') throw new Error('Invalid fallback route');
+    routeName(value.fallback);
+    if (!Object.hasOwn(routes, value.fallback)) throw new Error('Unknown fallback route');
+  }
+  return { version: 2, active: value.active,
+    ...(value.fallback !== undefined ? { fallback: value.fallback } : {}), routes };
+}
+
+function validateSelection(selection: unknown): DeviceSelection {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection) || 'version' in selection) {
+    throw new Error('Invalid local route selection');
+  }
+  const { version: _, ...devices } = validate({ ...selection, version: 1 });
+  return devices;
 }
 
 export function loadRoutes(file = deviceSettingsPath()): LocalRoutes | undefined {
@@ -138,12 +154,40 @@ export function loadRoutes(file = deviceSettingsPath()): LocalRoutes | undefined
 }
 
 export function sameDeviceSelection(left: DeviceSelection | undefined, right: DeviceSelection | undefined) {
-  return !!left && !!right && (['input', 'output', 'inputDevice', 'outputDevice'] as const)
+  return !!left && !!right && (['input', 'output', 'inputDevice', 'outputDevice', 'speakerMode'] as const)
     .every(key => left[key] === right[key]);
 }
 
 export function saveRoute(file: string, name: string, selection?: DeviceSelection, expected?: DeviceSelection) {
   routeName(name);
+  changeRoutes(file, before => {
+    if (expected && !sameDeviceSelection(before?.routes[name], expected)) {
+      throw new Error('Saved route changed during switching; retry without overwriting it');
+    }
+    if (!selection && (!before || !Object.hasOwn(before.routes, name))) throw new Error('Unknown saved route');
+    return { ...before, version: 2, active: name,
+      routes: { ...before?.routes, ...(selection ? { [name]: selection } : {}) } };
+  });
+}
+
+export function saveFallback(file: string, name?: string, selection?: DeviceSelection) {
+  if (name !== undefined) routeName(name);
+  if (name === undefined && selection !== undefined) throw new Error('Fallback selection requires a route name');
+  changeRoutes(file, before => {
+    if (!before) throw new Error('Select a preferred route before configuring fallback');
+    const { fallback: _, ...preferred } = before;
+    if (name === undefined) return preferred;
+    if (selection !== undefined && name === before.active) {
+      throw new Error('Use a distinct route name when configuring fallback devices');
+    }
+    if (!selection && !Object.hasOwn(before.routes, name)) throw new Error('Unknown fallback route');
+    const devices = validateSelection(selection ?? before.routes[name]);
+    return { ...preferred, fallback: name,
+      routes: { ...before.routes, [name]: { ...devices, speakerMode: true } } };
+  });
+}
+
+function changeRoutes(file: string, update: (before: LocalRoutes | undefined) => LocalRoutes) {
   const directory = dirname(file);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const info = lstatSync(directory);
@@ -157,12 +201,7 @@ export function saveRoute(file: string, name: string, selection?: DeviceSelectio
   let fd;
   try {
     const before = loadRoutes(file);
-    if (expected && !sameDeviceSelection(before?.routes[name], expected)) {
-      throw new Error('Saved route changed during switching; retry without overwriting it');
-    }
-    if (!selection && (!before || !Object.hasOwn(before.routes, name))) throw new Error('Unknown saved route');
-    const value = validateRoutes({ version: 2, active: name,
-      routes: { ...before?.routes, ...(selection ? { [name]: selection } : {}) } });
+    const value = validateRoutes(update(before));
     const previous = before ? lstatSync(file) : undefined;
     fd = openSync(temporary, 'wx', 0o600);
     try {

@@ -94,6 +94,32 @@ class PlaybackTests(unittest.TestCase):
         self.assertTrue(transport.stopped)
         self.assertFalse(transport.thread.is_alive())
 
+    def test_play_and_cancel_never_block_the_caller_on_transport_cleanup(self):
+        entered, release = threading.Event(), threading.Event()
+        def abort():
+            entered.set()
+            release.wait(2)
+        sink = SimpleNamespace(rate=self.rate, abort=abort, close=lambda: None)
+        speaker = Speaker(sink, lambda event: None)
+        self.addCleanup(speaker.close)
+        self.addCleanup(release.set)
+        speaker.play(self.pcm(), ident='old')
+        self.assertTrue(entered.wait(1))
+        returned = threading.Event()
+        def cancel():
+            speaker.cancel()
+            speaker.play(self.pcm(), ident='new')
+            speaker.cancel()
+            returned.set()
+        thread = threading.Thread(target=cancel)
+        thread.start()
+        try:
+            self.assertTrue(returned.wait(0.2), 'Caller blocked on old transport cleanup')
+        finally:
+            release.set()
+            thread.join(1)
+        self.assertIsNone(speaker.active)
+
     def test_synthesis_chunks_survive_speaker_write_and_eof_exactly(self):
         original = self.pcm()
         chunks = [original[:14], original[14:5000], original[5000:]]

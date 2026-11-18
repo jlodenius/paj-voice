@@ -60,6 +60,30 @@ class GraphTests(unittest.TestCase):
         )
         return Graph(paths=PATHS, run=run)
 
+    def test_configured_fallback_pair_rejects_absence_and_wrong_physical_identity(self):
+        card = {'id': 7, 'type': 'PipeWire:Interface:Device',
+                'info': {'props': {'device.name': 'alsa.builtin', 'device.api': 'alsa'}}}
+        source, sink = entry(SOURCE), entry(SINK)
+        for node in (source, sink):
+            node['info']['props']['device.id'] = 7
+        graph = self.graph([card, source, sink])
+        frozen = graph.bind(SOURCE.name, SINK.name, 'alsa.builtin', 'alsa.builtin')
+        for entries in ([card, source], [card, sink], [source, sink]):
+            graph.run.return_value.stdout = json.dumps(entries)
+            with self.assertRaises(RuntimeError):
+                graph.bind(SOURCE.name, SINK.name, 'alsa.builtin', 'alsa.builtin')
+            self.assertEqual(graph.bound, frozen)
+        graph.run.return_value.stdout = json.dumps([card, source, sink])
+        with self.assertRaisesRegex(RuntimeError, 'different physical'):
+            graph.bind(SOURCE.name, SINK.name, 'alsa.other', 'alsa.builtin')
+        graph.run.return_value.stdout = json.dumps([card, source])
+        self.assertEqual(graph.available(SOURCE.name, SINK.name, 'alsa.builtin', 'alsa.builtin'),
+                         (frozen[0], None))
+        unresolved = Node(SINK.name, '', SINK.kind, 'alsa.builtin')
+        self.assertEqual(graph.recover((unresolved,)), (None,))
+        graph.run.return_value.stdout = json.dumps([card, source, sink])
+        self.assertEqual(graph.recover((unresolved,)), (frozen[1],))
+
     def test_exact_name_class_serial_and_monitor_rejection(self):
         entries = [entry(SOURCE), entry(SINK)]
         self.assertEqual(select_node(entries, SOURCE.name, SOURCE.kind), SOURCE)
@@ -73,6 +97,53 @@ class GraphTests(unittest.TestCase):
         entries[0]["info"]["props"]["object.serial"] = ""
         with self.assertRaisesRegex(RuntimeError, "serial"):
             select_node(entries, SOURCE.name, SOURCE.kind)
+
+    def test_recovery_resolves_endpoints_independently_and_requires_frozen_identity(self):
+        graph = self.graph()
+        frozen = graph.bind(SOURCE.name, SINK.name)
+        graph.run.return_value.stdout = json.dumps([entry(SOURCE)])
+        self.assertEqual(graph.recover(frozen), (SOURCE, None))
+        replacement = entry(SOURCE)
+        replacement['info']['props']['object.serial'] = '99'
+        graph.run.return_value.stdout = json.dumps([replacement, entry(SINK)])
+        self.assertEqual(graph.recover(frozen), (None, SINK))
+        card = {'id': 7, 'type': 'PipeWire:Interface:Device',
+                'info': {'props': {'device.name': 'usb.chosen', 'device.api': 'alsa'}}}
+        replacement['info']['props']['device.id'] = 7
+        original = entry(SOURCE)
+        original['info']['props']['device.id'] = 7
+        graph.run.return_value.stdout = json.dumps([card, original, entry(SINK)])
+        frozen = graph.bind(SOURCE.name, SINK.name)
+        graph.run.return_value.stdout = json.dumps([card, replacement, entry(SINK)])
+        self.assertEqual(graph.recover(frozen)[0].serial, '99')
+        card['info']['props']['device.name'] = 'usb.other'
+        graph.run.return_value.stdout = json.dumps([card, replacement, entry(SINK)])
+        self.assertIsNone(graph.recover(frozen)[0])
+        graph.run.side_effect = subprocess.TimeoutExpired('pw-dump', 3)
+        with self.assertRaises(RuntimeError):
+            graph.recover(frozen)
+
+    def test_recovery_bluetooth_alias_is_unique_same_card_and_backend_only(self):
+        card = {'id': 7, 'type': 'PipeWire:Interface:Device',
+                'info': {'props': {'device.name': 'bluez.chosen', 'device.api': 'bluez5'}}}
+        source = entry(SOURCE)
+        source['info']['props']['device.id'] = 7
+        graph = self.graph([card, source, entry(SINK)])
+        frozen = graph.bind(SOURCE.name, SINK.name)
+        alias = entry(Node('new.alias', '99', SOURCE.kind))
+        alias['info']['props']['device.id'] = 7
+        graph.run.return_value.stdout = json.dumps([card, alias, entry(SINK)])
+        actual, output = graph.recover(frozen)
+        self.assertEqual((actual.name, actual.serial, actual.device), ('new.alias', '99', 'bluez.chosen'))
+        self.assertEqual(output, SINK)
+        graph.run.return_value.stdout = json.dumps([card, source, alias, entry(SINK)])
+        self.assertIsNone(graph.recover(frozen)[0])
+        card['info']['props']['device.api'] = 'alsa'
+        graph.run.return_value.stdout = json.dumps([card, alias, entry(SINK)])
+        self.assertIsNone(graph.recover(frozen)[0])
+        card['info']['props'].update({'device.api': 'bluez5', 'device.name': 'bluez.other'})
+        graph.run.return_value.stdout = json.dumps([card, alias, entry(SINK)])
+        self.assertIsNone(graph.recover(frozen)[0])
 
     def test_bound_target_loss_and_same_name_replacement_fail(self):
         graph = self.graph()

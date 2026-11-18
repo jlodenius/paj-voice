@@ -59,14 +59,20 @@ export function validateConfig(value: unknown) {
   };
 }
 
-export function runtimeConfig(preferences: unknown, devices: DeviceSelection) {
+export function runtimeConfig(preferences: unknown, devices: DeviceSelection,
+  fallback?: DeviceSelection & { name: string }) {
   const settings = validateConfig(preferences);
   return { version: 1, languages: ['en'], responseLanguage: 'en',
     stt: { computeType: 'int8' },
     tts: { voice: settings.voice, volume: settings.volume / 100, lengthScale: 1 / settings.speed },
     audio: { input: devices.input, output: devices.output, echoCancellation: 'none',
       ...(devices.inputDevice ? { inputDevice: devices.inputDevice } : {}),
-      ...(devices.outputDevice ? { outputDevice: devices.outputDevice } : {}) },
+      ...(devices.outputDevice ? { outputDevice: devices.outputDevice } : {}),
+      ...(devices.speakerMode === true ? { speakerMode: true } : {}),
+      ...(fallback ? { fallback: { name: fallback.name, input: fallback.input, output: fallback.output,
+        ...(fallback.inputDevice ? { inputDevice: fallback.inputDevice } : {}),
+        ...(fallback.outputDevice ? { outputDevice: fallback.outputDevice } : {}),
+        ...(fallback.speakerMode === true ? { speakerMode: true } : {}) } } : {}) },
     turn: { silenceMs: settings.pauseSeconds * 1000, maxSeconds: settings.maxMessageSeconds,
       speechThreshold: 0.001 } };
 }

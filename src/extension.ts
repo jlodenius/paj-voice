@@ -19,6 +19,7 @@ interface VoiceOptions {
   saveDevices?: typeof saveDevices;
   loadRoutes?: typeof loadRoutes;
   saveRoute?: typeof saveRoute;
+  saveFallback?: typeof saveFallback;
   startCompanion?: (options: Parameters<typeof startCompanion>[0]) => Companion;
 }
 import { configPath, loadConfig, validateConfig, runtimeConfig } from './config.ts';
@@ -27,7 +28,7 @@ import { createAdmission } from './admission.ts';
 import { startCompanion } from './companion.ts';
 import { spokenAnswer } from './speech-text.ts';
 import { runtimePaths } from './runtime-paths.ts';
-import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices, loadRoutes, saveRoute, routeName, sameDeviceSelection } from './device-settings.ts';
+import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices, loadRoutes, saveRoute, saveFallback, routeName, sameDeviceSelection } from './device-settings.ts';
 import { voiceRequestMarkdown, voiceStatus, voiceWidget } from './voice-ui.ts';
 import type { VoiceDisplayState, VoiceLayout } from './voice-ui.ts';
 
@@ -56,13 +57,17 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let switching = false;
   let backgroundTurn = false;
   let activeSelection: DeviceSelection | undefined;
+  let armedFallback: (DeviceSelection & { name: string }) | undefined;
+  let activeFallback: (DeviceSelection & { name: string }) | undefined;
   let activeRoute: string | undefined;
   let switchingRoute: string | undefined;
   const updateDisplay = (state = controller.state()) => {
     if (!ctx?.hasUI) return;
     let selected: string | undefined;
     try { selected = readRoutes()?.active ?? 'default'; } catch {}
-    const display: VoiceDisplayState = { ...state, route: activeRoute ?? selected,
+    const fallback = state.enabled && !state.muted && state.usingFallback;
+    const display: VoiceDisplayState = { ...state, route: fallback ? activeFallback?.name : activeRoute ?? selected,
+      preferredRoute: activeRoute ?? selected, fallbackRoute: activeFallback?.name,
       routeActive: !!activeRoute && state.enabled && !state.muted, switchingRoute };
     ctx.ui.setStatus('paj-voice', voiceStatus(display, ctx.ui.theme));
     if (ctx.mode === 'tui') ctx.ui.setWidget?.('paj-voice', voiceWidget(display, options.layout), { placement: 'aboveEditor' });
@@ -184,8 +189,13 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const routeSummary = () => {
     try {
       const saved = readRoutes();
-      return { current: controller.state().generation && !controller.state().muted
-        ? activeRoute ?? saved?.active ?? null : saved?.active ?? null, routes: Object.keys(saved?.routes ?? {}) };
+      const state = controller.state();
+      const preferred = activeRoute ?? saved?.active ?? null;
+      const current = state.generation && !state.muted
+        ? state.usingFallback ? activeFallback?.name ?? preferred : preferred : saved?.active ?? null;
+      const fallback = state.generation ? armedFallback?.name : saved?.fallback;
+      return { current, routes: Object.keys(saved?.routes ?? {}),
+        ...(fallback ? { preferred, fallback, usingFallback: !!state.usingFallback && !state.muted } : {}) };
     } catch {
       return { current: activeRoute ?? null, routes: [], unavailable: true };
     }
@@ -210,8 +220,9 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const timer = setTimeout(() => finish(new Error('Audio route readiness timed out')), 120_000);
     cancelSwitch = () => finish(new Error('Audio route switch cancelled'));
     try {
+      activeFallback = armedFallback?.name !== name ? armedFallback : undefined;
       launched = (options.startCompanion ?? startCompanion)({ ...runtimePaths(env),
-        config: runtimeConfig(preferences!, selection), generation,
+        config: runtimeConfig(preferences!, selection, activeFallback), generation,
         onEvent(frame) {
           if (activation !== lifetime || closed || companion !== launched) return;
           if (frame.type === 'error') {
@@ -302,9 +313,13 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       activeRoute = name;
       switchingRoute = undefined;
       updateDisplay();
-      controller.routeNotice(`${name} ready.`);
+      const audio = controller.state();
+      const available = audio.inputAvailable !== false && audio.outputAvailable !== false;
+      controller.routeNotice(available ? audio.usingFallback
+        ? `${activeFallback?.name ?? 'Configured fallback'} is active. Preferred ${name} is unavailable.` : `${name} ready.`
+        : `${name} selected. Audio is suspended until the selected devices return.`);
       flushHandoffAnswer();
-      return { status: 'ready', ...routeSummary() };
+      return { status: available ? audio.usingFallback ? 'fallback' : 'ready' : 'suspended', ...routeSummary() };
     } catch {
       if (!valid()) return { status: 'cancelled' };
       if (closedOld && previous) {
@@ -316,9 +331,12 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           controller.routeChanging();
           await launchRoute(previous, previousRoute ?? 'default', activation);
           if (!valid()) return { status: 'cancelled' };
-          controller.routeNotice('Route switch failed. Previous route restored.');
+          const audio = controller.state();
+          const suspended = audio.inputAvailable === false || audio.outputAvailable === false;
+          controller.routeNotice(suspended ? 'Route switch failed. Previous route restored with audio suspended.'
+            : 'Route switch failed. Previous route restored.');
           flushHandoffAnswer();
-          return { status: 'failed', recovered: true, ...routeSummary() };
+          return { status: 'failed', recovered: true, ...(suspended ? { suspended: true } : {}), ...routeSummary() };
         } catch {}
       }
       if (closingOld) stop();
@@ -342,6 +360,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const old = companion;
     companion = undefined;
     activeRoute = switchingRoute = undefined;
+    activeFallback = armedFallback = undefined;
     controller.stop();
     const oldAdmission = admission;
     admission = undefined;
@@ -359,7 +378,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const unsubscribeInbox = pi.events.on('paj:messages:delivering:v1', (value: unknown) => {
     const delivery = value as Partial<PajMessageDelivery> | undefined;
     const state = controller.state();
-    if (closed || !state.enabled || state.muted || delivery?.sessionId !== state.sessionId ||
+    if (closed || !state.enabled || state.muted || state.outputAvailable === false || delivery?.sessionId !== state.sessionId ||
         !Array.isArray(delivery.messageIds) || !delivery.messageIds.length ||
         delivery.messageIds.some(id => typeof id !== 'string' || !id || id.length > 128) ||
         typeof delivery.requestTurn !== 'function') return;
@@ -470,7 +489,11 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const token = responseToken;
     const reporter = controller.instructions();
     const policy = [
-      'Eyes-free voice is active for this session: explicitly armed continuous open mic. There is no wake word or classifier. Recognized voice messages are user requests with your normal tool permissions; existing confirmations still apply. Keep normal screen responses useful.',
+      state.inputAvailable === false || state.outputAvailable === false || (state.speakerMode && !state.listening)
+        ? 'The Voice session remains armed, but audio or recognition is temporarily unavailable. Availability below is authoritative: do not claim full readiness or continuous listening. Agent work and normal tool permissions continue.'
+        : 'Eyes-free voice is active for this session: explicitly armed continuous open mic. There is no wake word or classifier. Recognized voice messages are user requests with your normal tool permissions; existing confirmations still apply. Keep normal screen responses useful.',
+      `Selected audio availability: microphone=${state.inputAvailable !== false}, playback=${state.outputAvailable !== false}, recognitionListening=${state.listening}, speakerMode=${!!state.speakerMode}. If playback is unavailable, speech cannot be delivered; never replay old speech on reconnection. If the microphone is unavailable, listening is suspended until that same endpoint returns. Only the explicitly configured fallback route may be selected automatically; otherwise unavailable endpoints stay suspended. Session work continues.`,
+      state.speakerMode ? 'Speaker mode is active: recognition pauses during Voice readouts and until quiet to reduce self-transcription. Voice interruption is unavailable during these readouts; use the normal stop command rather than claiming barge-in works. Do not replay discarded speech. Preferred route and active fallback are distinct in route metadata.' : '',
       'Assume the user cannot see the screen. Provide important answers, outcomes, blockers and questions aloud, including when a reporting integration owns narration. Do not replace a spoken answer with a screen referral. Keep screen responses useful as a supplement, not a prerequisite.',
       'Request screen access only when something genuinely requires manual interaction, such as a blocking confirmation or credential entry. Explain aloud what is needed and why; never bypass existing confirmations or treat spoken approval as terminal approval.',
       `Saved audio routes: ${JSON.stringify(routeSummary())}. Use voice_route with a saved name only when the user requests a route switch; omit name to list. Switching has a listening gap and does not cancel or repeat your work. Current voice_route control token: generation=${JSON.stringify(state.generation)}, epoch=${state.epoch}.`,
@@ -509,18 +532,47 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     }
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup <name>, route [name], voices, recover. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'recover']
+    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup <name>, route [name], fallback [name|off|setup <name>], voices, recover. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'fallback', 'recover']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
       let command = args.trim() || 'status';
       const parts = command.split(/\s+/u);
-      const setupName = parts[0] === 'setup' ? parts[1] ?? 'default' : undefined;
+      const fallbackSetup = parts[0] === 'fallback' && parts[1] === 'setup';
+      const setupName = parts[0] === 'setup' ? parts[1] ?? 'default'
+        : fallbackSetup ? parts[2] ?? 'laptop' : undefined;
       if (setupName) command = 'setup';
       if (parts[0] === 'route') {
         try { notify(JSON.stringify(parts[1] ? await switchRoute(parts[1]) : routeSummary())); }
         catch { notify('Cannot select saved route. Check its name and private route settings.', 'error'); }
+        return;
+      }
+      if (parts[0] === 'fallback' && !fallbackSetup) {
+        if (!parts[1]) { notify(JSON.stringify({ configured: readRoutes()?.fallback ?? null,
+          returnPolicy: 'manual', speakerMode: true })); return; }
+        if (controller.state().generation || arming || configuring) {
+          notify('Turn Voice off before changing automatic fallback settings.', 'warning'); return;
+        }
+        if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
+            env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID ||
+            (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
+          notify('Configure fallback in a main Pi TUI session.', 'warning'); return;
+        }
+        configuring = true;
+        const activation = lifetime, session = current.sessionManager.getSessionId();
+        try {
+          const name = parts[1] === 'off' ? undefined : routeName(parts[1]);
+          if (name && !readRoutes()?.routes[name]) throw new Error('Set up that named route first');
+          if (name && !await current.ui.confirm(`Use ${name} as automatic fallback?`,
+            'If either preferred endpoint fails, this route may automatically open its microphone and speakers. It stays active until you switch or rearm. Speaker mode pauses recognition during Voice readouts and until quiet; use /paj-voice stop rather than voice interruption. The preferred route is unchanged.')) return;
+          if (closed || lifetime !== activation || session !== ctx?.sessionManager.getSessionId() || controller.state().generation) return;
+          (options.saveFallback ?? saveFallback)(deviceSettingsPath(env), name);
+          notify(name ? `Fallback ${name} configured. Preferred route unchanged; applies on the next arming.`
+            : 'Automatic fallback disabled. Saved route speaker-safety flags are unchanged.');
+          updateDisplay();
+        } catch (error) { notify(`Cannot configure fallback: ${errorMessage(error)}`, 'error'); }
+        finally { configuring = false; }
         return;
       }
       if (command === 'recover') {
@@ -573,7 +625,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup <name>|route [name]|voices|recover]', 'warning');
+        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup <name>|route [name]|fallback [name|off|setup <name>]|voices|recover]', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;
@@ -594,7 +646,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         if (command === 'setup' && (closed || current.mode !== 'tui' || !current.hasUI ||
             env.PAJ_PARENT_PI_SESSION_ID || env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID ||
             (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary'))) throw new Error('Select devices in a main Pi TUI session');
-        if (command === 'setup') { configuring = true; ownsSetup = true; }
+        if (command === 'setup') {
+          if (fallbackSetup && setupName === readRoutes()?.active) throw new Error('Choose a different fallback route name; the preferred binding must remain unchanged');
+          configuring = true; ownsSetup = true;
+        }
         if (command === 'devices' || command === 'setup') {
           const activation = lifetime, id = current.sessionManager.getSessionId();
           const isCurrent = () => !closed && activation === lifetime &&
@@ -618,15 +673,19 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           if (!outputLabel || !isCurrent()) return;
           const input = inputs.find(item => item.label === inputLabel), output = outputs.find(item => item.label === outputLabel);
           if (!input || !output) throw new Error('Invalid device selection');
-          const confirmed = await current.ui.confirm('Save voice devices?',
-            `${input.label}\n${output.label}\nUse headphones. Voice stays off; arming remains a separate confirmation.`);
+          const confirmed = await current.ui.confirm(fallbackSetup ? `Save automatic fallback ${setupName}?` : 'Save voice devices?',
+            `${input.label}\n${output.label}\n${fallbackSetup
+              ? 'This microphone and output may activate automatically on preferred-device loss. The preferred route stays unchanged. Speaker mode pauses recognition during Voice readouts and until quiet; returning to the preferred route is manual.'
+              : 'Use headphones.'} Voice stays off; arming remains a separate confirmation.`);
           if (!confirmed || !isCurrent()) return;
           const selection = { input: input.name, output: output.name,
             ...(input.device ? { inputDevice: input.device } : {}),
             ...(output.device ? { outputDevice: output.device } : {}) };
-          if (options.saveDevices && setupName === 'default') options.saveDevices(deviceSettingsPath(env), selection);
+          if (fallbackSetup) (options.saveFallback ?? saveFallback)(deviceSettingsPath(env), routeName(setupName!), selection);
+          else if (options.saveDevices && setupName === 'default') options.saveDevices(deviceSettingsPath(env), selection);
           else selectRoute(routeName(setupName!), selection);
-          notify('Voice devices saved. Voice remains off.');
+          notify(fallbackSetup ? 'Fallback devices saved. Preferred route unchanged. Voice remains off.'
+            : 'Voice devices saved. Voice remains off.');
           return;
         }
         const selectedPreferences = validateConfig((options.loadConfig ?? loadConfig)(configPath(env)));
@@ -634,7 +693,11 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         const savedRoutes = readRoutes();
         const selectedRoute = !savedRoutes ? 'default'
           : sameDeviceSelection(savedRoutes.routes[savedRoutes.active], selectedDevices) ? savedRoutes.active : 'custom';
-        const config = runtimeConfig(selectedPreferences, selectedDevices);
+        const fallback = savedRoutes?.fallback;
+        const selectedFallback = fallback && savedRoutes.routes[fallback]
+          ? { ...savedRoutes.routes[fallback], name: fallback } : undefined;
+        const runtimeFallback = selectedFallback?.name !== selectedRoute ? selectedFallback : undefined;
+        const config = runtimeConfig(selectedPreferences, selectedDevices, runtimeFallback);
         if (controller.state().enabled || controller.state().starting) { notify('Voice is already enabled for this session.'); return; }
         if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
             env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID || (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
@@ -645,10 +708,16 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         ownsArming = true;
         const activation = lifetime;
         const id = current.sessionManager.getSessionId();
+        const fallbackNotice = selectedFallback
+          ? `Configured fallback ${selectedFallback.name} can automatically open its microphone and speakers if either preferred endpoint fails. It stays active until an explicit route switch or rearm. ` : '';
+        const speakerNotice = selectedFallback || selectedDevices.speakerMode
+          ? 'Speaker mode pauses recognition during Voice readouts and until quiet; wait for listening before speaking, and use /paj-voice stop to interrupt. ' : '';
         if (!await current.ui.confirm('Arm continuous open mic with normal tools?',
-          'Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones. Listening continues until off/mute, session shutdown or audio failure. Existing terminal confirmations cannot be approved by voice.')) return;
+          `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}Off/mute or session shutdown stops audio and recovery; fatal runtime errors also stop audio. Existing terminal confirmations cannot be approved by voice.`)) return;
         if (closed || lifetime !== activation || id !== ctx?.sessionManager.getSessionId()) throw new Error('Voice arming was cancelled');
         preferences = selectedPreferences;
+        armedFallback = selectedFallback;
+        activeFallback = runtimeFallback;
         controller.configureFeedback(selectedPreferences.feedback);
         const state = controller.start(id);
         admission = createAdmission({ pi, getContext: () => ctx, queryPaj, sessionId: id,

@@ -27,6 +27,10 @@ export interface VoiceState extends VoiceToken {
   sessionId: string | null;
   muted: boolean;
   listening: boolean;
+  inputAvailable?: boolean;
+  outputAvailable?: boolean;
+  usingFallback?: boolean;
+  speakerMode?: boolean;
   speaking: boolean;
   capturing: boolean;
   processing: boolean;
@@ -51,6 +55,7 @@ export interface VoicePreferences {
 }
 
 export interface DeviceSelection {
+  speakerMode?: boolean;
   input: string;
   output: string;
   inputDevice?: string;
@@ -108,6 +113,11 @@ export interface CompanionFrame {
   id?: unknown;
   text?: unknown;
   completed?: unknown;
+  input?: unknown;
+  output?: unknown;
+  fallback?: unknown;
+  speakerMode?: unknown;
+  listening?: unknown;
   stage?: unknown;
   message?: unknown;
   reason?: unknown;

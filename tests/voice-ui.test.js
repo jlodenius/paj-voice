@@ -26,6 +26,31 @@ test('voice mode has a themed panel with an explicit hot microphone badge and co
   assert.match(voiceStatus(active, theme), /\x1b\[33m/);
 });
 
+test('missing endpoints show suspension rather than readiness while retaining route and controls', () => {
+  for (const [inputAvailable, outputAvailable, badge, activity] of [
+    [true, false, 'PLAYBACK SUSPENDED', 'LISTENING - playback suspended'],
+    [false, true, 'MIC SUSPENDED', 'LISTENING SUSPENDED'],
+    [false, false, 'AUDIO SUSPENDED', 'LISTENING AND PLAYBACK SUSPENDED'],
+  ]) {
+    const state = { enabled: true, inputAvailable, outputAvailable, route: 'desk', routeActive: true };
+    const text = render(state, 80).map(plain).join('\n');
+    assert.ok(text.includes(badge), text);
+    assert.ok(text.includes(activity), text);
+    assert.match(text, /Route: desk/);
+    assert.match(text, /\/paj-voice mute/);
+    assert.doesNotMatch(text, /READY -|OPEN MIC/);
+    assert.ok(plain(voiceStatus(state, theme)).includes(badge));
+    for (const width of [4, 12, 40]) assert.ok(render(state, width).every(line => visibleWidth(line) <= width));
+  }
+});
+
+test('missing playback does not falsely label a paused recognizer as listening', () => {
+  const text = render({ enabled: true, inputAvailable: true, outputAvailable: false,
+    speakerMode: true, listening: false }, 100).map(plain).join('\n');
+  assert.match(text, /RECOGNITION PAUSED - playback suspended/);
+  assert.doesNotMatch(text, /LISTENING - playback/);
+});
+
 test('warming, muted, working, receiving and speaking states remain distinct without color', () => {
   const cases = [
     [{ starting: true }, 'warming up', 'ready beep'],

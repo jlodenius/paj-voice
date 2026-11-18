@@ -5,6 +5,8 @@ export type VoiceLayout = Pick<typeof import('@earendil-works/pi-tui'),
 
 export type VoiceDisplayState = Partial<VoiceState> & {
   route?: string;
+  preferredRoute?: string;
+  fallbackRoute?: string;
   routeActive?: boolean;
   switchingRoute?: string;
 };
@@ -25,6 +27,19 @@ function appearance(state: VoiceDisplayState): {
     activity: 'STARTING - preparing local speech', detail: 'Remain quiet until the ready beep.',
     controls: 'Cancel: /paj-voice off' };
   if (!state.enabled) return null;
+  if (state.inputAvailable === false || state.outputAvailable === false) {
+    const input = state.inputAvailable !== false, output = state.outputAvailable !== false;
+    return { badge: input ? 'PLAYBACK SUSPENDED' : output ? 'MIC SUSPENDED' : 'AUDIO SUSPENDED', tone: 'warning',
+      activity: input ? state.listening === false ? 'RECOGNITION PAUSED - playback suspended' : 'LISTENING - playback suspended'
+        : output ? 'LISTENING SUSPENDED' : 'LISTENING AND PLAYBACK SUSPENDED',
+      detail: 'Waiting for verified endpoints. No unconfigured microphone or speech replay.',
+      controls: 'Mute: /paj-voice mute   Off: /paj-voice off' };
+  }
+  if (state.speakerMode) return { badge: 'SPEAKER MODE', tone: 'warning',
+    activity: state.speaking ? 'SPEAKING - recognition paused' : state.listening === false
+      ? 'WAITING FOR QUIET - recognition paused' : 'LISTENING - speaker-safe microphone',
+    detail: 'Wait for LISTENING before speaking. Use /paj-voice stop to interrupt readouts.',
+    controls: 'Mute: /paj-voice mute   Off: /paj-voice off' };
   return { badge: 'OPEN MIC', tone: 'warning',
     activity: state.capturing ? 'RECEIVING SPEECH - agent work may continue'
       : state.speaking ? 'SPEAKING - interrupt with your voice'
@@ -36,7 +51,7 @@ function appearance(state: VoiceDisplayState): {
 const fg = (theme: Theme | undefined, color: Tone, text: string) => theme?.fg?.(color, text) ?? text;
 const bold = (theme: Theme | undefined, text: string) => theme?.bold?.(text) ?? text;
 const routeLabel = (state: VoiceDisplayState) => state.route
-  ? `${state.routeActive ? 'Route' : 'Selected'}: ${state.route}${state.switchingRoute ? ` → ${state.switchingRoute} (switching)` : ''}`
+  ? `${state.routeActive ? 'Route' : 'Selected'}: ${state.route}${state.usingFallback ? ` (fallback) | Preferred: ${state.preferredRoute ?? 'saved route'}` : ''}${state.switchingRoute ? ` → ${state.switchingRoute} (switching)` : ''}`
   : undefined;
 
 export function voiceRequestMarkdown(markdown: string, theme?: Theme): string {

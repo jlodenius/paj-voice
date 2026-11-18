@@ -115,7 +115,9 @@ class RouteRuntimeTests(unittest.TestCase):
         models = types.SimpleNamespace(rate=16000, transcribe=Mock(), synthesize=Mock(),
             np=types.SimpleNamespace(arange=lambda size: Vector(), sin=lambda value: Vector(),
                                      hanning=lambda size: Vector(), pi=3.14))
+        segments = open_mic.Segments
         for name, replacement in [('SpeechInference', lambda **kwargs: models),
+                                  ('Segments', lambda *args, **kwargs: segments(*args, clock=self.clock, **kwargs)),
                                   ('Capture', Capture), ('PipeSink', Sink), ('Speaker', Speaker),
                                   ('InputReady', lambda receiver: InputReady(receiver, clock=self.clock))]:
             self.stack.enter_context(patch.object(open_mic, name, replacement))
@@ -204,9 +206,64 @@ class RouteRuntimeTests(unittest.TestCase):
         self.assertFalse(desk.closed)
         self.policy.present = False
         self.clock.now += 2
-        wait_for(lambda: desk.closed)
-        self.assertTrue(any(event['type'] == 'error' for event in events))
-        self.assertTrue(all(capture.closed for capture in self.captures))
+        wait_for(lambda: not desk.output_available)
+        self.assertFalse(desk.closed)
+        self.assertTrue(desk.ready and desk.input_available)
+        self.assertFalse(any(event['type'] == 'error' for event in events))
+        self.assertFalse(self.captures[-1].closed)
+
+    def test_both_bluetooth_endpoints_return_with_fresh_input_and_no_old_capture(self):
+        runtime, events, graph, _, _ = self.runtime(bluetooth_input=True)
+        old_capture, old_epoch = runtime.capture, runtime.epoch
+        self.policy.present = False
+        self.clock.now += 2
+        wait_for(lambda: not runtime.input_available and not runtime.output_available)
+        self.assertTrue(old_capture.closed)
+        self.assertTrue(runtime.ready)
+        self.assertFalse(any(event['type'] == 'error' for event in events))
+        self.policy.present = True
+        self.clock.advancing = True
+        self.clock.now += 2
+        def recovered():
+            self.clock.now += 0.01
+            return runtime.input_available and runtime.output_available
+        wait_for(recovered)
+        self.assertIsNot(runtime.capture, old_capture)
+        self.assertGreater(runtime.epoch, old_epoch)
+        self.assertEqual(sum(event['type'] == 'ready' for event in events), 1)
+        self.assertEqual(runtime.source.device, 'bluez_card.headset')
+        self.assertEqual(runtime.target.device, 'bluez_card.headset')
+        self.assertTrue(all(timeout <= 3 for _, timeout in self.snapshots))
+
+    def test_post_ready_blocked_graph_never_blocks_privacy_or_reopens_capture(self):
+        for action in ['shutdown', 'mute']:
+            with self.subTest(action=action):
+                runtime, events, graph, _, _ = self.runtime()
+                entered, release = threading.Event(), threading.Event()
+                original = graph.recover
+                def recover(*args, **kwargs):
+                    entered.set()
+                    release.wait(2)
+                    return original(*args, **kwargs)
+                graph.recover = recover
+                self.clock.now += 2
+                self.assertTrue(entered.wait(1))
+                count = len(self.captures)
+                returned = threading.Event()
+                def cancel():
+                    runtime.command({'type': action, 'muted': True})
+                    returned.set()
+                thread = threading.Thread(target=cancel)
+                thread.start()
+                try:
+                    self.assertTrue(returned.wait(0.2), 'Privacy cancellation blocked on recovery pw-dump')
+                finally:
+                    release.set()
+                    thread.join(1)
+                self.assertEqual(len(self.captures), count)
+                self.assertTrue(self.captures[-1].closed)
+                self.assertFalse(runtime.input_available)
+                runtime.shutdown()
 
     def test_other_application_retaining_hfp_does_not_block_or_force_profile(self):
         self.policy.profile, self.policy.other_capture = 'hfp', True

@@ -10,7 +10,7 @@ import time
 
 from .input_ready import InputReady
 from .audio import Capture, Segments, Speaker
-from .devices import Graph, PipeSink
+from .devices import Graph, Node, PipeSink, exact_name
 from .speech import SpeechInference
 
 
@@ -55,11 +55,33 @@ def validate(value):
     if not isinstance(language, str) or not re.fullmatch(r"en(?:[-_][a-z0-9]+)*", language.lower()):
         raise ValueError("An English Piper voice is required")
     audio = value.get("audio", {})
-    if (not isinstance(audio, dict) or set(audio) - {"input", "output", "echoCancellation", "inputDevice", "outputDevice"}
+    if (not isinstance(audio, dict) or set(audio) - {"input", "output", "echoCancellation", "inputDevice", "outputDevice", "fallback", "speakerMode"}
             or audio.get("echoCancellation") not in ("none", "external")
             or any(not isinstance(audio.get(key), str) or not audio[key].strip()
                    or audio[key] == "default" for key in ("input", "output"))):
         raise ValueError("Exact PipeWire input/output names and explicit echo handling are required")
+    if 'fallback' in audio and not isinstance(audio['fallback'], dict):
+        raise ValueError("Invalid fallback audio route")
+    for route in (audio, audio.get("fallback")):
+        if route is None:
+            continue
+        if not isinstance(route, dict):
+            raise ValueError("Invalid fallback audio route")
+        if route is not audio:
+            if (set(route) - {"name", "input", "output", "inputDevice", "outputDevice", "speakerMode"}
+                    or not isinstance(route.get("name"), str) or not route["name"].strip()
+                    or len(route["name"]) > 80
+                    or any(ord(char) < 32 or ord(char) == 127 for char in route["name"])):
+                raise ValueError("Invalid fallback friendly name or fields")
+        if 'speakerMode' in route and type(route['speakerMode']) is not bool:
+            raise ValueError("Invalid speaker mode")
+        for key, kind in (("input", "Audio/Source"), ("output", "Audio/Sink")):
+            exact_name(route.get(key), kind)
+        for key in ("inputDevice", "outputDevice"):
+            identity = route.get(key)
+            if identity is not None and (not isinstance(identity, str) or not identity.strip()
+                    or len(identity) > 1024 or any(ord(char) < 32 or ord(char) == 127 for char in identity)):
+                raise ValueError("Invalid physical audio device identity")
     turn = dict(value.get("turn", {}))
     if set(turn) - {"silenceMs", "maxSeconds", "speechThreshold"}:
         raise ValueError("Prefix/wake timing settings are not supported")
@@ -77,8 +99,8 @@ def validate(value):
 
 
 class HealthyInput:
-    def __init__(self, receiver):
-        self.receiver = receiver
+    def __init__(self, receiver, allowed=None):
+        self.receiver, self.allowed = receiver, allowed
 
     def feed(self, pcm, voiced, captured_at=None):
         samples = array.array("h", pcm)
@@ -86,7 +108,8 @@ class HealthyInput:
         if (abs(sum(samples) / len(samples) / 32768) > 0.5
                 and sum(abs(value) >= 32760 for value in samples) >= len(samples) / 2):
             raise RuntimeError("Input returned to flat clipping/DC corruption; audio stopped")
-        self.receiver.feed(pcm, voiced, captured_at=captured_at)
+        if self.allowed is None or self.allowed(pcm, voiced, captured_at):
+            self.receiver.feed(pcm, voiced, captured_at=captured_at)
 
     def close(self):
         self.receiver.close()
@@ -108,7 +131,19 @@ class Runtime:
         self.revision = 0
         self.epoch = 0
         self.input_active = False
+        self.using_fallback = False
+        self.listening = True
+        self.owned_playback = False
+        self.owned_playback_token = None
+        self.acoustic_until = float('-inf')
+        self.guard_quiet = None
+        self.guard_voiced = False
+        self.input_available = self.output_available = False
+        self.output_epoch = 0
+        self.input_deadline = 0
+        self.frozen = ()
         self.current_playback = None
+        self.active_speech = None
         self.stage = "configure"
         self.jobs = queue.Queue(maxsize=2)
         self.speeches = queue.Queue(maxsize=2)
@@ -185,7 +220,22 @@ class Runtime:
                    or len(value) > 1024 or any(ord(char) < 32 for char in value)) for value in identities):
                 raise ValueError("Invalid physical audio device identity")
             binding = (audio["input"], audio["output"], *identities) if any(identities) else (audio["input"], audio["output"])
-            source, target = graph.bind(*binding)
+            try:
+                source, target = graph.bind(*binding)
+            except RuntimeError:
+                fallback = audio.get('fallback')
+                if fallback is None:
+                    raise
+                try:
+                    fallback_binding = self._binding(fallback)
+                    source, target = graph.bind(*fallback_binding)
+                    binding = fallback_binding
+                    self.using_fallback = True
+                except RuntimeError:
+                    try:
+                        source, target = graph.available(*binding)
+                    except RuntimeError:
+                        source = target = None
             self.stage = "models"
             models = SpeechInference(stt=config["stt"]["model"], tts=config["tts"]["model"],
                                      tts_config=config["tts"]["config"], compute_type=config["stt"]["computeType"],
@@ -200,6 +250,31 @@ class Runtime:
                 self.cue = (models.np.sin(2 * models.np.pi * 800 * samples / models.rate)
                             * models.np.hanning(len(samples)) * 1200).astype("<i2").tobytes()
                 self.stage = "audio-setup"
+            if source is None or target is None:
+                with self.lock:
+                    if self.closed or self.muted:
+                        return
+                    self.source, self.target = source, target
+                    self.frozen = tuple(node or Node(audio[key], '', kind, audio.get(key + 'Device'))
+                                        for node, key, kind in ((source, 'input', 'Audio/Source'),
+                                                                (target, 'output', 'Audio/Sink')))
+                    self.ready = True
+                    self.emit({'type': 'ready', 'mode': 'open-mic', 'fallback': False,
+                               'input': False, 'output': False, 'listening': False,
+                               'speakerMode': self.speaker_mode})
+                if target is not None:
+                    self._resume_output(target)
+                    with self.lock:
+                        speaker, output_epoch = self.speaker, self.output_epoch
+                    if speaker:
+                        try:
+                            speaker.play(self.cue, ident='ready')
+                        except Exception:
+                            self._suspend(output_lost=True, output_epoch=output_epoch)
+                if source is not None:
+                    self._resume_input(source)
+                self._run_workers()
+                return
             transition_started = self.clock()
             transition_deadline = transition_started + 12
             bluetooth_devices = tuple(identity for identity, node in zip(identities, (source, target))
@@ -218,23 +293,26 @@ class Runtime:
                         if self.closed or self.muted:
                             return
                         self._remaining(transition_deadline)
-                        self.source = source
+                        self.source, self.target = source, target
+                        self.frozen = (source, target)
+                        self.output_epoch += 1
+                        output_epoch = self.output_epoch
                         self.sink = PipeSink(graph.paths["pw-play"], target, models.rate)
-                        self.speaker = Speaker(self.sink, self._speaker_event)
+                        self.speaker = self._new_speaker(self.sink, output_epoch)
                         self.epoch += 1
                         epoch = self.epoch
                         self.segments = Segments(lambda event, bound=epoch: self._segment(event, bound),
                                                  lambda bound=epoch: self._interrupt(bound), lambda bound=epoch: bound,
                                                  silence=config["turn"]["silenceMs"] / 1000,
                                                  maximum=config["turn"]["maxSeconds"])
-                        self.gate = InputReady(HealthyInput(self.segments))
+                        self.gate = InputReady(HealthyInput(self.segments, self._capture_allowed))
                         self.capture = Capture(graph.paths["pw-record"], source, self.vad_factory,
                                                config["turn"]["speechThreshold"], self.gate,
                                                lambda error, bound=epoch: self._capture_fault(error, bound))
                         self.stage = "capture-start"
                         self.capture.start()
                         capture, gate = self.capture, self.gate
-                    self._warmup(capture, gate, epoch, recover=bluetooth,
+                    self._warmup(capture, gate, epoch, recover=bluetooth or audio.get('fallback') is not None,
                                  deadline=transition_deadline, settle_until=settle_until)
                     if self.closed or self.muted:
                         return
@@ -249,18 +327,127 @@ class Runtime:
                     if self.closed or self.muted:
                         return
                     self._remaining(transition_deadline)
+                    if not was_ready and not self.using_fallback and audio.get('fallback') is not None:
+                        try:
+                            fallback_binding = self._binding(audio['fallback'])
+                            source, target = graph.bind(*fallback_binding, deadline=transition_deadline)
+                        except RuntimeError:
+                            pass
+                        else:
+                            with self.lock:
+                                if self.closed or self.muted:
+                                    return
+                                self.using_fallback = True
+                            binding = fallback_binding
+                            bluetooth = source.bluetooth or target.bluetooth
+                            settle_until = self.clock()
+                            continue
                     if was_ready or not bluetooth_devices or not any(graph.profile_transition(device, deadline=transition_deadline)
                                                 for device in bluetooth_devices):
                         raise
                     self.stopped.wait(min(0.1, self._remaining(transition_deadline)))
             if self.closed or self.muted:
                 return
-            for worker in (self._recognize, self._synthesize, self._health):
-                threading.Thread(target=worker, daemon=True).start()
-            # Linux PDEATHSIG follows the spawning thread; keep it alive until owned children close.
-            self.shutdown_complete.wait()
+            self._run_workers()
         except Exception as error:
             self.fail(error)
+
+    def _run_workers(self):
+        for worker in (self._recognize, self._synthesize, self._health, self._watchdog):
+            threading.Thread(target=worker, daemon=True).start()
+        # Linux PDEATHSIG follows the spawning thread; keep it alive until owned children close.
+        self.shutdown_complete.wait()
+
+    @staticmethod
+    def _binding(route):
+        identities = tuple(route.get(key) for key in ('inputDevice', 'outputDevice'))
+        return ((route['input'], route['output'], *identities) if any(identities)
+                else (route['input'], route['output']))
+
+    def _try_fallback(self):
+        with self.lock:
+            if self.closed or self.muted or not self.ready or self.using_fallback:
+                return False
+            route = self.config['audio'].get('fallback')
+            if route is None:
+                return False
+            epoch, output_epoch = self.epoch, self.output_epoch
+        try:
+            source, target = self.graph.bind(*self._binding(route))
+        except Exception:
+            return False
+        with self.lock:
+            if (self.closed or self.muted or self.using_fallback or self.epoch != epoch
+                    or self.output_epoch != output_epoch):
+                return False
+            changed_input = source != self.source or not self.input_available
+        self._suspend(input_lost=changed_input, output_lost=True, epoch=epoch, output_epoch=output_epoch)
+        with self.lock:
+            if self.closed or self.muted:
+                return False
+            self.using_fallback = True
+            self.frozen = (source, target)
+            self._availability()
+        try:
+            self._resume_output(target)
+        except Exception:
+            self._suspend(output_lost=True)
+        if not self.input_available:
+            try:
+                self._resume_input(source)
+                self._arm_recovered_input(source)
+            except Exception:
+                self._suspend(input_lost=True)
+        return True
+
+    @property
+    def speaker_mode(self):
+        return self.using_fallback or getattr(self, 'config', {}).get('audio', {}).get('speakerMode', False)
+
+    def _set_listening(self, listening):
+        if self.listening != listening:
+            self.listening = listening
+            if self.ready and self.input_available:
+                self.emit({'type': 'capture_state', 'listening': listening})
+
+    def _capture_allowed(self, pcm, voiced, captured_at):
+        with self.lock:
+            if self.closed or self.muted:
+                return False
+            if not self.speaker_mode:
+                return True
+            now = self.clock()
+            captured = now if captured_at is None else captured_at
+            if self.owned_playback or captured <= self.acoustic_until:
+                self.guard_quiet = None
+                allowed = False
+            elif not self.listening:
+                if voiced:
+                    self.guard_voiced = True
+                    self.guard_quiet = None
+                elif self.guard_quiet is None:
+                    self.guard_quiet = captured
+                if (not voiced and (not self.guard_voiced or (self.guard_quiet is not None
+                        and captured - self.guard_quiet >= self.config['turn']['silenceMs'] / 1000))):
+                    self.guard_voiced = False
+                    self._set_listening(True)
+                allowed = self.listening
+            else:
+                allowed = True
+            segments = self.segments
+            if not allowed:
+                self.input_active = False
+                for ident in self.pending:
+                    self.emit({'type': 'cancelled', 'id': ident, 'reason': 'capture_paused'})
+                self.pending.clear()
+                while True:
+                    try:
+                        self.jobs.get_nowait().clear()
+                    except queue.Empty:
+                        break
+        if not allowed and segments:
+            segments.discard()
+        return allowed
 
     def _capture_fault(self, error, epoch):
         with self.lock:
@@ -270,7 +457,7 @@ class Runtime:
                 if self.capture:
                     self.capture.fault = str(error)
                 return
-        self.fail(error)
+        self._suspend(input_lost=True, epoch=epoch)
 
     def _remaining(self, deadline):
         remaining = deadline - self.clock()
@@ -305,10 +492,22 @@ class Runtime:
                     summary = gate.arm()
                     if summary is not None:
                         self.ready = True
+                        self.input_available = self.output_available = True
                         self.stage = "listening"
-                        self.emit({"type": "ready", "mode": "open-mic", "warmup": summary})
-                        self.speaker.play(self.cue, ident="ready")
-                        return
+                        if self.speaker_mode:
+                            self.owned_playback = True
+                            self.owned_playback_token = (None, 'ready')
+                            self._set_listening(False)
+                        self.emit({"type": "ready", "mode": "open-mic", "warmup": summary,
+                                   "fallback": self.using_fallback, "listening": self.listening,
+                                   "speakerMode": self.speaker_mode})
+                        speaker, output_epoch = self.speaker, self.output_epoch
+                if summary is not None:
+                    try:
+                        speaker.play(self.cue, ident="ready")
+                    except Exception:
+                        self._suspend(output_lost=True, output_epoch=output_epoch)
+                    return
             self.emit({"type": "diagnostic", "stage": "warmup", "details": gate.snapshot()})
             raise RuntimeError("Input did not settle within five seconds")
         except Exception as error:
@@ -325,16 +524,22 @@ class Runtime:
                 return
             self.input_active = True
             self.revision += 1
-            speaker = self.speaker
+            speaker, output_epoch = self.speaker, self.output_epoch
             if self.current_playback:
+                self.emit({'type': 'speech_end', 'id': self.current_playback[0], 'completed': False})
                 self.current_playback[1].set()
-        speaker.cancel()
+                self.current_playback = None
+        if speaker:
+            try:
+                speaker.cancel()
+            except Exception:
+                self._suspend(output_lost=True, output_epoch=output_epoch)
 
     def _segment(self, event, epoch):
         try:
             ident = f"e{epoch}-t{event['id']}"
             with self.lock:
-                if self.closed or self.muted or not self.ready or self.epoch != epoch:
+                if self.closed or self.muted or not self.ready or not self.input_available or self.epoch != epoch:
                     return
                 if event["type"] == "onset":
                     if len(self.pending) >= 4:
@@ -377,7 +582,8 @@ class Runtime:
                 if not isinstance(text, str) or len(text) > 16384:
                     raise RuntimeError("Recognition output exceeded the text bound")
                 with self.lock:
-                    if self.closed or self.muted or job["epoch"] != self.epoch:
+                    if (self.closed or self.muted or job["epoch"] != self.epoch
+                            or job['id'] not in self.pending):
                         continue
                     self.pending.discard(job["id"])
                     self.emit({"type": "review" if job["truncated"] else "utterance",
@@ -390,7 +596,7 @@ class Runtime:
                 job.clear()
 
     def _can_speak(self, revision=None):
-        return (not self.closed and self.ready and not self.muted and not self.pending
+        return (not self.closed and self.ready and self.output_available and not self.muted and not self.pending
                 and not self.input_active and (revision is None or revision == self.revision))
 
     def _speech_current(self, job):
@@ -403,10 +609,12 @@ class Runtime:
             except queue.Empty:
                 continue
             played = False
+            playback_fault = None
             try:
                 with self.lock:
                     if not self._speech_current(job):
                         continue
+                    self.active_speech = job
                 with self.model_lock:
                     with self.lock:
                         if not self._speech_current(job):
@@ -417,12 +625,20 @@ class Runtime:
                     finally:
                         self.busy["synthesis"] = None
                 with self.lock:
+                    if self.active_speech is job:
+                        self.active_speech = None
                     if self._speech_current(job):
                         done = threading.Event()
                         self.current_playback = (job["id"], done)
-                        self.speaker.play(pcm, ident=job["id"])
-                        played = True
-                        self.emit({"type": "speech_start", "id": job["id"]})
+                        try:
+                            self.speaker.play(pcm, ident=job["id"])
+                            played = True
+                            self.emit({"type": "speech_start", "id": job["id"]})
+                        except Exception:
+                            playback_fault = self.output_epoch
+                if playback_fault is not None:
+                    self._suspend(output_lost=True, output_epoch=playback_fault)
+                    played = True
                 self.busy["synthesis"] = None
                 if played:
                     while not self.stopped.is_set() and not done.wait(0.1):
@@ -431,25 +647,63 @@ class Runtime:
                 self.fail(error)
             finally:
                 self.busy["synthesis"] = None
-                if not played and not self.closed:
-                    self.emit({"type": "speech_end", "id": job["id"], "completed": False})
-                job.clear()
+                with self.lock:
+                    if self.active_speech is job:
+                        self.active_speech = None
+                    if not played and not self.closed and not job.get('ended'):
+                        self.emit({"type": "speech_end", "id": job["id"], "completed": False})
+                    job.clear()
 
-    def _speaker_event(self, event):
-        if event["type"] == "played":
-            self.emit({"type": "speech_end", "id": event["id"], "completed": True})
-            current = self.current_playback
-            if current and current[0] == event["id"]:
-                current[1].set()
-        elif event["type"] == "fault":
-            self.fail(RuntimeError(event.get("message") or "Playback failed"), stage="playback")
+    def _new_speaker(self, sink, epoch):
+        callback = lambda event: self._speaker_event(event, epoch)
+        speaker = Speaker(sink, callback)
+        speaker.activity = callback
+        return speaker
+
+    def _speaker_event(self, event, output_epoch=None):
+        with self.lock:
+            if self.closed or self.muted or (output_epoch is not None and output_epoch != self.output_epoch):
+                return
+            if event['type'] == 'playing':
+                if self.speaker_mode:
+                    self.owned_playback = True
+                    self.owned_playback_token = (event.get('generation'), event.get('id'))
+                    self.guard_quiet = None
+                    self.guard_voiced = False
+                    self._set_listening(False)
+                return
+            if event['type'] == 'idle':
+                token = (event.get('generation'), event.get('id'))
+                if self.speaker_mode and token == self.owned_playback_token:
+                    self.owned_playback = False
+                    self.owned_playback_token = None
+                    self.acoustic_until = max(self.acoustic_until, self.clock() + 0.5)
+                    self.guard_quiet = None
+                return
+            if event['type'] == 'played':
+                current = self.current_playback
+                if current and current[0] == event['id']:
+                    self.emit({'type': 'speech_end', 'id': event['id'], 'completed': True})
+                    current[1].set()
+                    self.current_playback = None
+                return
+            if event['type'] != 'fault':
+                return
+            initial = not self.ready
+            bound = self.output_epoch
+        if initial:
+            self.fail(RuntimeError(event.get('message') or 'Playback failed'), stage='playback')
+        else:
+            self._suspend(output_lost=True, output_epoch=bound)
 
     def _silence(self):
         with self.lock:
             self.revision += 1
-            speaker = self.speaker
+            speaker, output_epoch = self.speaker, self.output_epoch
             if self.current_playback:
+                self.emit({'type': 'speech_end', 'id': self.current_playback[0], 'completed': False})
                 self.current_playback[1].set()
+                self.current_playback = None
             while True:
                 try:
                     job = self.speeches.get_nowait()
@@ -458,12 +712,16 @@ class Runtime:
                 self.emit({"type": "speech_end", "id": job["id"], "completed": False})
                 job.clear()
         if speaker:
-            speaker.cancel()
+            try:
+                speaker.cancel()
+            except Exception:
+                self._suspend(output_lost=True, output_epoch=output_epoch)
 
     def _mute(self):
         with self.lock:
             self.muted = True
             self.ready = False
+            self.input_available = self.output_available = False
             self.epoch += 1
             self.pending.clear()
             gate, capture = self.gate, self.capture
@@ -471,23 +729,206 @@ class Runtime:
         self._silence()
         self._close((gate, capture))
 
+    def _availability(self):
+        self.emit({'type': 'availability', 'input': self.input_available,
+                   'output': self.output_available, 'fallback': self.using_fallback,
+                   'listening': self.input_available and self.listening,
+                   'speakerMode': self.speaker_mode})
+
+    def _suspend(self, input_lost=False, output_lost=False, epoch=None, output_epoch=None):
+        resources = []
+        guard_epoch = None
+        with self.lock:
+            if self.closed or self.muted or not self.ready:
+                return
+            before = self.input_available, self.output_available
+            if input_lost and (epoch is None or epoch == self.epoch):
+                if self.capture is not None or self.input_available:
+                    self.epoch += 1
+                    self.input_available = self.input_active = False
+                    resources.extend((self.gate, self.capture, self.segments))
+                    self.gate = self.capture = self.segments = None
+                    for ident in self.pending:
+                        self.emit({'type': 'cancelled', 'id': ident, 'reason': 'input_disconnected'})
+                    self.pending.clear()
+                    while True:
+                        try:
+                            self.jobs.get_nowait().clear()
+                        except queue.Empty:
+                            break
+            if output_lost and (output_epoch is None or output_epoch == self.output_epoch):
+                if self.speaker is not None or self.sink is not None or self.output_available:
+                    self.output_epoch += 1
+                    self.output_available = False
+                    if self.speaker_mode and self.owned_playback:
+                        guard_epoch = self.output_epoch
+                    self.revision += 1
+                    resources.extend((self.speaker, self.sink))
+                    self.speaker = self.sink = None
+                    if self.active_speech and not self.active_speech.get('ended'):
+                        self.emit({'type': 'speech_end', 'id': self.active_speech['id'], 'completed': False})
+                        self.active_speech['ended'] = True
+                    if self.current_playback:
+                        self.emit({'type': 'speech_end', 'id': self.current_playback[0], 'completed': False})
+                        self.current_playback[1].set()
+                        self.current_playback = None
+                    while True:
+                        try:
+                            job = self.speeches.get_nowait()
+                        except queue.Empty:
+                            break
+                        self.emit({'type': 'speech_end', 'id': job['id'], 'completed': False})
+                        job.clear()
+            if before != (self.input_available, self.output_available):
+                self._availability()
+        self._close(resources)
+        if guard_epoch is not None:
+            with self.lock:
+                if self.output_epoch == guard_epoch:
+                    self.owned_playback = False
+                    self.owned_playback_token = None
+                    self.acoustic_until = max(self.acoustic_until, self.clock() + 0.5)
+                    self.guard_quiet = None
+
+    def _resume_output(self, target):
+        sink = PipeSink(self.graph.paths['pw-play'], target, self.models.rate)
+        with self.lock:
+            if self.closed or self.muted or self.output_available:
+                obsolete = True
+            else:
+                obsolete = False
+                self.output_epoch += 1
+                bound = self.output_epoch
+                self.sink = sink
+                self.speaker = self._new_speaker(sink, bound)
+                self.target = target
+                self.output_available = True
+                self._availability()
+        if obsolete:
+            self._close((sink,))
+
+    def _resume_input(self, source):
+        with self.lock:
+            if self.closed or self.muted or self.input_available or self.capture is not None:
+                return
+            self.epoch += 1
+            epoch = self.epoch
+            self.guard_voiced = False
+            self.guard_quiet = None
+            if not self.owned_playback and self.clock() > self.acoustic_until:
+                self._set_listening(True)
+        segments = Segments(lambda event: self._segment(event, epoch),
+                            lambda: self._interrupt(epoch), lambda: epoch,
+                            silence=self.config['turn']['silenceMs'] / 1000,
+                            maximum=self.config['turn']['maxSeconds'])
+        gate = InputReady(HealthyInput(segments, self._capture_allowed))
+        capture = Capture(self.graph.paths['pw-record'], source, self.vad_factory,
+                          self.config['turn']['speechThreshold'], gate,
+                          lambda error: self._capture_fault(error, epoch))
+        with self.lock:
+            obsolete = self.closed or self.muted or self.epoch != epoch
+            if not obsolete:
+                self.source = source
+                self.segments, self.gate, self.capture = segments, gate, capture
+        if obsolete:
+            self._close((gate, capture, segments))
+            return
+        try:
+            with self.lock:
+                if self.closed or self.muted or self.epoch != epoch:
+                    return
+                self.input_deadline = self.clock() + 5
+                capture.start()
+            self.emit({'type': 'warming'})
+        except Exception:
+            self._suspend(input_lost=True, epoch=epoch)
+
+    def _arm_recovered_input(self, source):
+        with self.lock:
+            capture, epoch = self.capture, self.epoch
+        if capture is None:
+            return
+        try:
+            capture.health()
+        except Exception:
+            self._suspend(input_lost=True, epoch=epoch)
+            return
+        with self.lock:
+            if (self.closed or self.muted or self.input_available or self.capture is not capture
+                    or self.epoch != epoch or self.source != source or self.clock() >= self.input_deadline
+                    or not self.gate.ready.is_set()):
+                return
+            if self.gate.arm() is None:
+                return
+            self.input_available = True
+            self.stage = 'listening'
+            self._availability()
+
     def _health(self):
         next_graph = 0
-        while not self.stopped.wait(0.1):
-            try:
+        try:
+            while not self.stopped.wait(0.1):
+                with self.lock:
+                    if self.closed or self.muted:
+                        continue
                 if self.clock() >= next_graph:
-                    self.graph.check()
+                    try:
+                        source, target = self.graph.recover(self.frozen)
+                    except Exception:
+                        source = target = None
+                    with self.lock:
+                        if self.closed or self.muted:
+                            continue
+                        input_lost = source is None or source != self.source
+                        output_lost = target is None or target != self.target
+                        self.frozen = tuple(actual if not expected.serial and actual is not None else expected
+                                            for expected, actual in zip(self.frozen, (source, target)))
+                    self._suspend(input_lost=input_lost, output_lost=output_lost)
+                    if input_lost or output_lost or not self.input_available or not self.output_available:
+                        if self._try_fallback():
+                            next_graph = self.clock() + 1
+                            continue
+                    if target is not None and not self.output_available:
+                        try:
+                            self._resume_output(target)
+                        except Exception:
+                            self._suspend(output_lost=True)
+                    if source is not None and not self.input_available:
+                        try:
+                            self._resume_input(source)
+                            self._arm_recovered_input(source)
+                        except Exception:
+                            self._suspend(input_lost=True)
                     next_graph = self.clock() + 1
-                self.sink.health()
-                capture = self.capture
+                with self.lock:
+                    capture, epoch = self.capture, self.epoch
+                    sink, output_epoch = self.sink, self.output_epoch
+                if sink:
+                    try:
+                        sink.health()
+                    except Exception:
+                        self._suspend(output_lost=True, output_epoch=output_epoch)
                 if capture:
-                    capture.health()
-                for active in self.busy.values():
-                    if active is not None and self.clock() - active[0] > active[1]:
-                        raise RuntimeError("Local inference exceeded its active computation budget")
-            except Exception as error:
-                self.fail(error)
-                return
+                    try:
+                        capture.health()
+                        with self.lock:
+                            expired = not self.input_available and self.clock() >= self.input_deadline
+                        if expired:
+                            self._suspend(input_lost=True, epoch=epoch)
+                    except Exception:
+                        self._suspend(input_lost=True, epoch=epoch)
+        except Exception as error:
+            self.fail(error)
+        finally:
+            # Recovery recorders inherit this creating thread's Linux PDEATHSIG lifetime.
+            self.shutdown_complete.wait()
+
+    def _watchdog(self):
+        while not self.stopped.wait(0.1):
+            for active in self.busy.values():
+                if active is not None and self.clock() - active[0] > active[1]:
+                    self.fail(RuntimeError('Local inference exceeded its active computation budget'))
+                    return
 
     def fail(self, error, stage=None):
         with self.lock:
@@ -514,6 +955,8 @@ class Runtime:
                 return
             self.closed = True
             self.ready = False
+            self.input_available = self.output_available = False
+            self.output_epoch += 1
             self.epoch += 1
             self.revision += 1
             self.stopped.set()

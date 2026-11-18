@@ -102,6 +102,23 @@ announcements.
 - `/paj-voice stop` stops speech only; `off` closes audio without cancelling agent work.
 - `/paj-voice status`, `devices`, and `voices` inspect state, hardware IDs, and packaged voices.
 
+After arming, device loss suspends unavailable endpoints instead of ending the session. Without a
+configured fallback, available endpoints keep working and the same verified devices recover on return.
+Input changes cancel unfinished speech; interrupted or unavailable speech is never replayed.
+
+While Voice is off, `/paj-voice fallback setup laptop` selects an explicitly authorized microphone and
+output without changing the preferred route. Choose the built-in microphone and speakers for laptop
+fallback. `/paj-voice fallback <name>` uses an existing route; `fallback off` disables automatic
+fallback. The private `devices.json` stores this optional named-route reference, never system defaults.
+
+If either preferred endpoint fails, both configured fallback endpoints must be verified before the
+fallback pair activates. The preferred saved route stays unchanged; the UI shows both routes. Fallback
+stays active until an explicit route switch or rearm, rather than bouncing back on headset reconnect.
+Speaker mode pauses recognition during Voice readouts and until quiet to reduce self-transcription;
+wait for LISTENING before speaking, or use `/paj-voice stop` to interrupt. Speaker-safety flags remain
+on saved routes when automatic fallback is disabled. This is not qualified acoustic echo cancellation.
+Off, mute and session changes cancel recovery. Unverifiable endpoints remain suspended.
+
 No wake word or classifier: **all recognized speech while armed can use normal agent tools**.
 Existing terminal confirmations remain manual. Audio stays local and is not recorded; recognized
 text goes to Pi's provider and normally appears in session history. Volume zero does not mute the mic.

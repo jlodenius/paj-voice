@@ -91,18 +91,23 @@ class Segments:
                                "pcm": bytes(turn["pcm"]), "truncated": turn["discard"]})
                     turn["pcm"].clear()
 
+    def discard(self):
+        with self.lock:
+            if self.current:
+                self.current['pcm'].clear()
+            self.current = None
+            self.clear_preroll()
+
     def close(self):
         with self.lock:
             self.closed = True
-            if self.current:
-                self.current["pcm"].clear()
-            self.current = None
-            self.clear_preroll()
+            self.discard()
 
 
 class Speaker:
     def __init__(self, sink, emit):
         self.sink, self.emit = sink, emit
+        self.activity = None
         self.cv = threading.Condition(threading.RLock())
         self.generation = 0
         self.active = None
@@ -113,10 +118,10 @@ class Speaker:
     def play(self, pcm, ident=None):
         if not isinstance(pcm, bytes) or len(pcm) % 2 or len(pcm) > self.sink.rate * 120:
             raise ValueError("Invalid bounded playback")
-        self.cancel()
         with self.cv:
             if self.closed:
                 return
+            self.generation += 1
             self.active = {"pcm": pcm, "offset": 0, "id": ident}
             self.cv.notify_all()
 
@@ -124,7 +129,7 @@ class Speaker:
         with self.cv:
             self.generation += 1
             self.active = None
-        self.sink.abort()
+            self.cv.notify_all()
 
     def _current(self, generation, item):
         with self.cv:
@@ -132,12 +137,20 @@ class Speaker:
 
     def _run(self):
         try:
+            handled_generation = 0
             while True:
                 with self.cv:
-                    self.cv.wait_for(lambda: self.closed or self.active is not None)
+                    self.cv.wait_for(lambda: self.closed or self.active is not None
+                                     or self.generation != handled_generation)
                     if self.closed:
                         return
                     item, generation = self.active, self.generation
+                self.sink.abort()
+                handled_generation = generation
+                if item is None:
+                    continue
+                if self.activity:
+                    self.activity({"type": "playing", "id": item["id"], "generation": generation})
                 size = max(2, self.sink.rate // 25 * 2)
                 while self._current(generation, item) and item["offset"] < len(item["pcm"]):
                     end = min(len(item["pcm"]), item["offset"] + size)
@@ -150,9 +163,14 @@ class Speaker:
                 if self._current(generation, item):
                     self.sink.drain(lambda: self._current(generation, item))
                     with self.cv:
-                        if self._current(generation, item):
+                        completed = self._current(generation, item)
+                        if completed:
                             self.active = None
-                            self.emit({"type": "played", "id": item["id"]})
+                    if completed:
+                        self.emit({"type": "played", "id": item["id"]})
+                self.sink.abort()
+                if self.activity:
+                    self.activity({"type": "idle", "id": item["id"], "generation": generation})
         except Exception as error:
             self.emit({"type": "fault", "reason": "playback_failed", "message": str(error)[:512]})
 
