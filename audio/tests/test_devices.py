@@ -209,7 +209,7 @@ class SinkTests(unittest.TestCase):
     def test_lazy_playback_and_normal_drain(self):
         sink, child, launch = self.sink()
         launch.assert_not_called()
-        with patch("paj_voice_audio.devices.os.write", return_value=4):
+        with patch("paj_voice_audio.devices.os.write", side_effect=lambda fd, data: len(data)):
             self.assertTrue(sink.write(b"\0" * 4, lambda: True))
         launch.assert_called_once_with(PATHS["pw-play"], SINK, 22050, False)
         child.process.poll.side_effect = [None, 0]

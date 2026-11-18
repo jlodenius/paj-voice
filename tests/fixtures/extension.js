@@ -1,15 +1,17 @@
 import { EventEmitter } from 'node:events';
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { registerVoice } from '../../src/extension.ts';
 
 const Type = Object.fromEntries(['Object', 'String', 'Optional', 'Integer'].map(name => [name, value => ({ type: name, value })]));
 export function fixture(overrides = {}) {
   const events = new EventEmitter(), handlers = new Map(), tools = new Map(), commands = new Map();
-  const notices = [], messages = [], frames = [], workers = [], widgets = [];
+  const notices = [], messages = [], frames = [], workers = [], widgets = [], transformers = [], statuses = [];
   let busy = false, id = 'session-one';
   const pi = {
     events: { emit: (...args) => events.emit(...args), on(name, handler) { events.on(name, handler); return () => events.off(name, handler); } },
     on(name, handler) { const list = handlers.get(name) ?? []; list.push(handler); handlers.set(name, list); },
     registerTool(tool) { tools.set(tool.name, tool); },
+    registerMarkdownTransformer(transform, options) { transformers.push({ transform, ...options }); },
     registerCommand(name, definition) { commands.set(name, definition); },
     sendUserMessage: (...args) => { messages.push(args); busy = true; },
     exec: async () => ({ code: 0, stdout: '["test microphone"]' }),
@@ -17,14 +19,14 @@ export function fixture(overrides = {}) {
   };
   const ctx = { mode: 'tui', hasUI: true, isIdle: () => !busy,
     sessionManager: { getSessionId: () => id },
-    ui: { notify: (...args) => notices.push(args), setStatus() {}, confirm: async () => true,
+    ui: { notify: (...args) => notices.push(args), setStatus: (...args) => statuses.push(args), confirm: async () => true,
       setWidget(name, widget, options) {
         const component = typeof widget === 'function' ? widget(null, {}) : undefined;
         widgets.push({ name, lines: component ? component.render(80) : widget, component, options });
       } },
   };
   const config = {};
-  const instance = registerVoice(pi, Type, { env: {}, loadConfig: () => config,
+  const instance = registerVoice(pi, Type, { layout: { truncateToWidth, visibleWidth, wrapTextWithAnsi }, env: {}, loadConfig: () => config,
     loadDevices: () => ({ version: 1, input: 'laptop', output: 'headphones' }),
     loadRoutes: () => undefined,
     startCompanion(args) {
@@ -39,6 +41,6 @@ export function fixture(overrides = {}) {
   };
   const command = args => commands.get('paj-voice').handler(args, ctx);
   const audio = frame => workers.at(-1).args.onEvent(frame, workers.at(-1).args.generation);
-  return { ...instance, events, event, tools, pi, ctx, notices, messages, frames, workers, widgets, command, audio,
+  return { ...instance, events, event, tools, pi, ctx, notices, messages, frames, workers, widgets, transformers, statuses, command, audio,
     idle() { busy = false; }, replace() { id = 'session-two'; } };
 }

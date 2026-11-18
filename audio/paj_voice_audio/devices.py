@@ -348,6 +348,9 @@ class Child:
 
 
 class PipeSink:
+    # A bounded silent lead-in gives newly opened output routes time to become audible.
+    LEAD_IN_MS = 300
+
     def __init__(self, executable, node, rate, launch=Child):
         self.executable, self.node, self.rate = executable, node, rate
         self.launch = launch
@@ -363,8 +366,9 @@ class PipeSink:
         with self.lock:
             serial = self.serial
         pending = memoryview(pcm)
+        lead_in = 0
         last_progress = time.monotonic()
-        while pending and current():
+        while (pending or lead_in) and current():
             try:
                 with self.lock:
                     if self.closed or serial != self.serial:
@@ -373,14 +377,19 @@ class PipeSink:
                         self.child = self.launch(
                             self.executable, self.node, self.rate, False
                         )
+                        lead_in = self.rate * self.LEAD_IN_MS // 1000 * 2
                     child = self.child
                     child.health()
                     fd = child.process.stdin.fileno()
                     try:
-                        count = os.write(fd, pending[:4096])
+                        data = bytes(min(lead_in, 4096)) if lead_in else pending[:4096]
+                        count = os.write(fd, data)
                     except BlockingIOError:
                         count = 0
-                    pending = pending[count:]
+                    if lead_in:
+                        lead_in -= count
+                    else:
+                        pending = pending[count:]
                 if count:
                     last_progress = time.monotonic()
                 elif time.monotonic() - last_progress > 2:

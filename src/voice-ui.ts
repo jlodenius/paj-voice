@@ -1,6 +1,13 @@
 import type { VoiceState } from './types.ts';
 
-type VoiceDisplayState = Partial<VoiceState>;
+export type VoiceLayout = Pick<typeof import('@earendil-works/pi-tui'),
+  'truncateToWidth' | 'visibleWidth' | 'wrapTextWithAnsi'>;
+
+export type VoiceDisplayState = Partial<VoiceState> & {
+  route?: string;
+  routeActive?: boolean;
+  switchingRoute?: string;
+};
 type Tone = 'muted' | 'warning' | 'dim';
 interface Theme {
   fg?(color: Tone, text: string): string;
@@ -28,34 +35,48 @@ function appearance(state: VoiceDisplayState): {
 
 const fg = (theme: Theme | undefined, color: Tone, text: string) => theme?.fg?.(color, text) ?? text;
 const bold = (theme: Theme | undefined, text: string) => theme?.bold?.(text) ?? text;
-const fit = (text: string, width: number) => text.length > width ? text.slice(0, Math.max(0, width - 1)) + '…' : text;
+const routeLabel = (state: VoiceDisplayState) => state.route
+  ? `${state.routeActive ? 'Route' : 'Selected'}: ${state.route}${state.switchingRoute ? ` → ${state.switchingRoute} (switching)` : ''}`
+  : undefined;
+
+export function voiceRequestMarkdown(markdown: string, theme?: Theme): string {
+  const envelope = /^\[Voice request [\w-]{1,128}:[\w-]{1,128}\]\n/u.exec(markdown);
+  if (!envelope) return markdown;
+  const label = fg(theme, 'warning', bold(theme, 'Voice request'));
+  return `${theme?.bg?.('customMessageBg', label) ?? label}\n\n${markdown.slice(envelope[0].length)}`;
+}
 
 export function voiceStatus(state: VoiceDisplayState, theme?: Theme) {
   const view = appearance(state);
-  return view ? fg(theme, view.tone, bold(theme, `VOICE MODE | ${view.badge}`)) : undefined;
+  return view ? fg(theme, view.tone, bold(theme, `VOICE MODE | ${view.badge}${routeLabel(state) ? ` | ${routeLabel(state)}` : ''}`)) : undefined;
 }
 
-export function voiceWidget(state: VoiceDisplayState) {
+export function voiceWidget(state: VoiceDisplayState, layout: VoiceLayout) {
+  const { truncateToWidth, visibleWidth, wrapTextWithAnsi } = layout;
+  const fit = (text: string, width: number) => truncateToWidth(text, width, '…');
   const view = appearance(state);
   if (!view) return undefined;
   return (_tui: unknown, theme?: Theme) => ({
     render(width: number) {
       width = Math.max(1, Math.floor(width));
-      if (width < 8) return [fg(theme, view.tone, fit(view.badge, width))];
+      if (width < 8) return [view.badge, ...(routeLabel(state) ? [routeLabel(state)!] : [])]
+        .flatMap(text => wrapTextWithAnsi(text, width)).map(text => fg(theme, view.tone, text));
       const inside = width - 4;
       const background = (text: string) => theme?.bg?.('customMessageBg', text) ?? text;
       const row = (text: string, color: Tone, strong = false) => {
-        const content = fit(text, inside).padEnd(inside);
+        const clipped = fit(text, inside);
+        const content = clipped + ' '.repeat(Math.max(0, inside - visibleWidth(clipped)));
         return background(fg(theme, 'warning', '│ ') +
           fg(theme, color, strong ? bold(theme, content) : content) + fg(theme, 'warning', ' │'));
       };
-      const heading = fit(` VOICE MODE | ${view.badge} `, width - 2);
+      const heading = fit(` VOICE MODE | ${view.badge}${state.route ? ` | ${state.route}` : ''} `, width - 2);
       return [
         background(fg(theme, 'warning', '╭') + fg(theme, view.tone, bold(theme, heading)) +
-          fg(theme, 'warning', '─'.repeat(width - 2 - heading.length) + '╮')),
+          fg(theme, 'warning', '─'.repeat(width - 2 - visibleWidth(heading)) + '╮')),
         row(view.activity, view.tone, true),
         row(view.detail, 'muted'),
         row(view.controls, 'dim'),
+        ...(routeLabel(state) ? wrapTextWithAnsi(routeLabel(state)!, inside).map(text => row(text, view.tone)) : []),
         background(fg(theme, 'warning', '╰' + '─'.repeat(width - 2) + '╯')),
       ];
     },

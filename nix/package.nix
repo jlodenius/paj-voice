@@ -2,6 +2,8 @@
   lib,
   stdenvNoCC,
   makeWrapper,
+  fetchNpmDeps,
+  npmHooks,
   pipewire,
   nodejs,
   python3,
@@ -12,27 +14,36 @@
     pkgs = import ./pkgs.nix {system = stdenvNoCC.hostPlatform.system;};
   };
   python = speech.python;
+  source = lib.cleanSourceWith {
+    src = ../.;
+    filter = name: type: let
+      base = builtins.baseNameOf name;
+    in
+      lib.cleanSourceFilter name type
+      && !(builtins.elem base ["__pycache__" ".venv" ".cache" "node_modules" "build" "dist" "result"])
+      && !(lib.hasPrefix "result-" base)
+      && !(lib.hasSuffix ".pyc" name);
+  };
 in
   stdenvNoCC.mkDerivation {
     pname = "paj-voice";
     version = (builtins.fromJSON (builtins.readFile ../package.json)).version;
-    src = lib.cleanSourceWith {
-      src = ../.;
-      filter = name: type: let
-        base = builtins.baseNameOf name;
-      in
-        lib.cleanSourceFilter name type
-        && !(builtins.elem base ["__pycache__" ".venv" ".cache" "node_modules" "build" "dist" "result"])
-        && !(lib.hasPrefix "result-" base)
-        && !(lib.hasSuffix ".pyc" name);
+    src = source;
+    npmDeps = fetchNpmDeps {
+      src = source;
+      hash = "sha256-CcSp1qqxEb0v2QYyj2XOKGz0HfrIOddSIbwTqtl6GXg=";
     };
-    nativeBuildInputs = [makeWrapper nodejs];
+    npmFlags = ["--ignore-scripts"];
+    nativeBuildInputs = [makeWrapper nodejs npmHooks.npmConfigHook];
     nativeCheckInputs = [python3];
     passthru = {
       inherit python;
       models = speech.models;
     };
-    dontConfigure = true;
+    configurePhase = ''
+      runHook preConfigure
+      runHook postConfigure
+    '';
     buildPhase = ''
       runHook preBuild
       node scripts/build.ts
@@ -45,6 +56,7 @@ in
       export PYTHONDONTWRITEBYTECODE=1
       export PYTHONPATH="$PWD/audio"
       mkdir -p "$HOME"
+      npm run typecheck
       node --test --test-concurrency=2 tests/*.test.js
       python3 -m unittest discover -s audio/tests -v
       runHook postCheck

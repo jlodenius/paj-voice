@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+const layout = { truncateToWidth, visibleWidth, wrapTextWithAnsi };
 import { voiceStatus, voiceWidget } from '../src/voice-ui.ts';
 
 const colors = { accent: 36, success: 32, warning: 33, error: 31, muted: 90, dim: 90 };
@@ -10,7 +12,7 @@ const theme = {
 };
 const plain = text => text.replace(/\x1b\[[0-9;]*m/gu, '');
 const active = { enabled: true };
-const render = (state, width = 80) => voiceWidget(state)(null, theme).render(width);
+const render = (state, width = 80) => voiceWidget(state, layout)(null, theme).render(width);
 
 test('voice mode has a themed panel with an explicit hot microphone badge and controls', () => {
   const lines = render(active);
@@ -37,12 +39,12 @@ test('warming, muted, working, receiving and speaking states remain distinct wit
     assert.ok(text.includes(badge), text);
     assert.ok(text.includes(activity), text);
   }
-  assert.equal(voiceWidget({}), undefined);
+  assert.equal(voiceWidget({}, layout), undefined);
   assert.equal(voiceStatus({}), undefined);
 });
 
 test('the panel fits narrow terminals and retains bounds after invalidation', () => {
-  const widget = voiceWidget(active)(null, theme);
+  const widget = voiceWidget(active, layout)(null, theme);
   for (const width of [1, 4, 8, 20, 40, 80, 120]) {
     const lines = widget.render(width).map(plain);
     assert.ok(lines.every(line => [...line].length <= width));

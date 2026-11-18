@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import { Type } from 'typebox';
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { registerVoice } from '../../src/extension.ts';
 
 export default function (pi) {
@@ -18,6 +19,7 @@ export default function (pi) {
     },
   });
   registerVoice(wrapped, Type, {
+    layout: { truncateToWidth, visibleWidth, wrapTextWithAnsi },
     startCompanion(options) {
       worker = options;
       record({ type: 'opened', generation: options.generation, config: options.config });

@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { fileURLToPath } from 'node:url';
 import type { loadVoiceBuild as LoadVoiceBuild } from '../src/build-loader.ts';
 
@@ -8,5 +9,5 @@ export default async function (pi: ExtensionAPI) {
     loadVoiceBuild: typeof LoadVoiceBuild;
   };
   const { root, registerVoice } = await loadVoiceBuild(fileURLToPath(new URL('..', import.meta.url)));
-  registerVoice(pi, Type, { buildId: root });
+  registerVoice(pi, Type, { buildId: root, layout: { truncateToWidth, visibleWidth, wrapTextWithAnsi } });
 }

@@ -10,6 +10,7 @@ type Companion = Pick<ReturnType<typeof startCompanion>, 'send' | 'close'> & {
   waitClosed?(): Promise<void>;
 };
 interface VoiceOptions {
+  layout: VoiceLayout;
   env?: Environment;
   uuid?: () => string;
   buildId?: string;
@@ -27,7 +28,8 @@ import { startCompanion } from './companion.ts';
 import { spokenAnswer } from './speech-text.ts';
 import { runtimePaths } from './runtime-paths.ts';
 import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices, loadRoutes, saveRoute, routeName, sameDeviceSelection } from './device-settings.ts';
-import { voiceStatus, voiceWidget } from './voice-ui.ts';
+import { voiceRequestMarkdown, voiceStatus, voiceWidget } from './voice-ui.ts';
+import type { VoiceDisplayState, VoiceLayout } from './voice-ui.ts';
 
 function captureNamespace() {
   const incarnation = randomUUID();
@@ -38,7 +40,7 @@ function captureNamespace() {
   };
 }
 
-export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, options: VoiceOptions = {}) {
+export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, options: VoiceOptions) {
   const env = options.env ?? process.env;
   const readRoutes = () => (options.loadRoutes ?? loadRoutes)(deviceSettingsPath(env));
   const selectRoute = (name: string, selection?: DeviceSelection, expected?: DeviceSelection) =>
@@ -54,6 +56,17 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let switching = false;
   let activeSelection: DeviceSelection | undefined;
   let activeRoute: string | undefined;
+  let switchingRoute: string | undefined;
+  const updateDisplay = (state = controller.state()) => {
+    if (!ctx?.hasUI) return;
+    let selected: string | undefined;
+    try { selected = readRoutes()?.active ?? 'default'; } catch {}
+    const display: VoiceDisplayState = { ...state, route: activeRoute ?? selected,
+      routeActive: !!activeRoute && state.enabled && !state.muted, switchingRoute };
+    ctx.ui.setStatus('paj-voice', voiceStatus(display, ctx.ui.theme));
+    if (ctx.mode === 'tui') ctx.ui.setWidget?.('paj-voice', voiceWidget(display, options.layout), { placement: 'aboveEditor' });
+  };
+  pi.registerMarkdownTransformer(markdown => voiceRequestMarkdown(markdown, ctx?.ui.theme), { messageTypes: ['user'] });
   let cancelSwitch: (() => void) | undefined;
   let toolExposure: 'hidden' | 'direct' = 'hidden';
   let responseToken: VoiceToken | undefined;
@@ -83,10 +96,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     },
     notify,
     changed(state) {
-      if (ctx?.hasUI) {
-        ctx.ui.setStatus('paj-voice', voiceStatus(state, ctx.ui.theme));
-        ctx.ui.setWidget?.('paj-voice', voiceWidget(state), { placement: 'aboveEditor' });
-      }
+      updateDisplay(state);
       const exposure = state.enabled && !state.muted ? 'direct' : 'hidden';
       if (toolExposure !== exposure) {
         pi.registerTool({ ...speakTool, exposure });
@@ -149,7 +159,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     handoffAnswer = undefined;
     if (answer) controller.answer(answer);
   };
-  const launchRoute = (selection: DeviceSelection, activation: number): Promise<void> => new Promise((resolve, reject) => {
+  const launchRoute = (selection: DeviceSelection, name: string, activation: number): Promise<void> => new Promise((resolve, reject) => {
     const generation = controller.state().generation;
     const namespace = captureNamespace();
     let settled = false;
@@ -175,6 +185,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
             } else finish(new Error('Selected audio route failed; check local audio diagnostics'));
             return;
           }
+          if (frame.type === 'ready') activeRoute = name;
           if (controller.event(namespace(frame), generation)?.fatal) {
             if (settled) stop();
             else finish(new Error('Selected audio route could not remain ready'));
@@ -211,6 +222,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     if (!saved || !Object.hasOwn(saved.routes, name)) return { status: 'unknown', ...routeSummary() };
     if (!controller.state().generation || controller.state().muted) {
       selectRoute(name);
+      updateDisplay();
       return { status: 'selected', ...routeSummary() };
     }
     switching = true;
@@ -218,6 +230,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const valid = () => !closed && activation === lifetime && !signal?.aborted &&
       !!controller.state().generation && !controller.state().muted;
     const previous = activeSelection;
+    const previousRoute = activeRoute;
     let closedOld = false;
     let closingOld = false;
     const abort = () => { cancelSwitch?.(); stop(); };
@@ -238,16 +251,20 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         if (matches.length !== 1) return { status: 'unavailable', message: 'Selected route is absent or ambiguous. Bluetooth requires microphone exposure and WirePlumber headset autoswitch policy; no system settings were changed.' };
       }
       if (!sameDeviceSelection(readRoutes()?.routes[name], selection)) return { status: 'changed' };
+      switchingRoute = name;
+      activeRoute = undefined;
       controller.routeChanging();
       closingOld = true;
       await closeAudio();
       closedOld = true;
       if (!valid()) return { status: 'cancelled' };
-      await launchRoute(selection, activation);
+      await launchRoute(selection, name, activation);
       if (!valid()) return { status: 'cancelled' };
       selectRoute(name, undefined, selection);
       activeSelection = selection;
       activeRoute = name;
+      switchingRoute = undefined;
+      updateDisplay();
       controller.routeNotice(`${name} ready.`);
       flushHandoffAnswer();
       return { status: 'ready', ...routeSummary() };
@@ -257,8 +274,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         try {
           await closeAudio();
           if (!valid()) return { status: 'cancelled' };
+          activeRoute = undefined;
+          switchingRoute = previousRoute;
           controller.routeChanging();
-          await launchRoute(previous, activation);
+          await launchRoute(previous, previousRoute ?? 'default', activation);
           if (!valid()) return { status: 'cancelled' };
           controller.routeNotice('Route switch failed. Previous route restored.');
           flushHandoffAnswer();
@@ -270,6 +289,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     } finally {
       signal?.removeEventListener('abort', abort);
       switching = false;
+      switchingRoute = undefined;
+      updateDisplay();
       if (controller.state().enabled) flushHandoffAnswer();
       else handoffAnswer = undefined;
     }
@@ -282,6 +303,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     voiceInputs.clear();
     const old = companion;
     companion = undefined;
+    activeRoute = switchingRoute = undefined;
     controller.stop();
     const oldAdmission = admission;
     admission = undefined;
@@ -420,6 +442,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         cancelSwitch?.();
         const old = companion, oldAdmission = admission;
         companion = admission = undefined;
+        activeRoute = switchingRoute = undefined;
         controller.mute(true);
         try { old?.close(); } finally { oldAdmission?.close(); }
         notify('Voice muted; the audio process is closed. Agent work and tool permissions are unchanged.');
@@ -432,7 +455,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       }
       if (command === 'on' && controller.state().muted) stop();
       if (command === 'status') {
-        notify(`${JSON.stringify(controller.state())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}`);
+        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}`);
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
@@ -494,6 +517,9 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         }
         const selectedPreferences = validateConfig((options.loadConfig ?? loadConfig)(configPath(env)));
         const selectedDevices = (options.loadDevices ?? loadDevices)(deviceSettingsPath(env));
+        const savedRoutes = readRoutes();
+        const selectedRoute = !savedRoutes ? 'default'
+          : sameDeviceSelection(savedRoutes.routes[savedRoutes.active], selectedDevices) ? savedRoutes.active : 'custom';
         const config = runtimeConfig(selectedPreferences, selectedDevices);
         if (controller.state().enabled || controller.state().starting) { notify('Voice is already enabled for this session.'); return; }
         if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
@@ -525,6 +551,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
             if (controller.state().generation === generation && frame.type === 'diagnostic') {
               notify(JSON.stringify({ voiceDiagnostic: frame.stage, details: frame.details }), 'warning');
             }
+            if (frame.type === 'ready') activeRoute = selectedRoute;
             if (controller.event(namespace(frame), generation)?.fatal) stop();
           },
           onExit(message) {
@@ -539,7 +566,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         });
         companion = launched;
         activeSelection = selectedDevices;
-        activeRoute = readRoutes()?.active ?? 'default';
+        updateDisplay();
         if (!current.isIdle()) controller.newRun();
         notify('Open mic starting. Remain quiet through warm-up; wait for the ready beep. All recognized speech is actionable in this session. Off/mute stops audio, not agent work.');
       } catch (error) {
