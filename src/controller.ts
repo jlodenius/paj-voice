@@ -30,6 +30,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   let turnSpoken = false;
   let finalAnswerSpoken = false;
   let fallbackSent = false;
+  let summaryExpected = true;
+  let pendingUserSummary = false;
   let disposed = false;
   let running = false;
   let lastError: string | null = null;
@@ -231,6 +233,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       turnSpoken = false;
       finalAnswerSpoken = false;
       fallbackSent = false;
+      pendingUserSummary = false;
       running = false;
       agentActive = false;
       activeTools.clear();
@@ -243,6 +246,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
     stop() {
       if (!enabled && !generation) return;
       enabled = false;
+      pendingUserSummary = false;
       ready = false;
       listening = false;
       muted = false;
@@ -303,10 +307,11 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
     },
     settled(aborted = false) {
       const wasRunning = running;
+      pendingUserSummary = false;
       running = false;
       agentActive = false;
       activeTools.clear();
-      if (wasRunning && enabled && ready && !muted && !blocked && !captureId && !fallbackSent &&
+      if (wasRunning && summaryExpected && enabled && ready && !muted && !blocked && !captureId && !fallbackSent &&
           (!turnSpoken || !finalAnswerSpoken || aborted)) {
         fallbackSent = true;
         const text = aborted ? 'The agent stopped.' : turnSpoken ? 'I’m finished for now.'
@@ -315,8 +320,15 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       }
       emit();
     },
-    newRun() {
+    expectSummary({ fromUser = false } = {}) {
+      summaryExpected = true;
+      pendingUserSummary ||= fromUser;
+    },
+    newRun({ summaryExpected: expected = true } = {}) {
       deliveryUncertain = false;
+      if (!running) summaryExpected = expected || pendingUserSummary;
+      else if (expected) summaryExpected = true;
+      pendingUserSummary = false;
       if (!running) activity();
       agentActive = true;
       if (!running && !captureId) { turnSpoken = false; finalAnswerSpoken = false; fallbackSent = false; }
@@ -386,6 +398,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
           const result = submit({ requestId: frame.id, text: frame.text.trim(), sessionId, generation });
           record.status = 'submitted';
           running = true;
+          summaryExpected = true;
           inform(result?.steering ? 'Voice addition submitted as steering.' : 'Voice request submitted.', 'info');
           api.speak({ text: result?.steering ? feedback.steeringReceipt : feedback.receipt,
             generation, epoch, key: 'receipt' });

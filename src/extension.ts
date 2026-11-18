@@ -54,6 +54,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let arming = false;
   let configuring = false;
   let switching = false;
+  let backgroundTurn = false;
   let activeSelection: DeviceSelection | undefined;
   let activeRoute: string | undefined;
   let switchingRoute: string | undefined;
@@ -324,6 +325,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.on('session_start', (_event, current) => {
     stop();
     ctx = current;
+    backgroundTurn = false;
     promptDepth = 0;
     try { pi.events.emit('paj-voice:state:v1', controller.state()); } catch {}
   });
@@ -337,15 +339,20 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   });
   pi.on('session_tree', () => stop());
   pi.on('model_select', () => stop());
+  pi.on('before_agent_start', (event, current) => {
+    if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
+    backgroundTurn = event.messageType === 'custom';
+  });
   pi.on('agent_start', (_event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
     admission?.started();
-    controller.newRun();
+    controller.newRun({ summaryExpected: !backgroundTurn });
   });
   pi.on('agent_settled', (event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
     admission?.settled();
     controller.settled(event.aborted);
+    backgroundTurn = false;
   });
   pi.on('tool_execution_start', (event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
@@ -367,6 +374,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     controller.blocked(promptDepth > 0);
   });
   pi.on('input', event => {
+    controller.expectSummary({ fromUser: true });
     if (event.source === 'interactive') {
       latestPrompt = undefined;
       controller.silence();
@@ -414,6 +422,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       content: policy, display: false, timestamp: Date.now() }] };
   });
   pi.on('message_end', event => {
+    if (event.message.role === 'assistant' && event.message.stopReason === 'stop' &&
+        event.message.content.some(part => part.type === 'text' && part.text.trim())) controller.expectSummary();
     const text = spokenAnswer(event.message);
     if (text && responseToken) {
       if (switching && controller.state().starting) handoffAnswer = { ...responseToken, text };
@@ -567,7 +577,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         companion = launched;
         activeSelection = selectedDevices;
         updateDisplay();
-        if (!current.isIdle()) controller.newRun();
+        if (!current.isIdle()) controller.newRun({ summaryExpected: !backgroundTurn });
         notify('Open mic starting. Remain quiet through warm-up; wait for the ready beep. All recognized speech is actionable in this session. Off/mute stops audio, not agent work.');
       } catch (error) {
         if (command === 'on') stop();

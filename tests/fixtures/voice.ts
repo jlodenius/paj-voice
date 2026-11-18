@@ -29,6 +29,12 @@ export default function (pi) {
       };
     },
   });
+  pi.registerCommand('voice-test-background', {
+    description: 'Trigger an isolated background agent update',
+    handler: async () => pi.sendMessage({ customType: 'paj-messages',
+      content: 'A completed worker report was already handled. No new user request.', display: true },
+    { triggerTurn: true }),
+  });
   pi.registerCommand('voice-test-ready', {
     description: 'Signal fake audio worker readiness',
     handler: async () => worker.onEvent({ type: 'ready' }, worker.generation),

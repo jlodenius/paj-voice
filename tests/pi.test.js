@@ -56,7 +56,10 @@ async function fixture(t, fakeAudio = true) {
     }
     let delta = { role: 'assistant', content: verbose };
     let finish = 'stop';
-    if (responseMode === 'short') {
+    if (responseMode === 'empty') {
+      responseMode = 'text';
+      delta = { role: 'assistant', content: '' };
+    } else if (responseMode === 'short') {
       responseMode = 'text';
       delta = { role: 'assistant', content: 'There are sixty seconds in one minute.' };
     } else if (responseMode === 'ordinary-tool') {
@@ -173,6 +176,7 @@ async function fixture(t, fakeAudio = true) {
   }
   const inspect = async () => JSON.parse((await command('/voice-test-inspect')).at(-1).message);
   return { request, command, prompt, settled, inspect, requests, events,
+    emptyNext: () => { responseMode = 'empty'; },
     speakNext: () => { responseMode = 'speak'; },
     shortNext: () => { responseMode = 'short'; },
     ordinaryToolNext: () => { responseMode = 'ordinary-tool'; },
@@ -184,6 +188,26 @@ async function fixture(t, fakeAudio = true) {
       return { ready, release };
     } };
 }
+
+test('real Pi silent background updates do not request another summary after a spoken result', realPi, async t => {
+  const f = await fixture(t);
+  await f.command('/paj-voice on');
+  await f.command('/voice-test-ready');
+  f.shortNext();
+  await f.prompt('Give me a short answer.');
+  const before = await f.inspect();
+  assert.ok(before.journal.some(frame => frame.type === 'speak' && frame.key === 'answer'));
+  f.emptyNext();
+  const done = f.settled();
+  await f.command('/voice-test-background');
+  await done;
+  const after = await f.inspect();
+  assert.equal(after.journal.filter(frame => frame.type === 'speak').length,
+    before.journal.filter(frame => frame.type === 'speak').length);
+  await f.prompt('Give me a detailed answer.');
+  const user = await f.inspect();
+  assert.ok(user.journal.slice(after.journal.length).some(frame => frame.key === 'fallback'));
+});
 
 test('real Pi retains additions during processing and suppresses stale audio', realPi, async t => {
   const f = await fixture(t);
