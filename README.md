@@ -76,7 +76,7 @@ These are all supported preferences, relative to the shared file's `voice` secti
 | `feedback.steeringReceipt`  | `"Steering received."`  | Addition during active work.             |
 | `feedback.progressUpdates`  | `true`                  | Brief updates during long tasks.         |
 | `feedback.idleReminders`    | `true`                  | Up to three idle reminders.              |
-| `backgroundAudio`           | disabled                | Selected-app ducking; see below.          |
+| `backgroundAudio`           | disabled                | Optional playback ducking; see below.     |
 
 Receipt phrases allow 1–8 words and at most 60 characters, without control characters. Progress
 and idle notices are roughly one minute apart; activity resets idle reminders. Changes apply on
@@ -99,39 +99,48 @@ announcements.
 
 ### Background audio
 
-Background audio is unchanged by default. `/paj-voice ducking preview` inspects application IDs and
-binary names without starting Voice or changing volume. Preview is metadata eligibility, not proof
-that a stream permits volume control. To opt in, add this group inside the shared `voice` section,
-replace the example application with exact identifiers from preview, and rearm:
+Background audio is unchanged by default. `/paj-voice ducking preview` inspects eligible playback
+without starting Voice or changing volume. Preview is metadata eligibility, not proof that a stream
+permits volume control. To lower all other inspectable playback during Voice speech, add this group
+inside the shared `voice` section and rearm:
 
 ```json
 {
   "backgroundAudio": {
-    "mode": "duck",
-    "gain": 0.2,
-    "apps": ["org.example.Player"],
-    "excludeApps": []
+    "mode": "duck-all"
   }
 }
 ```
 
-`mode` is `off` or `duck`; ducking requires at least one explicitly selected application. `gain`
-is a relative linear multiplier from 0.05 to 1; 0.2 is roughly -14 dB, not the desktop mixer's 20%.
-Each list accepts up to 32 exact application IDs or binary names; wildcards are unsupported.
+`duck-all` includes other apps, calls, alerts and other speech, but never Pi Voice outputs across
+sessions. The default remains `off`. Selected-app mode remains available with `"mode": "duck"`
+and a nonempty `apps` list; it excludes identifiable call/alert roles. `apps` is ignored in all mode.
+Optional `gain` defaults to 0.2: a relative linear multiplier from 0.05 to 1, roughly -14 dB at 0.2,
+not the desktop mixer's 20%.
+The optional `apps` and `excludeApps` lists accept up to 32 exact application IDs or binary names;
+wildcards are unsupported.
+Nix-wrapped names such as `.spotify-wrapped` are literal selectors, not paths or patterns.
 Application exclusions win. Changes apply after off/on, not during an existing armed session.
 
-Only selected PipeWire playback streams with inspectable controls are lowered during actual Voice
-readouts. This slice supports the standard default user server/configuration only; target, runtime or
+Only PipeWire playback streams with inspectable controls and verified identity/provenance are
+lowered during actual Voice readouts. Missing app identity does not require guessing in all mode:
+verified per-stream binding is sufficient. When app identity is needed and absent on the stream,
+only its uniquely associated client may supply it; association and identity are rechecked before
+writes and readback. Malformed or ambiguous provenance remains untouched.
+
+This slice supports the standard default user server/configuration only; target, runtime or
 configuration overrides, alternate home/config roots and other servers fail closed before connecting
 to the shared broker. Native and Pulse clients may work; locked/passthrough streams and direct ALSA
-are not covered. This is not universal audio focus. Voice output and identifiable call/alert
-roles are excluded; no master/sink volume or player transport is changed. Videos and music keep
-advancing. A browser may mix calls and media or omit roles: do not select mixed-call applications.
+are not covered. This is not universal audio focus. Pi Voice output is always excluded; no
+master/sink volume or player transport is changed. Videos and music keep advancing. All mode
+intentionally lowers calls and alerts too. In selected-app mode, a browser may mix calls and media
+or omit roles: do not select mixed-call applications if those calls must stay unchanged.
 
 Overlapping Voice instances share ownership. Short queued gaps retain attenuation; cancellation,
 off, output loss and shutdown release it. Channel balance and mute are preserved. Baseline gain is
 restored only while the same stream still has the acknowledged owned gain; manual gain changes win
-and prevent re-ducking during that cycle. A stream becoming a call only releases prior attenuation.
+and prevent re-ducking during that cycle. In selected-app mode, a stream becoming a call only
+releases prior attenuation; all mode can keep it lowered as explicitly configured.
 PipeWire has no atomic compare-and-set: races, lost acknowledgements, broker crashes or daemon loss
 can leave audio quiet. Warnings cannot guarantee restoration; use normal app volume controls if needed.
 Onset lowering is best effort, not a guarantee before the first audible sample.

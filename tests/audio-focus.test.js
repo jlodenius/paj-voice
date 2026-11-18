@@ -16,12 +16,12 @@ function graph(streams = [stream()]) {
   return {
     state: { generation: 'one', streams }, writes: [], operations: [], snapshots: 0,
     async snapshot() { this.snapshots++; return structuredClone(this.state); },
-    async compareAndSet(generation, expected, volumes, restore = false) {
+    async compareAndSet(generation, expected, volumes, restore = false, allOtherPlayback = false) {
       const current = this.state.streams.find(s => s.serial === expected.serial);
       if (generation !== this.state.generation || JSON.stringify(current) !== JSON.stringify(expected)) {
         return false;
       }
-      this.operations.push({ expected: structuredClone(expected), restore });
+      this.operations.push({ expected: structuredClone(expected), restore, allOtherPlayback });
       this.writes.push([...volumes]);
       current.volumes = [...volumes];
       return true;
@@ -29,6 +29,149 @@ function graph(streams = [stream()]) {
   };
 }
 
+const associatedClient = (overrides = {}) => ({ id: 7, serial: '70', source: 'client',
+  appId: '', binary: 'music', role: '', name: '', applicationName: '', ...overrides });
+test('Client ownership changes never replay a previous owner baseline even at identical gains', async () => {
+  for (const replacement of [associatedClient({ id: 8 }), associatedClient({ serial: '71' }),
+    associatedClient({ source: 'node' }), undefined]) {
+    const g = graph([stream({ associatedClient: associatedClient() })]);
+    const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    await focus.set('a', settings());
+    g.state.streams[0].associatedClient = replacement;
+    await focus.set('b', settings(0.1));
+    await focus.close();
+    assert.deepEqual(g.writes, [[0.2, 0.1]]);
+  }
+});
+test('same Client provenance metadata edits restore only owned attenuation with fresh CAS', async () => {
+  for (const edit of [{ role: 'Communication' }, { name: 'new-output' },
+    { appId: 'org.other.App' }, { binary: 'other' }, { applicationName: 'Other App' }]) {
+    const g = graph([stream({ associatedClient: associatedClient() })]);
+    const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    await focus.set('a', settings());
+    Object.assign(g.state.streams[0].associatedClient, edit);
+    await focus.set('b', settings(0.1));
+    assert.deepEqual(g.writes, [[0.2, 0.1], [0.8, 0.4]]);
+    assert.equal(g.operations[1].restore, true);
+    assert.deepEqual(g.operations[1].expected.associatedClient, associatedClient(edit));
+    await focus.close();
+  }
+});
+test('Client protected roles cannot newly duck and Client Voice always denies even restoration', async () => {
+  for (const edit of [{ role: 'Communication' }, { role: 'V.o.i.c.e' },
+    { appId: 'org.paj.voice' }, { name: 'paj_voice_play-extra' },
+    { applicationName: 'paj_voice_play-extra' }]) {
+    const g = graph([stream({ associatedClient: associatedClient(edit) })]);
+    const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    await focus.set('a', settings()); await focus.close();
+    assert.deepEqual(g.writes, []);
+  }
+  for (const userEdit of [false, true]) {
+    const g = graph([stream({ associatedClient: associatedClient() })]);
+    const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    await focus.set('a', settings());
+    Object.assign(g.state.streams[0].associatedClient, userEdit ? { role: 'Communication' } : { appId: 'org.paj.voice' });
+    if (userEdit) g.state.streams[0].volumes = [0.5, 0.3];
+    await focus.close();
+    assert.deepEqual(g.writes, [[0.2, 0.1]]);
+  }
+});
+const allSettings = (gain = 0.25, excludeApps = []) => ({ mode: 'duck-all', gain, apps: [], excludeApps });
+test('all-other playback ducks inspectable anonymous, call, alert and other TTS without guessing selectors', async () => {
+  const anonymous = stream({ appId: '', binary: '', name: 'private-but-not-a-label' });
+  const g = graph([anonymous]);
+  const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+  assert.deepEqual(await focus.preview(allSettings()), {
+    available: ['stream:1'], eligible: ['stream:1'], excluded: 0, unsupported: 0,
+  });
+  assert.deepEqual((await focus.preview(settings())).eligible, []);
+  await focus.set('selected', settings()); assert.deepEqual(g.writes, []);
+  await focus.set('all', allSettings()); assert.deepEqual(g.writes, [[0.2, 0.1]]);
+  assert.equal(g.operations[0].allOtherPlayback, true);
+  await focus.close(); assert.deepEqual(g.writes.at(-1), [0.8, 0.4]);
+  assert.equal(g.operations.at(-1).restore, true); assert.equal(g.operations.at(-1).allOtherPlayback, false);
+  for (const edit of [{ role: 'Communication' }, { role: 'Alert' }, { role: 'Voice' },
+    { associatedClient: associatedClient({ role: 'Communication' }) }]) {
+    const call = graph([stream(edit)]);
+    const engine = createAudioFocus(call, { pollMs: 1000, releaseMs: 0 });
+    await engine.set('all', allSettings()); assert.deepEqual(call.writes, [[0.2, 0.1]]);
+    assert.equal(call.operations[0].allOtherPlayback, true); await engine.close();
+  }
+});
+test('all/selected overlap uses the minimum qualifying gain and restores calls when last all lease ends', async () => {
+  const g = graph([stream(), stream({ serial: '2', id: 11, role: 'Communication' })]);
+  const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+  await focus.set('selected', settings(0.5)); await focus.set('all', allSettings());
+  assert.deepEqual(g.state.streams.map(s => s.volumes), [[0.2, 0.1], [0.2, 0.1]]);
+  await focus.set('strong-selected', settings(0.125));
+  assert.deepEqual(g.state.streams.map(s => s.volumes), [[0.1, 0.05], [0.2, 0.1]]);
+  assert.equal(g.operations.at(-1).allOtherPlayback, true);
+  await focus.set('strong-selected', null, true);
+  await focus.set('all', null, true);
+  assert.deepEqual(g.state.streams.map(s => s.volumes), [[0.4, 0.2], [0.8, 0.4]]);
+  assert.equal(g.operations.at(-1).restore, true); assert.equal(g.operations.at(-1).allOtherPlayback, false);
+  assert.equal(g.operations.at(-2).allOtherPlayback, false);
+  await focus.close();
+  const excluded = graph(); const engine = createAudioFocus(excluded, { pollMs: 1000, releaseMs: 0 });
+  await engine.set('selected', settings(0.5, ['other'], ['music']));
+  await engine.set('all', allSettings()); assert.deepEqual(excluded.writes, []); await engine.close();
+});
+test('all-other playback never ducks PiVoice or muted audio and keeps physical/user/Core fences', async () => {
+  for (const edit of [{ appId: 'org.paj.voice' }, { name: 'paj_voice_play-extra' }, { muted: true },
+    { associatedClient: associatedClient({ appId: 'org.paj.voice' }) },
+    { associatedClient: associatedClient({ name: 'paj_voice_play-extra' }) }]) {
+    const g = graph([stream(edit)]); const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    await focus.set('all', allSettings()); await focus.close(); assert.deepEqual(g.writes, []);
+  }
+  for (const change of ['user', 'client', 'source', 'core']) {
+    const g = graph([stream({ associatedClient: associatedClient() })]);
+    const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    await focus.set('all', allSettings());
+    if (change === 'user') g.state.streams[0].volumes = [0.7, 0.3];
+    if (change === 'client') g.state.streams[0].associatedClient.serial = '71';
+    if (change === 'source') g.state.streams[0].associatedClient.source = 'node';
+    if (change === 'core') g.state.generation = 'two';
+    await focus.close(); assert.deepEqual(g.writes, [[0.2, 0.1]]);
+  }
+  const g = graph([]); const focus = createAudioFocus(g, { pollMs: 5, releaseMs: 0 });
+  await focus.set('all', allSettings()); g.state.streams.push(stream({ appId: '', binary: '' }));
+  await eventually(() => g.writes.length === 1); await focus.close();
+  assert.deepEqual(g.writes, [[0.2, 0.1], [0.8, 0.4]]);
+});
+test('all-other playback rejects malformed Client provenance before preview or gain writes', async () => {
+  for (const client of [null, {}, associatedClient({ id: -1 }), associatedClient({ serial: '' }),
+    associatedClient({ source: 'guess' }), associatedClient({ role: null })]) {
+    const g = graph([stream({ associatedClient: client })]);
+    const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+    assert.equal((await focus.preview(allSettings())).unsupported, 1);
+    await focus.set('all', allSettings()); await focus.close(); assert.deepEqual(g.writes, []);
+  }
+});
+test('printable internal metadata labels remain private and exact in owned restoration', async () => {
+  const label = 'Audio output: stream (1)';
+  const g = graph([stream({ appId: '', binary: '', name: label,
+    associatedClient: associatedClient({ binary: '', name: label, applicationName: 'Application: playback (1)' }) })]);
+  const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });
+  assert.deepEqual(await focus.preview(allSettings()), {
+    available: ['stream:1'], eligible: ['stream:1'], excluded: 0, unsupported: 0,
+  });
+  await focus.set('all', allSettings());
+  g.state.streams[0].associatedClient.name = 'Audio output: stream (2)';
+  await focus.close(); assert.deepEqual(g.writes, [[0.2, 0.1], [0.8, 0.4]]);
+  assert.equal(g.operations[1].restore, true);
+  assert.equal(g.operations[1].expected.associatedClient.name, 'Audio output: stream (2)');
+  for (const label of ['bad\u0000name', 'bad\nname', 'bad\u007fname', 'https://example.invalid', 'a'.repeat(257)]) {
+    for (const field of ['node', 'client', 'application']) {
+      const entry = stream({ associatedClient: associatedClient() });
+      if (field === 'node') entry.name = label;
+      if (field === 'client') entry.associatedClient.name = label;
+      if (field === 'application') entry.associatedClient.applicationName = label;
+      const invalid = graph([entry]); const engine = createAudioFocus(invalid, { pollMs: 1000, releaseMs: 0 });
+      assert.equal((await engine.preview(allSettings())).unsupported, 1);
+      await engine.set('all', allSettings()); await engine.close(); assert.deepEqual(invalid.writes, []);
+    }
+  }
+});
 test('one baseline preserves balance across overlapping owners and restores on close', async () => {
   const g = graph();
   const focus = createAudioFocus(g, { pollMs: 1000, releaseMs: 0 });

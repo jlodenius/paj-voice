@@ -14,6 +14,162 @@ function node(overrides = {}) {
 }
 const dump = nodes => JSON.stringify([{ id: 0, type: 'PipeWire:Interface:Core',
   info: { cookie: 123, props: { 'core.name': 'NOT-GENERATION' } } }, ...nodes]);
+function helium() {
+  const output = node();
+  delete output.info.props['application.id'];
+  delete output.info.props['application.process.binary'];
+  delete output.info.props['media.role'];
+  output.info.props['client.id'] = 7;
+  const client = { id: 7, type: 'PipeWire:Interface:Client', info: { props: {
+    'object.serial': 70, 'application.process.binary': 'helium',
+  } } };
+  return { output, client };
+}
+test('minimal playback Node inherits identity only from its exact associated immutable Client', async () => {
+  const { output, client } = helium();
+  const calls = [];
+  const graph = createPipeWireFocusGraph({ execute: async (_file, args) => {
+    calls.push(args);
+    return { exitCode: 0, stdout: args[0] === '--no-colors' ? dump([output, client]) : 'ok\n' };
+  } });
+  const snapshot = await graph.snapshot();
+  assert.deepEqual(snapshot.streams, [{ ...stream, appId: '', binary: 'helium', role: '',
+    associatedClient: { id: 7, serial: '70', source: 'client', appId: '', binary: 'helium',
+      role: '', name: '', applicationName: '' } }]);
+  assert.equal(await graph.compareAndSet('123', snapshot.streams[0], [0.2, 0.1]), true);
+  assert.deepEqual(calls[1].slice(11), ['client', '7', '70', '', 'helium', '', '', '']);
+});
+test('inheritance rejects malformed and ambiguous association, never guesses or repairs Node identity', async () => {
+  for (const mutate of [
+    ({ output }) => { output.info.props['client.id'] = null; },
+    ({ output }) => { output.info.props['client.id'] = '07'; },
+    ({ output }) => { output.info.props['application.id'] = null; },
+    ({ output }) => { output.info.props['application.process.binary'] = 42; },
+    ({ output }) => { output.info.props['application.id'] = 'https://example.invalid'; },
+    ({ client }) => { delete client.info.props['object.serial']; },
+    ({ client }) => { client.info.props['application.id'] = null; },
+    ({ client }) => { client.id = 8; },
+    ({ client, objects }) => { objects.push(structuredClone(client)); },
+    ({ client, objects }) => { objects.push({ ...structuredClone(client), id: 8 }); },
+    ({ client, objects }) => { objects.push({ id: client.id, type: 'PipeWire:Interface:Node' }); },
+  ]) {
+    const fixture = helium(); fixture.objects = [fixture.output, fixture.client]; mutate(fixture);
+    const graph = createPipeWireFocusGraph({ execute: async () => ({ exitCode: 0, stdout: dump(fixture.objects) }) });
+    assert.deepEqual((await graph.snapshot()).streams, []);
+  }
+});
+test('partial Node identity stays exclusive while either Client or Node protects calls and Voice', async () => {
+  for (const own of [{ 'application.id': 'org.paj.voice' }, { 'paj.voice.owner': '' },
+    { 'node.name': 'paj_voice_play-extra' }, { 'application.name': 'paj_voice_play-extra' },
+    { 'node.name': 'paj_voice_play: stream (1)' }, { 'application.name': 'paj_voice_play: stream (1)' }]) {
+    const { output, client } = helium(); Object.assign(client.info.props, own);
+    const graph = createPipeWireFocusGraph({ execute: async () => ({ exitCode: 0, stdout: dump([output, client]) }) });
+    assert.deepEqual((await graph.snapshot()).streams, []);
+  }
+  const { output, client } = helium();
+  output.info.props['application.id'] = 'org.node.Player';
+  client.info.props['media.role'] = 'Communication';
+  let commands = 0;
+  const graph = createPipeWireFocusGraph({ execute: async (_file, args) => {
+    if (args[0] !== '--no-colors') commands++;
+    return { exitCode: 0, stdout: args[0] === '--no-colors' ? dump([output, client]) : 'ok\n' };
+  } });
+  const [actual] = (await graph.snapshot()).streams;
+  assert.equal(actual.appId, 'org.node.Player'); assert.equal(actual.binary, '');
+  assert.equal(actual.associatedClient.source, 'node');
+  assert.equal(await graph.compareAndSet('123', actual, [0.2, 0.1]), false);
+  assert.equal(commands, 0);
+  assert.equal(await graph.compareAndSet('123', { ...actual, volumes: [0.2, 0.1] }, [1, 0.5], true), true);
+});
+test('CAS rejects malformed Client provenance and never omits an invalid association payload', async () => {
+  const { output, client } = helium();
+  const graph = createPipeWireFocusGraph({ execute: async () => ({ exitCode: 0, stdout: dump([output, client]) }) });
+  const [inherited] = (await graph.snapshot()).streams;
+  let commands = 0;
+  const writer = createPipeWireFocusGraph({ execute: async () => { commands++; return { exitCode: 0, stdout: 'ok\n' }; } });
+  for (const malformed of [null, false, {}, { ...inherited.associatedClient, serial: 70 },
+    { ...inherited.associatedClient, id: 32 }, { ...inherited.associatedClient, serial: '91' },
+    { ...inherited.associatedClient, source: 'guess' }, { ...inherited.associatedClient, binary: 'other' },
+    { ...inherited.associatedClient, name: 'paj_voice_play' },
+    { ...inherited.associatedClient, applicationName: 'https://invalid.example' }]) {
+    assert.equal(await writer.compareAndSet('123', { ...inherited, associatedClient: malformed }, [0.2, 0.1]), false);
+  }
+  assert.equal(commands, 0);
+});
+test('all-other playback inspects anonymous Nodes with or without an immutable associated Client', async () => {
+  for (const associated of [false, true]) {
+    const { output, client } = helium();
+    delete client.info.props['application.process.binary'];
+    if (!associated) delete output.info.props['client.id'];
+    const calls = [];
+    const graph = createPipeWireFocusGraph({ execute: async (_file, args) => {
+      calls.push(args);
+      return { exitCode: 0, stdout: args[0] === '--no-colors' ? dump([output, client]) : 'ok\n' };
+    } });
+    const [anonymous] = (await graph.snapshot()).streams;
+    assert.ok(anonymous); assert.equal(anonymous.appId, ''); assert.equal(anonymous.binary, '');
+    assert.equal(await graph.compareAndSet('123', anonymous, [0.2, 0.1]), false);
+    assert.equal(await graph.compareAndSet('123', anonymous, [0.2, 0.1], false, true), true);
+    assert.equal(calls[1].at(-1), '1'); assert.equal(calls[1].length, associated ? 20 : 12);
+    assert.equal(await graph.compareAndSet('123', { ...anonymous, volumes: [0.2, 0.1] }, [1, 0.5], true), true);
+  }
+});
+test('only explicit all-other flag permits new call, alert and other Voice-role attenuation', async () => {
+  const calls = [];
+  const graph = createPipeWireFocusGraph({ execute: async (_file, args) => {
+    calls.push(args); return { exitCode: 0, stdout: 'ok\n' };
+  } });
+  for (const role of ['Communication', 'Alert', 'V.o.i.c.e']) {
+    const call = { ...stream, role };
+    assert.equal(await graph.compareAndSet('123', call, [0.2, 0.1]), false);
+    assert.equal(await graph.compareAndSet('123', call, [0.2, 0.1], false, true), true);
+    assert.equal(await graph.compareAndSet('123', { ...call, muted: true }, [0.2, 0.1], false, true), false);
+    assert.equal(await graph.compareAndSet('123', call, [0.2, 0.1], true, true), false);
+  }
+  for (const flag of [1, 'true', null]) assert.equal(await graph.compareAndSet('123', stream, [0.2, 0.1], false, flag), false);
+  for (const own of [{ appId: 'org.paj.voice' }, { name: 'paj_voice_play-extra' }])
+    assert.equal(await graph.compareAndSet('123', { ...stream, ...own }, [0.2, 0.1], false, true), false);
+  assert.equal(calls.length, 3);
+});
+test('printable metadata labels are preserved literally for anonymous playback CAS, never used as selectors', async () => {
+  const { output, client } = helium();
+  const label = 'Audio output: stream (1)', appLabel = 'Application: playback (1)';
+  output.info.props['node.name'] = label;
+  output.info.props['application.name'] = appLabel;
+  client.info.props['node.name'] = label;
+  client.info.props['application.name'] = appLabel;
+  delete client.info.props['application.process.binary'];
+  const calls = [];
+  const graph = createPipeWireFocusGraph({ execute: async (_file, args) => {
+    calls.push(args);
+    return { exitCode: 0, stdout: args[0] === '--no-colors' ? dump([output, client]) : 'ok\n' };
+  } });
+  const [actual] = (await graph.snapshot()).streams;
+  assert.ok(actual); assert.equal(actual.name, label); assert.equal(actual.appId, ''); assert.equal(actual.binary, '');
+  assert.equal(await graph.compareAndSet('123', actual, [0.2, 0.1], false, true), true);
+  assert.equal(calls[1][6], label); assert.equal(calls[1][17], label); assert.equal(calls[1][18], appLabel);
+  assert.deepEqual(calls[1].slice(3, 6), ['', '', '']);
+  assert.equal(await graph.compareAndSet('123', { ...actual, name: 'a'.repeat(256) }, [0.2, 0.1], false, true), true);
+});
+test('metadata labels reject controls, URLs and excessive lengths without executing a write', async () => {
+  for (const field of ['node', 'client', 'application', 'node-application']) {
+    for (const label of ['bad\u0000name', 'bad\nname', 'bad\u007fname', 'https://example.invalid', 'a'.repeat(257), 'naïve']) {
+      const { output, client } = helium();
+      if (field === 'node') output.info.props['node.name'] = label;
+      if (field === 'client') client.info.props['node.name'] = label;
+      if (field === 'application') client.info.props['application.name'] = label;
+      if (field === 'node-application') output.info.props['application.name'] = label;
+      const graph = createPipeWireFocusGraph({ execute: async () => ({ exitCode: 0, stdout: dump([output, client]) }) });
+      assert.deepEqual((await graph.snapshot()).streams, []);
+    }
+  }
+  let writes = 0;
+  const writer = createPipeWireFocusGraph({ execute: async () => { writes++; return { exitCode: 0, stdout: 'ok\n' }; } });
+  for (const label of ['bad\u0000name', 'bad\nname', 'bad\u007fname', 'https://example.invalid', 'a'.repeat(257)]) {
+    assert.equal(await writer.compareAndSet('123', { ...stream, name: label }, [0.2, 0.1], false, true), false);
+  }
+  assert.equal(writes, 0);
+});
 test('snapshot exposes only validated playback stream identity and gains', async () => {
   const graph = createPipeWireFocusGraph({ execute: async () => ({ exitCode: 0, stdout: dump([node()]) }) });
   assert.deepEqual(await graph.snapshot(), { generation: '123', streams: [stream] });
@@ -44,7 +200,7 @@ test('CAS passes exact expected identity and gains and requires native acknowled
 test('own tagged and named playback nodes are never exposed or writable', async () => {
   for (const props of [{ 'application.id': 'org.paj.voice' }, { 'paj.voice.owner': 'owner-1' },
     { 'node.name': 'paj_voice_play' }, { 'node.name': 'paj_voice_play-short' },
-    { 'node.name': 'paj_voice_playback.anything' }]) {
+    { 'node.name': 'paj_voice_playback.anything' }, { 'node.name': 'paj_voice_play: stream (1)' }]) {
     const own = node(); Object.assign(own.info.props, props);
     const graph = createPipeWireFocusGraph({ execute: async () => ({ exitCode: 0, stdout: dump([own]) }) });
     assert.deepEqual((await graph.snapshot()).streams, []);

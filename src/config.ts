@@ -37,14 +37,17 @@ const receipt = (value: unknown, fallback: string, name: string): string => {
   return result.trim();
 };
 
+export function isBackgroundAudioSelector(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 128 && /^\.?[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(value);
+}
+
 export function validateBackgroundAudio(value: unknown = {}): BackgroundAudioSettings {
   keys(value, ['mode', 'gain', 'apps', 'excludeApps'], 'backgroundAudio');
   const mode = value.mode === undefined ? 'off' : value.mode;
-  if (mode !== 'off' && mode !== 'duck') fail('backgroundAudio.mode must be off or duck');
+  if (mode !== 'off' && mode !== 'duck' && mode !== 'duck-all') fail('backgroundAudio.mode must be off, duck or duck-all');
   const apps = (name: 'apps' | 'excludeApps') => {
     const list = value[name] === undefined ? [] : value[name];
-    if (!Array.isArray(list) || list.length > 32 || list.some(item =>
-      typeof item !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(item))) {
+    if (!Array.isArray(list) || list.length > 32 || !list.every(isBackgroundAudioSelector)) {
       fail(`backgroundAudio.${name} must contain at most 32 exact application IDs or binary names`);
     }
     return [...new Set(list as string[])];

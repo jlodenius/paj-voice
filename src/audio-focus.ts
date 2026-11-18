@@ -1,4 +1,5 @@
 import type { BackgroundAudioSettings, FocusGraph, FocusStream, FocusPreview } from './audio-focus-types.ts';
+import { isFocusMetadataLabel } from './audio-focus-types.ts';
 import { validateBackgroundAudio } from './config.ts';
 
 const printable = (value: string) => typeof value === 'string' && /^[\x20-\x7e]{1,256}$/.test(value);
@@ -6,12 +7,23 @@ const roles = new Set(['communication', 'phone', 'alert', 'emergency', 'notifica
   'accessibility', 'alarm', 'ringtone', 'voice']);
 const sameVector = (a: number[], b: number[]) => a.length === b.length
   && a.every((v, i) => Math.abs(v - b[i]!) <= 1e-6 * Math.max(1, Math.abs(v), Math.abs(b[i]!)));
+const association = (stream: FocusStream) => stream.associatedClient
+  ? JSON.stringify([stream.associatedClient.id, stream.associatedClient.serial, stream.associatedClient.source]) : '';
 const identity = (a: FocusStream, b: FocusStream) => a.serial === b.serial && a.id === b.id
-  && a.appId === b.appId && a.binary === b.binary && a.role === b.role && a.name === b.name;
+  && a.appId === b.appId && a.binary === b.binary && a.role === b.role && a.name === b.name
+  && JSON.stringify(a.associatedClient) === JSON.stringify(b.associatedClient);
 const matches = (apps: string[], stream: FocusStream) => apps.includes(stream.appId) || apps.includes(stream.binary);
 function supported(stream: FocusStream) {
+  const client = stream.associatedClient;
+  if (client !== undefined && (!client || typeof client !== 'object'
+      || !Number.isSafeInteger(client.id) || client.id < 0 || client.id > 0xffffffff
+      || client.id === stream.id || !printable(client.serial) || client.serial === stream.serial
+      || !['node', 'client'].includes(client.source)
+      || ![client.appId, client.binary, client.role].every(value => value === '' || printable(value))
+      || !isFocusMetadataLabel(client.name) || !isFocusMetadataLabel(client.applicationName))) return false;
   return printable(stream.serial) && Number.isSafeInteger(stream.id) && stream.id >= 0
     && (stream.appId === '' || printable(stream.appId)) && (stream.binary === '' || printable(stream.binary))
+    && (stream.role === '' || printable(stream.role)) && isFocusMetadataLabel(stream.name) && stream.name !== ''
     && stream.volumes.length > 0 && stream.volumes.length <= 64
     && Array.from(stream.volumes).every(v => Number.isFinite(v) && v >= 0 && v <= 4)
     && typeof stream.muted === 'boolean';
@@ -24,11 +36,15 @@ function applicationSelector(stream: FocusStream): string | undefined {
   return undefined;
 }
 function voiceStream(stream: FocusStream) {
-  return stream.appId === 'org.paj.voice' || stream.name.startsWith('paj_voice_play');
+  const client = stream.associatedClient;
+  return stream.appId === 'org.paj.voice' || stream.name.startsWith('paj_voice_play')
+    || (client !== undefined && (client.appId === 'org.paj.voice'
+      || client.name.startsWith('paj_voice_play') || client.applicationName.startsWith('paj_voice_play')));
 }
-function protectedStream(stream: FocusStream) {
+function protectedStream(stream: FocusStream, allOtherPlayback = false) {
   return stream.muted || voiceStream(stream)
-    || roles.has(stream.role.toLowerCase().replace(/[^a-z]/g, ''));
+    || (!allOtherPlayback && [stream.role, stream.associatedClient?.role ?? ''].some(role =>
+      roles.has(role.toLowerCase().replace(/[^a-z]/g, ''))));
 }
 export function createAudioFocus(graph: FocusGraph, options: {
   pollMs?: number; releaseMs?: number; onWarning?: (message: string) => void;
@@ -66,9 +82,11 @@ export function createAudioFocus(graph: FocusGraph, options: {
     else saturated = true;
   }
   function gainFor(stream: FocusStream, settings: BackgroundAudioSettings[]) {
-    if (protectedStream(stream) || settings.some(s => matches(s.excludeApps, stream))) return undefined;
-    const gains = settings.filter(s => s.mode === 'duck' && matches(s.apps, stream)).map(s => s.gain);
-    return gains.length ? Math.min(...gains) : undefined;
+    if (protectedStream(stream, true) || settings.some(s => matches(s.excludeApps, stream))) return undefined;
+    const qualifying = settings.filter(s => s.mode === 'duck-all'
+      || (s.mode === 'duck' && !protectedStream(stream) && matches(s.apps, stream)));
+    return qualifying.length ? { gain: Math.min(...qualifying.map(s => s.gain)),
+      allOtherPlayback: qualifying.some(s => s.mode === 'duck-all') } : undefined;
   }
   async function reconcile() {
     if (failed) return;
@@ -89,6 +107,7 @@ export function createAudioFocus(graph: FocusGraph, options: {
     for (const [key, held] of owned) {
       const current = present.get(key);
       if (!current || !supported(current) || current.id !== held.stream.id
+        || association(current) !== association(held.stream)
         || !sameVector(current.volumes, held.stream.volumes)) {
         owned.delete(key);
         tombstone(key);
@@ -109,7 +128,8 @@ export function createAudioFocus(graph: FocusGraph, options: {
         continue;
       }
       const contextChanged = held && (!identity(stream, held.stream) || stream.muted !== held.stream.muted);
-      const gain = contextChanged ? undefined : gainFor(stream, [...owners.values()]);
+      const target = contextChanged ? undefined : gainFor(stream, [...owners.values()]);
+      const gain = target?.gain;
       if (release && !owners.size && held && !contextChanged && !protectedStream(stream)) continue;
       if (gain === undefined && !held) continue;
       const baseline = held?.baseline ?? [...stream.volumes];
@@ -119,13 +139,14 @@ export function createAudioFocus(graph: FocusGraph, options: {
         continue;
       }
       const acknowledged = await graph.compareAndSet(snapshot.generation, stream, volumes,
-        held !== undefined && gain === undefined);
+        held !== undefined && gain === undefined, target?.allOtherPlayback ?? false);
       if (!acknowledged) {
         owned.delete(key);
         tombstone(key);
         warnUnconfirmed('Audio focus write acknowledgement was not confirmed');
       } else if (gain !== undefined) {
-        owned.set(key, { baseline, stream: { ...stream, volumes: [...volumes] } });
+        owned.set(key, { baseline, stream: { ...stream, volumes: [...volumes],
+          ...(stream.associatedClient ? { associatedClient: { ...stream.associatedClient } } : {}) } });
       } else { owned.delete(key); tombstone(key); }
     }
   }
@@ -189,9 +210,10 @@ export function createAudioFocus(graph: FocusGraph, options: {
       let unsupported = Math.max(0, snapshot.streams.length - 128);
       for (const stream of snapshot.streams.slice(0, 128)) {
         if (!supported(stream)) { unsupported++; continue; }
-        const id = applicationSelector(stream);
+        const allOtherPlayback = validated.mode === 'duck-all';
+        const id = applicationSelector(stream) ?? (allOtherPlayback ? `stream:${stream.serial}` : undefined);
         if (!id) { unsupported++; continue; }
-        if (!protectedStream(stream)) available.add(id);
+        if (!protectedStream(stream, allOtherPlayback)) available.add(id);
         if (gainFor(stream, [validated]) === undefined) { excluded++; continue; }
         eligible.add(id);
       }

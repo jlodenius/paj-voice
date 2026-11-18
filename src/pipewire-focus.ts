@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import type { FocusGraph, FocusStream } from './audio-focus-types.ts';
+import type { FocusAssociatedClient, FocusGraph, FocusStream } from './audio-focus-types.ts';
+import { isFocusMetadataLabel } from './audio-focus-types.ts';
 
 export interface FocusCommandLimits { timeoutMs: number; maxOutputBytes: number }
 export interface PipeWireFocusOptions {
@@ -34,7 +35,27 @@ const serial = (value: unknown): string | undefined => integer(value) ? String(v
     && BigInt(value) <= 18446744073709551615n ? value : undefined;
 const gains = (value: unknown): value is number[] => Array.isArray(value) && value.length > 0
   && value.length <= 64 && value.every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 16);
-function parseNode(value: unknown): FocusStream | undefined {
+interface ObjectIndex {
+  ids: Map<number, Record<string, unknown> | undefined>;
+  serials: Map<string, number>;
+}
+function clientFor(props: Record<string, unknown>, objects: ObjectIndex, source: 'node' | 'client'):
+    FocusAssociatedClient | undefined {
+  const id = serial(props['client.id']);
+  if (id === undefined || BigInt(id) > 0xffffffffn) return;
+  const client = objects.ids.get(Number(id)), clientProps = record(record(client?.info)?.props);
+  if (client?.type !== 'PipeWire:Interface:Client' || !clientProps) return;
+  const objectSerial = serial(clientProps['object.serial']);
+  if (!objectSerial || objects.serials.get(objectSerial) !== 1) return;
+  const get = (key: string) => clientProps[key] === undefined ? '' : clientProps[key];
+  const appId = get('application.id'), binary = get('application.process.binary');
+  const role = get('media.role'), name = get('node.name'), appName = get('application.name');
+  if (!optionalToken(appId) || !optionalToken(binary) || !optionalToken(role)
+      || !isFocusMetadataLabel(name) || !isFocusMetadataLabel(appName) || ownStream(appId, name)
+      || ownStream('', appName) || Object.hasOwn(clientProps, 'paj.voice.owner')) return;
+  return { id: Number(id), serial: objectSerial, source, appId, binary, role, name, applicationName: appName };
+}
+function parseNode(value: unknown, objects: ObjectIndex): FocusStream | undefined {
   const node = record(value), info = record(node?.info), props = record(info?.props);
   const params = record(info?.params), entries = params?.Props;
   if (node?.type !== 'PipeWire:Interface:Node' || !integer(node.id) || (node.id as number) > 0xffffffff
@@ -44,11 +65,19 @@ function parseNode(value: unknown): FocusStream | undefined {
   const appId = props['application.id'] === undefined ? '' : props['application.id'];
   const binary = props['application.process.binary'] === undefined ? '' : props['application.process.binary'];
   const role = props['media.role'] === undefined ? '' : props['media.role'], name = props['node.name'];
-  if (!id || !optionalToken(appId) || !optionalToken(binary) || (!appId && !binary)
-      || !optionalToken(role) || !token(name) || ownStream(appId, name)
+  const appName = props['application.name'] === undefined ? '' : props['application.name'];
+  if (!id || !optionalToken(appId) || !optionalToken(binary)
+      || !optionalToken(role) || !isFocusMetadataLabel(name) || !name
+      || !isFocusMetadataLabel(appName) || ownStream(appId, name) || ownStream('', appName)
       || Object.hasOwn(props, 'paj.voice.owner') || !gains(state?.channelVolumes) || typeof state?.mute !== 'boolean') return;
-  return { serial: id, id: node.id as number, appId, binary, role, name,
-    volumes: [...state.channelVolumes], muted: state.mute };
+  const source = !appId && !binary ? 'client' : 'node';
+  const associatedClient = Object.hasOwn(props, 'client.id') ? clientFor(props, objects, source) : undefined;
+  if (Object.hasOwn(props, 'client.id') && !associatedClient) return;
+  return { serial: id, id: node.id as number,
+    appId: source === 'client' ? associatedClient?.appId ?? '' : appId,
+    binary: source === 'client' ? associatedClient?.binary ?? '' : binary, role, name,
+    volumes: [...state.channelVolumes], muted: state.mute,
+    ...(associatedClient ? { associatedClient } : {}) };
 }
 export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): FocusGraph {
   const run = options.execute ?? execute;
@@ -70,32 +99,47 @@ export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): Fo
       const cookie = record(cores[0]?.info)?.cookie;
       if (cores.length !== 1 || !integer(cookie) || (cookie as number) > 0xffffffff)
         throw new Error('Missing PipeWire core cookie');
-      const streams = entries.map(parseNode).filter((v): v is FocusStream => v !== undefined);
-      const ids = new Map<number, number>(), serials = new Map<string, number>();
-      for (const stream of streams) {
-        ids.set(stream.id, (ids.get(stream.id) ?? 0) + 1);
-        serials.set(stream.serial, (serials.get(stream.serial) ?? 0) + 1);
+      const objects: ObjectIndex = { ids: new Map(), serials: new Map() };
+      for (const value of entries) {
+        const entry = record(value), id = entry?.id;
+        if (integer(id)) objects.ids.set(id as number, objects.ids.has(id as number) ? undefined : entry);
+        const objectSerial = serial(record(record(entry?.info)?.props)?.['object.serial']);
+        if (objectSerial) objects.serials.set(objectSerial, (objects.serials.get(objectSerial) ?? 0) + 1);
       }
+      const streams = entries.map(entry => parseNode(entry, objects)).filter((v): v is FocusStream => v !== undefined);
       return { generation: String(cookie), streams: streams.filter(v =>
-        ids.get(v.id) === 1 && serials.get(v.serial) === 1) };
+        objects.ids.get(v.id) !== undefined && objects.serials.get(v.serial) === 1) };
     },
-    async compareAndSet(generation, stream, volumes, restore = false) {
+    async compareAndSet(generation, stream, volumes, restore = false, allOtherPlayback = false) {
       if (typeof generation !== 'string' || !/^(0|[1-9][0-9]{0,9})$/u.test(generation)
           || Number(generation) > 0xffffffff || !stream || typeof stream.serial !== 'string'
           || !serial(stream.serial) || !integer(stream.id) || stream.id > 0xffffffff
           || ![stream.appId, stream.binary, stream.role].every(optionalToken)
-          || (!stream.appId && !stream.binary) || !token(stream.name)
+          || (!stream.appId && !stream.binary && !allOtherPlayback && !restore)
+          || !isFocusMetadataLabel(stream.name) || !stream.name
           || !gains(stream.volumes) || !gains(volumes) || volumes.length !== stream.volumes.length
-          || typeof stream.muted !== 'boolean' || typeof restore !== 'boolean'
-          || ((protectedRole(stream.role) || stream.muted) && !restore)
+          || typeof stream.muted !== 'boolean' || typeof restore !== 'boolean' || typeof allOtherPlayback !== 'boolean'
+          || ((stream.muted || (protectedRole(stream.role) && !allOtherPlayback)) && !restore)
           || (restore && volumes.some((value, index) => value < stream.volumes[index]!))
           || ownStream(stream.appId, stream.name))
         return false;
+      const client = stream.associatedClient;
+      if (client !== undefined && (!record(client) || !integer(client.id) || client.id > 0xffffffff
+          || client.id === stream.id || !serial(client.serial) || client.serial === stream.serial
+          || typeof client.serial !== 'string' || !['node', 'client'].includes(client.source)
+          || ![client.appId, client.binary, client.role].every(optionalToken)
+          || !isFocusMetadataLabel(client.name) || !isFocusMetadataLabel(client.applicationName)
+          || ownStream(client.appId, client.name)
+          || ownStream('', client.applicationName) || (protectedRole(client.role) && !restore && !allOtherPlayback)
+          || (client.source === 'client' && (stream.appId !== client.appId || stream.binary !== client.binary)))) return false;
       try {
         const result = await run(options.controlPath
           ?? fileURLToPath(new URL('../../../bin/paj-voice-focus-control', import.meta.url)), [generation, stream.serial, String(stream.id), stream.appId,
           stream.binary, stream.role, stream.name, stream.muted ? '1' : '0',
-          stream.volumes.join(','), volumes.join(','), restore ? '1' : '0'], { timeoutMs: 1800, maxOutputBytes: 1024 });
+          stream.volumes.join(','), volumes.join(','), restore ? '1' : '0',
+          ...(client ? [client.source, String(client.id), client.serial, client.appId, client.binary,
+            client.role, client.name, client.applicationName] : []),
+          ...(allOtherPlayback ? ['1'] : [])], { timeoutMs: 1800, maxOutputBytes: 1024 });
         return result.exitCode === 0 && result.stdout === 'ok\n';
       } catch { return false; }
     },

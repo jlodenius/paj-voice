@@ -1,8 +1,22 @@
 export interface BackgroundAudioSettings {
-  mode: 'off' | 'duck';
+  mode: 'off' | 'duck' | 'duck-all';
   gain: number;
   apps: string[];
   excludeApps: string[];
+}
+
+export const isFocusMetadataLabel = (value: unknown): value is string => typeof value === 'string'
+  && /^[\x20-\x7e]{0,256}$/u.test(value) && !value.includes('://');
+
+export interface FocusAssociatedClient {
+  id: number;
+  serial: string;
+  source: 'node' | 'client';
+  appId: string;
+  binary: string;
+  role: string;
+  name: string;
+  applicationName: string;
 }
 
 export interface FocusStream {
@@ -14,6 +28,7 @@ export interface FocusStream {
   name: string;
   volumes: number[];
   muted: boolean;
+  associatedClient?: FocusAssociatedClient;
 }
 
 export interface FocusSnapshot {
@@ -23,7 +38,8 @@ export interface FocusSnapshot {
 
 export interface FocusGraph {
   snapshot(): Promise<FocusSnapshot>;
-  compareAndSet(generation: string, stream: FocusStream, volumes: number[], restore?: boolean): Promise<boolean>;
+  compareAndSet(generation: string, stream: FocusStream, volumes: number[], restore?: boolean,
+    allOtherPlayback?: boolean): Promise<boolean>;
 }
 
 export interface FocusPreview {

@@ -18,13 +18,19 @@ struct state {
     struct pw_core *core;
     struct pw_registry *registry;
     struct pw_node *node;
-    struct spa_hook core_hook, registry_hook, node_hook, proxy_hook;
+    struct pw_client *client;
+    struct pw_node_info *bound_node;
+    struct pw_client_info *bound_client;
+    struct spa_hook core_hook, registry_hook, node_hook, proxy_hook, client_hook, client_proxy_hook;
     uint32_t cookie, id;
     const char *serial, *app, *binary, *role, *name;
+    uint32_t client_id;
+    const char *client_serial, *client_app, *client_binary, *client_role, *client_name, *client_application_name;
+    bool associated, inherit, client_ok;
     float expected[CHANNELS], desired[CHANNELS];
     uint32_t channels;
-    bool mute, restore, cookie_ok, identity_ok, params_ok, success, failed;
-    int phase, pending, param_count;
+    bool mute, restore, all, cookie_ok, identity_ok, params_ok, success, failed;
+    int phase, pending, param_count, param_seq;
 };
 static void fail(struct state *s) {
     s->failed = true;
@@ -94,7 +100,7 @@ static bool own_stream(const char *app, const char *name, const struct spa_dict 
         || (props && spa_dict_lookup(props, "paj.voice.owner") != NULL);
 }
 static bool release_gate(const struct state *s) {
-    if ((protected_role(s->role) || s->mute) && !s->restore) return false;
+    if ((s->mute || (protected_role(s->role) && !s->all)) && !s->restore) return false;
     /* Only the trusted caller tracks ownership; cleanup may undo attenuation,
        including after a role/mute edit, but must never further attenuate. */
     if (s->restore)
@@ -102,13 +108,66 @@ static bool release_gate(const struct state *s) {
             if (s->desired[i] < s->expected[i]) return false;
     return true;
 }
+static const char *prop(const struct spa_dict *props, const char *key) {
+    const char *value = props ? spa_dict_lookup(props, key) : NULL;
+    return value ? value : "";
+}
+static bool unique_props(const struct spa_dict *props) {
+    if (!props || props->n_items > 256) return false;
+    for (uint32_t i = 0; i < props->n_items; i++)
+        for (uint32_t j = i + 1; j < props->n_items; j++)
+            if (strcmp(props->items[i].key, props->items[j].key) == 0) return false;
+    return true;
+}
+static bool actual_voice(const struct spa_dict *props) {
+    return own_stream(prop(props, PW_KEY_APP_ID), prop(props, PW_KEY_NODE_NAME), props)
+        || own_stream("", prop(props, PW_KEY_APP_NAME), props);
+}
+static bool token(const char *value) {
+    if (!value || strlen(value) > 256) return false;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++)
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')
+            || strchr("_.@+-", *p))) return false;
+    return true;
+}
+static bool metadata_label(const char *value) {
+    if (!value || strlen(value) > 256 || strstr(value, "://")) return false;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++)
+        if (*p < 0x20 || *p > 0x7e) return false;
+    return true;
+}
+static bool bound_client_identity(const struct state *s, const struct pw_client_info *info) {
+    return s->client_id != s->id && s->client_serial && strcmp(s->client_serial, s->serial) != 0
+        && token(s->client_app) && token(s->client_binary) && token(s->client_role)
+        && metadata_label(s->client_name) && metadata_label(s->client_application_name)
+        && info && info->id == s->client_id && unique_props(info->props)
+        && !actual_voice(info->props)
+        && equal_prop(info->props, PW_KEY_OBJECT_SERIAL, s->client_serial)
+        && equal_optional_prop(info->props, PW_KEY_APP_ID, s->client_app)
+        && equal_optional_prop(info->props, PW_KEY_APP_PROCESS_BINARY, s->client_binary)
+        && equal_optional_prop(info->props, PW_KEY_MEDIA_ROLE, s->client_role)
+        && equal_optional_prop(info->props, PW_KEY_NODE_NAME, s->client_name)
+        && equal_optional_prop(info->props, PW_KEY_APP_NAME, s->client_application_name)
+        && (!protected_role(prop(info->props, PW_KEY_MEDIA_ROLE)) || s->restore || s->all)
+        && (!s->inherit || (strcmp(s->app, s->client_app) == 0 && strcmp(s->binary, s->client_binary) == 0));
+}
+static bool node_association(const struct state *s, const struct spa_dict *props) {
+    const char *client = props ? spa_dict_lookup(props, PW_KEY_CLIENT_ID) : NULL;
+    uint64_t client_id;
+    return s->associated ? number(client, UINT32_MAX, &client_id) && client_id == s->client_id : client == NULL;
+}
 static bool bound_identity(const struct state *s, const struct pw_node_info *info) {
+    if (!info || !unique_props(info->props) || !token(s->app) || !token(s->binary)
+        || (!*s->app && !*s->binary && !s->all && !s->restore) || !token(s->role)
+        || !metadata_label(s->name) || !*s->name
+        || !metadata_label(prop(info->props, PW_KEY_APP_NAME))) return false;
+    if (!node_association(s, info->props)) return false;
     return info->id == s->id && release_gate(s)
-        && !own_stream(s->app, s->name, info->props)
+        && !actual_voice(info->props)
         && equal_prop(info->props, PW_KEY_OBJECT_SERIAL, s->serial)
         && equal_prop(info->props, PW_KEY_MEDIA_CLASS, "Stream/Output/Audio")
-        && equal_optional_prop(info->props, PW_KEY_APP_ID, s->app)
-        && equal_optional_prop(info->props, PW_KEY_APP_PROCESS_BINARY, s->binary)
+        && equal_optional_prop(info->props, PW_KEY_APP_ID, s->inherit ? "" : s->app)
+        && equal_optional_prop(info->props, PW_KEY_APP_PROCESS_BINARY, s->inherit ? "" : s->binary)
         && equal_optional_prop(info->props, PW_KEY_MEDIA_ROLE, s->role)
         && equal_prop(info->props, PW_KEY_NODE_NAME, s->name);
 }
@@ -133,19 +192,36 @@ static bool props_match(const struct spa_pod *pod, const float *values, uint32_t
 }
 static void node_info(void *data, const struct pw_node_info *info) {
     struct state *s = data;
+    if (s->failed) return;
+    if (info->id != s->id) { fail(s); return; }
     if (!(info->change_mask & PW_NODE_CHANGE_MASK_PROPS)) return;
-    s->identity_ok = bound_identity(s, info);
+    s->bound_node = pw_node_info_update(s->bound_node, info);
+    s->identity_ok = bound_identity(s, s->bound_node);
     if (!s->identity_ok) fail(s);
 }
 static void node_param(void *data, int seq, uint32_t id, uint32_t index, uint32_t next, const struct spa_pod *param) {
     struct state *s = data;
-    (void)seq; (void)index; (void)next;
-    if (id != SPA_PARAM_Props || (s->phase != 2 && s->phase != 4)) { fail(s); return; }
+    (void)index; (void)next;
+    if (s->failed || (s->phase != 2 && s->phase != 4) || seq != s->param_seq || id != SPA_PARAM_Props
+        || !param || !spa_pod_is_object(param) || SPA_POD_OBJECT_TYPE(param) != SPA_TYPE_OBJECT_Props
+        || SPA_POD_OBJECT_ID(param) != SPA_PARAM_Props) return;
     s->param_count++;
     s->params_ok = s->param_count == 1 && props_match(param,
         s->phase == 2 ? s->expected : s->desired, s->channels, s->mute);
     if (!s->params_ok) fail(s);
 }
+static void client_info(void *data, const struct pw_client_info *info) {
+    struct state *s = data;
+    if (s->failed) return;
+    if (info->id != s->client_id) { fail(s); return; }
+    if (!(info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS)) return;
+    s->bound_client = pw_client_info_update(s->bound_client, info);
+    s->client_ok = bound_client_identity(s, s->bound_client);
+    if (!s->client_ok) fail(s);
+}
+static const struct pw_client_events client_events = {
+    PW_VERSION_CLIENT_EVENTS, .info = client_info,
+};
 static const struct pw_node_events node_events = {
     PW_VERSION_NODE_EVENTS, .info = node_info, .param = node_param,
 };
@@ -159,8 +235,20 @@ static const struct pw_proxy_events proxy_events = {
 static void global(void *data, uint32_t id, uint32_t permissions, const char *type,
                    uint32_t version, const struct spa_dict *props) {
     struct state *s = data;
+    if (s->failed) return;
+    if (s->associated && id == s->client_id) {
+        if (s->client || strcmp(type, PW_TYPE_INTERFACE_Client) || !(permissions & PW_PERM_R)
+            || !unique_props(props) || !equal_prop(props, PW_KEY_OBJECT_SERIAL, s->client_serial)) {
+            fail(s); return;
+        }
+        s->client = pw_registry_bind(s->registry, id, type, SPA_MIN(version, (uint32_t)PW_VERSION_CLIENT), 0);
+        if (!s->client) { fail(s); return; }
+        pw_proxy_add_listener((struct pw_proxy *)s->client, &s->client_proxy_hook, &proxy_events, s);
+        pw_client_add_listener(s->client, &s->client_hook, &client_events, s);
+        return;
+    }
     if (id != s->id) return;
-    if (s->node || strcmp(type, PW_TYPE_INTERFACE_Node) ||
+    if (s->node || strcmp(type, PW_TYPE_INTERFACE_Node) || !unique_props(props) || !node_association(s, props) ||
         (permissions & (PW_PERM_R | PW_PERM_W | PW_PERM_X)) != (PW_PERM_R | PW_PERM_W | PW_PERM_X) ||
         !equal_prop(props, PW_KEY_OBJECT_SERIAL, s->serial) ||
         !equal_prop(props, PW_KEY_MEDIA_CLASS, "Stream/Output/Audio")) { fail(s); return; }
@@ -171,7 +259,7 @@ static void global(void *data, uint32_t id, uint32_t permissions, const char *ty
 }
 static void global_remove(void *data, uint32_t id) {
     struct state *s = data;
-    if (id == s->id) fail(s);
+    if (id == s->id || (s->associated && id == s->client_id)) fail(s);
 }
 static const struct pw_registry_events registry_events = {
     PW_VERSION_REGISTRY_EVENTS, .global = global, .global_remove = global_remove,
@@ -187,8 +275,12 @@ static void sync_next(struct state *s) {
 }
 static void enumerate(struct state *s, int phase) {
     s->phase = phase; s->params_ok = false; s->param_count = 0;
-    if (pw_node_enum_params(s->node, 0, SPA_PARAM_Props, 0, 2, NULL) < 0) { fail(s); return; }
+    if (pw_node_enum_params(s->node, ++s->param_seq, SPA_PARAM_Props, 0, 2, NULL) < 0) { fail(s); return; }
     sync_next(s);
+}
+static bool current_identity(const struct state *s) {
+    return s->identity_ok && bound_identity(s, s->bound_node)
+        && (!s->associated || (s->client && s->client_ok && bound_client_identity(s, s->bound_client)));
 }
 static void core_done(void *data, uint32_t id, int seq) {
     struct state *s = data;
@@ -197,10 +289,10 @@ static void core_done(void *data, uint32_t id, int seq) {
     switch (s->phase) {
     case 0: s->phase = 1; sync_next(s); break;
     case 1:
-        if (!s->identity_ok) { fail(s); return; }
+        if (!current_identity(s)) { fail(s); return; }
         enumerate(s, 2); break;
     case 2: {
-        if (!s->params_ok || !s->identity_ok) { fail(s); return; }
+        if (!s->params_ok || !current_identity(s)) { fail(s); return; }
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod *pod = spa_pod_builder_add_object(&b,
@@ -211,9 +303,11 @@ static void core_done(void *data, uint32_t id, int seq) {
         if (!pod || pw_node_set_param(s->node, SPA_PARAM_Props, 0, pod) < 0) { fail(s); return; }
         s->phase = 3; sync_next(s); break;
     }
-    case 3: enumerate(s, 4); break;
+    case 3:
+        if (!current_identity(s)) { fail(s); return; }
+        enumerate(s, 4); break;
     case 4:
-        if (!s->params_ok || !s->identity_ok) { fail(s); return; }
+        if (!s->params_ok || !current_identity(s)) { fail(s); return; }
         s->success = true; pw_main_loop_quit(s->loop); break;
     default: fail(s);
     }
@@ -306,7 +400,7 @@ static bool install_parent_guard(void) {
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return self_test();
     if (!install_parent_guard()) return 1;
-    if (argc != 12) return 1;
+    if (argc != 12 && argc != 13 && argc != 20 && argc != 21) return 1;
     struct state s = {0};
     uint64_t cookie, id, serial_number;
     uint32_t count;
@@ -315,10 +409,29 @@ int main(int argc, char **argv) {
         || !parse_flag(argv[8], &s.mute) || !parse_flag(argv[11], &s.restore)
         || !parse_gains(argv[9], s.expected, &s.channels)
         || !parse_gains(argv[10], s.desired, &count) || count != s.channels) return 1;
-    for (int i = 4; i <= 7; i++) if (strlen(argv[i]) > 256) return 1;
-    if ((!*argv[4] && !*argv[5]) || !*argv[7] || own_stream(argv[4], argv[7], NULL)) return 1;
+    for (int i = 4; i <= 6; i++) if (!token(argv[i])) return 1;
+    if (!metadata_label(argv[7])) return 1;
+    if ((argc == 13 || argc == 21) && !parse_flag(argv[argc - 1], &s.all)) return 1;
+    if ((!*argv[4] && !*argv[5] && !s.all && !s.restore) || !*argv[7]
+        || own_stream(argv[4], argv[7], NULL)) return 1;
     s.cookie = cookie; s.id = id; s.serial = argv[2]; s.app = argv[4];
     s.binary = argv[5]; s.role = argv[6]; s.name = argv[7];
+    if (argc == 20 || argc == 21) {
+        uint64_t client_id, client_serial;
+        if ((strcmp(argv[12], "node") != 0 && strcmp(argv[12], "client") != 0)
+            || !number(argv[13], UINT32_MAX, &client_id) || client_id == s.id
+            || !number(argv[14], UINT64_MAX, &client_serial)) return 1;
+        for (int i = 15; i <= 17; i++) if (!token(argv[i])) return 1;
+        if (!metadata_label(argv[18]) || !metadata_label(argv[19])) return 1;
+        s.associated = true; s.inherit = strcmp(argv[12], "client") == 0;
+        s.client_id = client_id; s.client_serial = argv[14]; s.client_app = argv[15];
+        s.client_binary = argv[16]; s.client_role = argv[17]; s.client_name = argv[18];
+        s.client_application_name = argv[19];
+        if (own_stream(s.client_app, s.client_name, NULL)
+            || own_stream("", s.client_application_name, NULL)
+            || (protected_role(s.client_role) && !s.restore && !s.all)
+            || (s.inherit && (strcmp(s.app, s.client_app) || strcmp(s.binary, s.client_binary)))) return 1;
+    }
     if (!release_gate(&s)) return 1;
     pw_init(NULL, NULL);
     s.loop = pw_main_loop_new(NULL);
@@ -339,6 +452,9 @@ int main(int argc, char **argv) {
     if (!s.failed) pw_main_loop_run(s.loop);
     pw_loop_destroy_source(pw_main_loop_get_loop(s.loop), timer);
     if (s.node) pw_proxy_destroy((struct pw_proxy *)s.node);
+    if (s.client) pw_proxy_destroy((struct pw_proxy *)s.client);
+    if (s.bound_node) pw_node_info_free(s.bound_node);
+    if (s.bound_client) pw_client_info_free(s.bound_client);
     pw_proxy_destroy((struct pw_proxy *)s.registry);
     pw_core_disconnect(s.core);
     pw_context_destroy(context);

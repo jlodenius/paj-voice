@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import type { BackgroundAudioSettings } from './audio-focus-types.ts';
 import { assertDefaultFocusEnvironment } from './audio-focus-environment.ts';
+import { isBackgroundAudioSelector } from './config.ts';
 
 export const FOCUS_FRAME_BYTES = 16384;
 export const FOCUS_HEARTBEAT_MS = 2000;
@@ -36,12 +37,11 @@ export interface BrokerOptions {
 export function validFocusSettings(value: unknown): value is BackgroundAudioSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const s = value as Record<string, unknown>;
-  const list = (v: unknown) => Array.isArray(v) && v.length <= 32 && v.every(item =>
-    typeof item === 'string' && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(item));
+  const list = (v: unknown) => Array.isArray(v) && v.length <= 32 && v.every(isBackgroundAudioSelector);
   return Object.keys(s).every(k => ['mode', 'gain', 'apps', 'excludeApps'].includes(k)) &&
-    (s.mode === 'off' || s.mode === 'duck') && typeof s.gain === 'number' &&
+    (s.mode === 'off' || s.mode === 'duck' || s.mode === 'duck-all') && typeof s.gain === 'number' &&
     Number.isFinite(s.gain) && s.gain >= 0.05 && s.gain <= 1 && list(s.apps) && list(s.excludeApps) &&
-    (s.mode === 'off' || (s.apps as unknown[]).length > 0);
+    (s.mode !== 'duck' || (s.apps as unknown[]).length > 0);
 }
 
 async function privateDirectory(path: string, create: boolean, filesystem: FocusFileSystem): Promise<void> {
@@ -232,7 +232,7 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
           if (Object.keys(message).some(k => !allowed.includes(k))) throw new Error();
           if ((message.op === 'set' || message.op === 'idle') &&
               (typeof message.token !== 'string' || !message.token.length || message.token.length > 256)) throw new Error();
-          if (message.op === 'set' && (!validFocusSettings(message.settings) || message.settings.mode !== 'duck')) throw new Error();
+          if (message.op === 'set' && (!validFocusSettings(message.settings) || message.settings.mode === 'off')) throw new Error();
         } catch { void release(); return; }
         if (message.op === 'close') { void release(message.id as number); return; }
         tail = tail.then(async () => {
