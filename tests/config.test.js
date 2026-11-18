@@ -54,6 +54,13 @@ test('a two-and-a-half-second endpoint preserves fractional preference and compi
   assert.equal(runtimeConfig({ pauseSeconds: 2.5 }, { input: 'mic', output: 'speaker' }).turn.silenceMs, 2500);
 });
 
+test('a two-second endpoint compiles independently of portable defaults and the utterance cap', () => {
+  const config = runtimeConfig({ pauseSeconds: 2 }, { input: 'mic', output: 'speaker' });
+  assert.equal(config.turn.silenceMs, 2000);
+  assert.equal(config.turn.maxSeconds, 120);
+  assert.equal(validateConfig({}).pauseSeconds, 0.8);
+});
+
 function configFile(t, value) {
   const directory = mkdtempSync(join(tmpdir(), 'paj-voice-config-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

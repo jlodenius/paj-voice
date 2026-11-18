@@ -104,6 +104,20 @@ class SegmentsTests(unittest.TestCase):
         self.assertFalse(self.events[-1]['truncated'])
         self.assertEqual(len(self.pauses), 1)
 
+    def test_two_second_pause_keeps_short_continuations_and_endpoints_after_two_seconds(self):
+        self.segments.silence = 2
+        self.segments.maximum = 120
+        self.feed(True)
+        self.feed(False, 1.5)
+        self.feed(True, 0.1)
+        self.assertEqual([event['type'] for event in self.events], ['onset'])
+        self.feed(False, 1.9)
+        self.assertEqual(len(self.events), 1)
+        self.feed(False, 0.11)
+        self.assertEqual([event['type'] for event in self.events], ['onset', 'endpoint'])
+        self.assertFalse(self.events[-1]['truncated'])
+        self.assertEqual(len(self.pauses), 1)
+
     def test_clearing_prompt_preroll_does_not_mint_new_onset(self):
         self.feed(True)
         self.segments.clear_preroll()
