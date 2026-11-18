@@ -20,6 +20,8 @@ export function startCompanion({ config, generation, onEvent, onExit, spawnProce
   const child = spawnProcess(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], env: {
     ...process.env, HF_HUB_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1', DO_NOT_TRACK: '1',
   } });
+  let resolveClosed!: () => void;
+  const closedPromise = new Promise<void>(resolve => { resolveClosed = resolve; });
   let closed = false;
   let exited = false;
   let reported = false;
@@ -92,11 +94,12 @@ export function startCompanion({ config, generation, onEvent, onExit, spawnProce
   child.on('error', error => fail(`Cannot start local voice runtime: ${errorCode(error) ?? 'process error'}`));
   child.on('exit', () => {
     exited = true;
+    resolveClosed();
     clearTimeout(killTimer);
     finish(closed ? null : 'Local voice runtime exited. Check model/device configuration.');
   });
   startupTimer = setTimeout(() => fail('Local voice runtime did not become ready in time.'), startupMs);
   startupTimer.unref?.();
   send({ type: 'configure', generation, config: { ...config, cacheDir } });
-  return { send, close, diagnostics: () => stderr };
+  return { send, close, waitClosed: () => closedPromise, diagnostics: () => stderr };
 }

@@ -64,7 +64,9 @@ export function runtimeConfig(preferences: unknown, devices: DeviceSelection) {
   return { version: 1, languages: ['en'], responseLanguage: 'en',
     stt: { computeType: 'int8' },
     tts: { voice: settings.voice, volume: settings.volume / 100, lengthScale: 1 / settings.speed },
-    audio: { input: devices.input, output: devices.output, echoCancellation: 'none' },
+    audio: { input: devices.input, output: devices.output, echoCancellation: 'none',
+      ...(devices.inputDevice ? { inputDevice: devices.inputDevice } : {}),
+      ...(devices.outputDevice ? { outputDevice: devices.outputDevice } : {}) },
     turn: { silenceMs: settings.pauseSeconds * 1000, maxSeconds: settings.maxMessageSeconds,
       speechThreshold: 0.001 } };
 }

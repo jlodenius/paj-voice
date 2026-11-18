@@ -12,9 +12,9 @@ const devices = [
   { name: 'bluez_output.headphones', description: 'Sony headphones', class: 'Audio/Sink' },
 ];
 
-test('device choices are readable, current-first and exclude unsupported microphone routes', () => {
+test('device choices are readable, current-first and accept Bluetooth but reject monitors', () => {
   const input = deviceChoices(devices, 'Audio/Source', 'alsa_input.laptop');
-  assert.equal(input.length, 1);
+  assert.equal(input.length, 2);
   assert.match(input[0].label, /Laptop microphone.*current.*alsa_input.laptop/);
   const output = deviceChoices([{ name: 'speakers', class: 'Audio/Sink' }, ...devices],
     'Audio/Sink', 'bluez_output.headphones');

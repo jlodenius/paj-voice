@@ -32,7 +32,7 @@ class Vector:
 
 
 def wait_for(predicate):
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 4
     while not predicate():
         if time.monotonic() > deadline:
             raise AssertionError("Timed out waiting for fake runtime")
@@ -40,7 +40,7 @@ def wait_for(predicate):
 
 
 class OpenMicTests(unittest.TestCase):
-    def fixture(self, hold_load=False, capture_process=False):
+    def fixture(self, hold_load=False, capture_process=False, bluetooth=False, transition=False):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
@@ -54,8 +54,18 @@ class OpenMicTests(unittest.TestCase):
                   "audio": {"input": "laptop", "output": "headphones"},
                   "turn": {"silenceMs": 800, "maxSeconds": 12, "speechThreshold": 0.001}}
         graph = types.SimpleNamespace(paths={"pw-record": "FAKE", "pw-play": "FAKE"},
-                                      bind=lambda *args: (types.SimpleNamespace(name="laptop"), object()),
-                                      check=Mock())
+                                      bind=lambda *args, **kwargs: (Node('laptop', '1', 'Audio/Source', bluetooth=bluetooth),
+                                                                    Node('headphones', '2', 'Audio/Sink', bluetooth=bluetooth)),
+                                      check=Mock(), profile_transition=Mock(return_value=transition))
+        if bluetooth:
+            config['audio'].update(input='bluez_input.old', output='bluez_output.old',
+                                   inputDevice='bluez_card.chosen', outputDevice='bluez_card.chosen')
+        if transition:
+            checks = iter([True])
+            def check(**kwargs):
+                if next(checks, False):
+                    raise RuntimeError('Expected same-device profile replacement')
+            graph.check.side_effect = check
         models = types.SimpleNamespace(rate=16000, transcribe=Mock(return_value=("a request", 1)),
                                        synthesize=Mock(return_value=b"\0\0" * 1600),
                                        np=types.SimpleNamespace(arange=lambda size: Vector(), sin=lambda value: Vector(),
@@ -70,6 +80,7 @@ class OpenMicTests(unittest.TestCase):
         class Capture:
             def __init__(self, executable, node, vad, threshold, receiver, fail):
                 self.receiver, self.closed = receiver, False
+                self.fail = fail
                 self.child = None
                 captures.append(self)
 
@@ -81,7 +92,7 @@ class OpenMicTests(unittest.TestCase):
                 for _ in range(3):
                     self.receiver.feed(b"\0\0" * 4000, False)
 
-            def wait_ready(self):
+            def wait_ready(self, timeout=3):
                 pass
 
             def health(self):
@@ -136,6 +147,30 @@ class OpenMicTests(unittest.TestCase):
         runtime._interrupt(runtime.epoch)
         runtime._segment({"type": "onset", "id": ident}, runtime.epoch)
         runtime._segment({"type": "endpoint", "id": ident, "pcm": pcm, "truncated": False}, runtime.epoch)
+
+    def test_bluetooth_capture_accepts_same_device_transition_only_during_intentional_start(self):
+        runtime, events, captures, played, _, graph, _ = self.fixture(bluetooth=True, transition=True)
+        self.assertEqual(len(captures), 2)
+        self.assertTrue(captures[0].closed)
+        self.assertFalse(captures[1].closed)
+        self.assertEqual(sum(event['type'] == 'ready' for event in events), 1)
+        old_epoch = runtime.epoch - 1
+        runtime._capture_fault(RuntimeError('Obsolete capture error'), old_epoch)
+        self.assertFalse(runtime.closed)
+        graph.check.side_effect = RuntimeError('Disconnected after readiness')
+        wait_for(lambda: runtime.closed)
+        self.assertEqual(len(captures), 2)
+        self.assertTrue(all(capture.closed for capture in captures))
+
+    def test_bluetooth_start_fault_without_expected_graph_transition_never_retries(self):
+        runtime, events, captures, _, _, graph, release = self.fixture(hold_load=True, bluetooth=True)
+        graph.check.side_effect = RuntimeError('Capture device lost')
+        graph.profile_transition.return_value = False
+        release.set()
+        wait_for(lambda: runtime.closed)
+        self.assertEqual(len(captures), 1)
+        self.assertTrue(captures[0].closed)
+        self.assertFalse(any(event['type'] == 'ready' for event in events))
 
     def test_recurring_flat_dc_stops_input_without_filtering_normal_speech(self):
         receiver = Mock()

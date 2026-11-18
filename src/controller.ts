@@ -40,7 +40,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   let idleReminders = 0;
   let idleAnnouncement = false;
   let progressTimer: Timer | null = null;
-  let progressAnnouncement = false;
+  let statusAnnouncement = false;
   let agentActive = false;
   let feedback: Feedback = { receipt: 'Got it.', steeringReceipt: 'Steering received.',
     progressUpdates: true, idleReminders: true };
@@ -98,9 +98,9 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
         edit: 'Updating files.', write: 'Writing files.' };
       const tool = [...activeTools.values()].at(-1);
       const text = tool && Object.hasOwn(labels, tool) ? labels[tool] : 'Still working.';
-      progressAnnouncement = true;
+      statusAnnouncement = true;
       try { api.speak({ text, generation: target, epoch: turn, key: 'progress-status' }); }
-      finally { progressAnnouncement = false; }
+      finally { statusAnnouncement = false; }
     }, 60_000);
     progressTimer = timer;
     timer?.unref?.();
@@ -177,7 +177,7 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
         playback.ended(id, false, 'transport_unavailable');
         return unavailable();
       }
-      if (!idleAnnouncement && !progressAnnouncement) {
+      if (!idleAnnouncement && !statusAnnouncement) {
         activity();
         turnSpoken = true;
       }
@@ -193,6 +193,22 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       feedback = { ...feedback, ...value };
       activity();
       emit();
+    },
+    routeChanging() {
+      if (!enabled || muted || disposed) throw new Error('Voice must be armed to switch live audio');
+      ready = false;
+      listening = false;
+      captureId = null;
+      captures.clear();
+      stopSpeech('route_switch');
+      activity();
+      emit();
+    },
+    routeNotice(text: string) {
+      const previous = statusAnnouncement;
+      statusAnnouncement = true;
+      try { return api.speak({ text, generation, epoch, key: 'route-notice' }); }
+      finally { statusAnnouncement = previous; }
     },
     instructions() { return reporters.values().next().value?.instructions ?? null; },
     playback() { return playback.snapshot(); },

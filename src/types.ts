@@ -52,6 +52,8 @@ export interface VoicePreferences {
 export interface DeviceSelection {
   input: string;
   output: string;
+  inputDevice?: string;
+  outputDevice?: string;
 }
 
 export interface Submission {

@@ -55,7 +55,7 @@ def validate(value):
     if not isinstance(language, str) or not re.fullmatch(r"en(?:[-_][a-z0-9]+)*", language.lower()):
         raise ValueError("An English Piper voice is required")
     audio = value.get("audio", {})
-    if (not isinstance(audio, dict) or set(audio) - {"input", "output", "echoCancellation"}
+    if (not isinstance(audio, dict) or set(audio) - {"input", "output", "echoCancellation", "inputDevice", "outputDevice"}
             or audio.get("echoCancellation") not in ("none", "external")
             or any(not isinstance(audio.get(key), str) or not audio[key].strip()
                    or audio[key] == "default" for key in ("input", "output"))):
@@ -93,8 +93,9 @@ class HealthyInput:
 
 
 class Runtime:
-    def __init__(self, emit):
+    def __init__(self, emit, clock=time.monotonic):
         self.emit = emit
+        self.clock = clock
         self.lock = threading.RLock()
         self.model_lock = threading.Lock()
         self.closed = self.failed = self.configured = self.ready = self.muted = False
@@ -178,9 +179,13 @@ class Runtime:
                               PYTHONDONTWRITEBYTECODE="1")
             self.stage = "devices"
             graph = Graph()
-            source, target = graph.bind(config["audio"]["input"], config["audio"]["output"])
-            if source.name.startswith("bluez"):
-                raise ValueError("Use the laptop microphone, not a Bluetooth headset microphone")
+            audio = config["audio"]
+            identities = tuple(audio.get(key) for key in ("inputDevice", "outputDevice"))
+            if any(value is not None and (not isinstance(value, str) or not value.strip()
+                   or len(value) > 1024 or any(ord(char) < 32 for char in value)) for value in identities):
+                raise ValueError("Invalid physical audio device identity")
+            binding = (audio["input"], audio["output"], *identities) if any(identities) else (audio["input"], audio["output"])
+            source, target = graph.bind(*binding)
             self.stage = "models"
             models = SpeechInference(stt=config["stt"]["model"], tts=config["tts"]["model"],
                                      tts_config=config["tts"]["config"], compute_type=config["stt"]["computeType"],
@@ -195,44 +200,108 @@ class Runtime:
                 self.cue = (models.np.sin(2 * models.np.pi * 800 * samples / models.rate)
                             * models.np.hanning(len(samples)) * 1200).astype("<i2").tobytes()
                 self.stage = "audio-setup"
-                self.sink = PipeSink(graph.paths["pw-play"], target, models.rate)
-                self.speaker = Speaker(self.sink, self._speaker_event)
-                for target in (self._recognize, self._synthesize, self._health):
-                    threading.Thread(target=target, daemon=True).start()
-                self.epoch += 1
-                epoch = self.epoch
-                self.segments = Segments(lambda event: self._segment(event, epoch),
-                                         lambda: self._interrupt(epoch), lambda: epoch,
-                                         silence=config["turn"]["silenceMs"] / 1000,
-                                         maximum=config["turn"]["maxSeconds"])
-                self.gate = InputReady(HealthyInput(self.segments))
-                self.capture = Capture(graph.paths["pw-record"], source, self.vad_factory,
-                                          config["turn"]["speechThreshold"], self.gate, self.fail)
-                self.stage = "capture-start"
-                self.capture.start()
-                capture, gate = self.capture, self.gate
-            self._warmup(capture, gate, epoch)
+            transition_started = self.clock()
+            transition_deadline = transition_started + 12
+            bluetooth_devices = tuple(identity for identity, node in zip(identities, (source, target))
+                                      if identity and node.bluetooth)
+            bluetooth = source.bluetooth or target.bluetooth
+            # WirePlumber 0.5.18 restores the previous Bluetooth profile after a 2000ms delay.
+            settle_until = transition_started + 2.5 if target.bluetooth else transition_started
+            while not self.stopped.is_set():
+                try:
+                    with self.lock:
+                        if self.closed or self.muted:
+                            return
+                    self._remaining(transition_deadline)
+                    source, target = graph.bind(*binding, deadline=transition_deadline)
+                    with self.lock:
+                        if self.closed or self.muted:
+                            return
+                        self._remaining(transition_deadline)
+                        self.source = source
+                        self.sink = PipeSink(graph.paths["pw-play"], target, models.rate)
+                        self.speaker = Speaker(self.sink, self._speaker_event)
+                        self.epoch += 1
+                        epoch = self.epoch
+                        self.segments = Segments(lambda event, bound=epoch: self._segment(event, bound),
+                                                 lambda bound=epoch: self._interrupt(bound), lambda bound=epoch: bound,
+                                                 silence=config["turn"]["silenceMs"] / 1000,
+                                                 maximum=config["turn"]["maxSeconds"])
+                        self.gate = InputReady(HealthyInput(self.segments))
+                        self.capture = Capture(graph.paths["pw-record"], source, self.vad_factory,
+                                               config["turn"]["speechThreshold"], self.gate,
+                                               lambda error, bound=epoch: self._capture_fault(error, bound))
+                        self.stage = "capture-start"
+                        self.capture.start()
+                        capture, gate = self.capture, self.gate
+                    self._warmup(capture, gate, epoch, recover=bluetooth,
+                                 deadline=transition_deadline, settle_until=settle_until)
+                    if self.closed or self.muted:
+                        return
+                    break
+                except Exception:
+                    with self.lock:
+                        was_ready = self.ready
+                        self.epoch += 1
+                        resources = self.gate, self.capture, self.speaker, self.sink
+                        self.capture = self.gate = self.speaker = self.sink = None
+                    self._close(resources)
+                    if self.closed or self.muted:
+                        return
+                    self._remaining(transition_deadline)
+                    if was_ready or not bluetooth_devices or not any(graph.profile_transition(device, deadline=transition_deadline)
+                                                for device in bluetooth_devices):
+                        raise
+                    self.stopped.wait(min(0.1, self._remaining(transition_deadline)))
+            if self.closed or self.muted:
+                return
+            for worker in (self._recognize, self._synthesize, self._health):
+                threading.Thread(target=worker, daemon=True).start()
             # Linux PDEATHSIG follows the spawning thread; keep it alive until owned children close.
             self.shutdown_complete.wait()
         except Exception as error:
             self.fail(error)
 
-    def _warmup(self, capture, gate, epoch):
-        deadline = time.monotonic() + 5
+    def _capture_fault(self, error, epoch):
+        with self.lock:
+            if self.closed or self.muted or self.epoch != epoch:
+                return
+            if not self.ready:
+                if self.capture:
+                    self.capture.fault = str(error)
+                return
+        self.fail(error)
+
+    def _remaining(self, deadline):
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            raise TimeoutError('Audio route transition deadline expired')
+        return remaining
+
+    def _warmup(self, capture, gate, epoch, recover=False, deadline=None, settle_until=0):
+        deadline = min(self.clock() + 5, deadline) if deadline is not None else self.clock() + 5
+        next_graph = 0
         self.stage = "warmup"
         self.emit({"type": "warming"})
         try:
-            capture.wait_ready()
-            while time.monotonic() < deadline:
+            capture.wait_ready(timeout=min(3, self._remaining(deadline)))
+            while self.clock() < deadline:
                 with self.lock:
                     if self.closed or self.muted or self.epoch != epoch:
                         return
                 capture.health()
-                if not gate.ready.wait(0.02):
+                if recover and self.clock() >= next_graph:
+                    self.graph.check(deadline=deadline)
+                    next_graph = self.clock() + 0.2
+                self._remaining(deadline)
+                if not gate.ready.wait(min(0.02, self._remaining(deadline))) or self.clock() < settle_until:
                     continue
+                if recover:
+                    self.graph.check(deadline=deadline)
                 with self.lock:
                     if self.closed or self.muted or self.epoch != epoch:
                         return
+                    self._remaining(deadline)
                     summary = gate.arm()
                     if summary is not None:
                         self.ready = True
@@ -246,6 +315,8 @@ class Runtime:
             with self.lock:
                 obsolete = self.closed or self.muted or self.epoch != epoch
             if not obsolete:
+                if recover:
+                    raise
                 self.fail(error)
 
     def _interrupt(self, epoch):
@@ -290,7 +361,7 @@ class Runtime:
                 with self.lock:
                     if self.closed or self.muted or job["epoch"] != self.epoch:
                         continue
-                    self.busy["recognition"] = time.monotonic()
+                    self.busy["recognition"] = self.clock()
                 with self.model_lock:
                     text, _ = self.models.transcribe(job.pop("pcm"))
                 if not isinstance(text, str) or len(text) > 16384:
@@ -325,7 +396,7 @@ class Runtime:
                 with self.lock:
                     if not self._speech_current(job):
                         continue
-                    self.busy["synthesis"] = time.monotonic()
+                    self.busy["synthesis"] = self.clock()
                 with self.model_lock:
                     pcm = self.models.synthesize(job["text"])
                 with self.lock:
@@ -387,15 +458,15 @@ class Runtime:
         next_graph = 0
         while not self.stopped.wait(0.1):
             try:
-                if time.monotonic() >= next_graph:
+                if self.clock() >= next_graph:
                     self.graph.check()
-                    next_graph = time.monotonic() + 1
+                    next_graph = self.clock() + 1
                 self.sink.health()
                 capture = self.capture
                 if capture:
                     capture.health()
                 for started in self.busy.values():
-                    if started is not None and time.monotonic() - started > 10:
+                    if started is not None and self.clock() - started > 10:
                         raise RuntimeError("Local inference exceeded ten seconds")
             except Exception as error:
                 self.fail(error)
@@ -433,7 +504,7 @@ class Runtime:
             if self.current_playback:
                 self.current_playback[1].set()
             resources = self.gate, self.capture, self.speaker, self.sink
-            self.gate = self.capture = None
+            self.gate = self.capture = self.speaker = self.sink = None
         self._close(resources)
         for inbox in (self.jobs, self.speeches):
             while True:

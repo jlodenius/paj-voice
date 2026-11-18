@@ -20,6 +20,8 @@ class Node:
     name: str
     serial: str
     kind: str
+    device: str | None = None
+    bluetooth: bool = False
 
 
 def command_paths():
@@ -36,7 +38,7 @@ def node_properties(entry):
     return (entry.get("info") or {}).get("props") or {}
 
 
-def select_node(entries, name, kind):
+def exact_name(name, kind):
     if (
         not isinstance(name, str)
         or not name.strip()
@@ -48,6 +50,10 @@ def select_node(entries, name, kind):
         raise ValueError(
             "Select an exact native PipeWire node.name, not a default or capture monitor"
         )
+
+
+def select_node(entries, name, kind):
+    exact_name(name, kind)
     matches = [
         entry
         for entry in entries
@@ -72,22 +78,63 @@ def select_node(entries, name, kind):
     serial = str(props.get("object.serial", ""))
     if not serial.isascii() or not serial.isdecimal() or int(serial) <= 0:
         raise RuntimeError(f"PipeWire node {name!r} has no stable object.serial")
-    return Node(name, serial, kind)
+    device = physical_device(entries, props)
+    return Node(name, serial, kind, device, bluetooth_device(entries, device))
+
+
+def physical_device(entries, props):
+    devices = [entry for entry in entries
+               if entry.get('type') == 'PipeWire:Interface:Device'
+               and str(entry.get('id')) == str(props.get('device.id'))]
+    if len(devices) != 1:
+        return None
+    name = node_properties(devices[0]).get('device.name')
+    if not isinstance(name, str) or not name.strip() or len(name) > 1024:
+        return None
+    return name
+
+
+def bluetooth_device(entries, device):
+    cards = [entry for entry in entries if entry.get('type') == 'PipeWire:Interface:Device'
+             and node_properties(entry).get('device.name') == device]
+    return len(cards) == 1 and node_properties(cards[0]).get('device.api') == 'bluez5'
+
+
+def resolve_node(entries, name, kind, device=None):
+    exact_name(name, kind)
+    if device is None:
+        return select_node(entries, name, kind)
+    if not bluetooth_device(entries, device):
+        selected = select_node(entries, name, kind)
+        if selected.device != device:
+            raise RuntimeError('Selected endpoint belongs to a different physical audio device')
+        return selected
+    matches = [entry for entry in entries
+               if entry.get('type') == 'PipeWire:Interface:Node'
+               and node_properties(entry).get('media.class') == kind
+               and physical_device(entries, node_properties(entry)) == device]
+    if len(matches) != 1:
+        raise RuntimeError('Selected physical audio device is absent or ambiguous; Bluetooth requires microphone exposure and headset autoswitch policy')
+    return select_node(entries, node_properties(matches[0]).get('node.name'), kind)
 
 
 class Graph:
-    def __init__(self, paths=None, run=None):
+    def __init__(self, paths=None, run=None, clock=time.monotonic):
+        self.clock = clock
         self.paths = paths if paths is not None else command_paths()
         self.run = run or subprocess.run
         self.bound = ()
 
-    def snapshot(self):
+    def snapshot(self, deadline=None):
+        timeout = 3 if deadline is None else min(3, deadline - self.clock())
+        if timeout <= 0:
+            raise TimeoutError('Audio route transition deadline expired')
         try:
             result = self.run(
                 [self.paths["pw-dump"], "--no-colors"],
                 capture_output=True,
                 check=True,
-                timeout=3,
+                timeout=timeout,
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError(
@@ -119,22 +166,51 @@ class Graph:
                 {
                     "name": node.name,
                     "serial": node.serial,
+                    **({"device": node.device} if node.device else {}),
+                    **({"bluetooth": True} if node.bluetooth else {}),
                     "class": node.kind,
                     "description": props.get("node.description", ""),
                 }
             )
         return result
 
-    def bind(self, source, sink):
-        entries = self.snapshot()
+    def bind(self, source, sink, input_device=None, output_device=None, deadline=None):
+        entries = self.snapshot(deadline)
         self.bound = (
-            select_node(entries, source, "Audio/Source"),
-            select_node(entries, sink, "Audio/Sink"),
+            resolve_node(entries, source, "Audio/Source", input_device),
+            resolve_node(entries, sink, "Audio/Sink", output_device),
         )
         return self.bound
 
-    def check(self):
-        entries = self.snapshot()
+    def profile_transition(self, device, deadline=None):
+        entries = self.snapshot(deadline)
+        if not bluetooth_device(entries, device):
+            return False
+        cards = [entry for entry in entries if entry.get('type') == 'PipeWire:Interface:Device'
+                 and node_properties(entry).get('device.name') == device]
+        if len(cards) != 1:
+            return False
+        changed = False
+        for expected in self.bound:
+            if expected.device != device:
+                continue
+            matches = [entry for entry in entries if entry.get('type') == 'PipeWire:Interface:Node'
+                       and node_properties(entry).get('media.class') == expected.kind
+                       and physical_device(entries, node_properties(entry)) == device]
+            if len(matches) > 1:
+                return False
+            if not matches:
+                changed = True
+                continue
+            try:
+                actual = select_node(entries, node_properties(matches[0]).get('node.name'), expected.kind)
+            except (RuntimeError, ValueError):
+                return False
+            changed = changed or actual != expected
+        return changed
+
+    def check(self, deadline=None):
+        entries = self.snapshot(deadline)
         for expected in self.bound:
             actual = select_node(entries, expected.name, expected.kind)
             if actual != expected:

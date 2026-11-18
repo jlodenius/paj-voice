@@ -9,7 +9,7 @@ Both models are packaged for CPU use. Pi handles the conversation with your conf
 
 ## Install
 
-Requires Linux, Nix, PipeWire, Pi 1.5.2 or newer, a non-Bluetooth microphone, and headphones.
+Requires Linux, Nix, PipeWire, Pi 1.5.2 or newer, a microphone, and headphones.
 Nix is currently the only supported installation method. It packages Python, native speech libraries,
 audio tools, and pinned models together, so no separate Python or model setup is needed.
 
@@ -44,12 +44,22 @@ Merge a `voice` section into `~/.pi/agent/paj.json`, preserving other addon sect
 Omitted preferences use the defaults below. In your main Pi session:
 
 ```text
-/paj-voice setup
+/paj-voice setup desk
+/paj-voice setup headset
 /paj-voice on
 ```
 
-Setup selects microphone/headphones without opening audio. Arming requires confirmation; remain
-quiet until the ready beep. Device choices are private and machine-local, not stored in Git.
+Setup saves each named route's microphone and output without opening audio. Arming requires
+confirmation; remain quiet until the ready beep. Routes are private and machine-local.
+
+Use `/paj-voice route headset` or say “switch to headset” while armed; use `route desk` to switch
+back. `/paj-voice route` lists saved routes. Switching pauses listening briefly, not agent work;
+wait for the spoken ready notice before continuing. Unavailable routes leave the current route
+unchanged where possible; a failed switch tries only
+that exact previous route, never another microphone. Say the request before leaving mic range.
+
+Bluetooth microphones require WirePlumber's automatic headset-profile switching. The headset stays
+in call mode while its microphone is open, with lower playback quality than music mode.
 
 ## Preferences
 
@@ -88,7 +98,8 @@ text goes to Pi's provider and normally appears in session history. Volume zero 
 ## Storage
 
 Preferences use Pi's agent directory (`PI_CODING_AGENT_DIR`); `PAJ_VOICE_CONFIG` overrides the shared
-file. Devices live in `~/.config/paj-voice/devices.json` (0600); cache uses `~/.cache/paj-voice`.
+file. Routes live in `~/.config/paj-voice/devices.json` (0600); cache uses `~/.cache/paj-voice`.
+Existing device selections are preserved as the `default` route.
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` override those bases. Executable/model paths are package-owned.
 
 Older `version`, `stt`, `tts`, `audio`, `turn`, language and runtime-path fields are no longer accepted.

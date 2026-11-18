@@ -3,10 +3,11 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import type { Type as TypeBuilder } from 'typebox';
 import { errorMessage } from './types.ts';
 import type { Environment, NotificationLevel, PajApi, SpeechPriority, SpeechRequest, VoiceApi,
-  VoicePreferences, VoiceToken } from './types.ts';
+  VoicePreferences, VoiceToken, DeviceSelection, CompanionFrame } from './types.ts';
 
 type Companion = Pick<ReturnType<typeof startCompanion>, 'send' | 'close'> & {
   diagnostics?(): string;
+  waitClosed?(): Promise<void>;
 };
 interface VoiceOptions {
   env?: Environment;
@@ -15,6 +16,8 @@ interface VoiceOptions {
   loadConfig?: typeof loadConfig;
   loadDevices?: typeof loadDevices;
   saveDevices?: typeof saveDevices;
+  loadRoutes?: typeof loadRoutes;
+  saveRoute?: typeof saveRoute;
   startCompanion?: (options: Parameters<typeof startCompanion>[0]) => Companion;
 }
 import { configPath, loadConfig, validateConfig, runtimeConfig } from './config.ts';
@@ -23,11 +26,23 @@ import { createAdmission } from './admission.ts';
 import { startCompanion } from './companion.ts';
 import { spokenAnswer } from './speech-text.ts';
 import { runtimePaths } from './runtime-paths.ts';
-import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices } from './device-settings.ts';
+import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices, loadRoutes, saveRoute, routeName, sameDeviceSelection } from './device-settings.ts';
 import { voiceStatus, voiceWidget } from './voice-ui.ts';
+
+function captureNamespace() {
+  const incarnation = randomUUID();
+  return (frame: CompanionFrame): CompanionFrame => {
+    if (typeof frame.type !== 'string' || !['addressed', 'utterance', 'cancelled'].includes(frame.type) ||
+        typeof frame.id !== 'string' || !/^[\w-]{1,128}$/.test(frame.id)) return frame;
+    return { ...frame, id: createHash('sha256').update(`${incarnation}\0${frame.id}`).digest('hex') };
+  };
+}
 
 export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, options: VoiceOptions = {}) {
   const env = options.env ?? process.env;
+  const readRoutes = () => (options.loadRoutes ?? loadRoutes)(deviceSettingsPath(env));
+  const selectRoute = (name: string, selection?: DeviceSelection, expected?: DeviceSelection) =>
+    (options.saveRoute ?? saveRoute)(deviceSettingsPath(env), name, selection, expected);
   let ctx: ExtensionContext | undefined;
   let companion: Companion | undefined;
   let admission: ReturnType<typeof createAdmission> | undefined;
@@ -36,8 +51,13 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let lifetime = 0;
   let arming = false;
   let configuring = false;
+  let switching = false;
+  let activeSelection: DeviceSelection | undefined;
+  let activeRoute: string | undefined;
+  let cancelSwitch: (() => void) | undefined;
   let toolExposure: 'hidden' | 'direct' = 'hidden';
   let responseToken: VoiceToken | undefined;
+  let handoffAnswer: (VoiceToken & { text: string }) | undefined;
   let latestPrompt: string | undefined;
   let preferences: VoicePreferences | undefined;
   const voiceInputs = new Map<string, VoiceToken>();
@@ -70,6 +90,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       const exposure = state.enabled && !state.muted ? 'direct' : 'hidden';
       if (toolExposure !== exposure) {
         pi.registerTool({ ...speakTool, exposure });
+        pi.registerTool({ ...routeTool, exposure });
         toolExposure = exposure;
       }
       pi.events.emit('paj-voice:state:v1', state);
@@ -92,10 +113,172 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
     },
   };
+  const routeTool = {
+    name: 'voice_route', label: 'Voice route',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    description: 'List saved audio routes, or intentionally switch to a saved route on user request. Never changes agent work. Use the current voice generation and epoch. Ready means capture settled, not proof of hearing.',
+    parameters: Type.Object({ name: Type.Optional(Type.String({ pattern: '^[a-z][a-z0-9-]{0,31}$' })),
+      generation: Type.String(), epoch: Type.Integer({ minimum: 0 }) }),
+    async execute(_id: string, params: VoiceToken & { name?: string }, signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      const state = controller.state();
+      let value: Record<string, unknown>;
+      if (params.generation !== state.generation || params.epoch !== state.epoch || !state.enabled || state.muted) {
+        value = { status: 'stale' };
+      } else if (!params.name) value = routeSummary();
+      else {
+        try { value = await switchRoute(params.name, signal); }
+        catch { value = { status: 'unavailable', message: 'Check the saved route name and private route settings.' }; }
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
+    },
+  };
   pi.registerTool({ ...speakTool, exposure: 'hidden' });
+  pi.registerTool({ ...routeTool, exposure: 'hidden' });
+  const routeSummary = () => {
+    try {
+      const saved = readRoutes();
+      return { current: controller.state().generation && !controller.state().muted
+        ? activeRoute ?? saved?.active ?? null : saved?.active ?? null, routes: Object.keys(saved?.routes ?? {}) };
+    } catch {
+      return { current: activeRoute ?? null, routes: [], unavailable: true };
+    }
+  };
+  const flushHandoffAnswer = () => {
+    const answer = handoffAnswer;
+    handoffAnswer = undefined;
+    if (answer) controller.answer(answer);
+  };
+  const launchRoute = (selection: DeviceSelection, activation: number): Promise<void> => new Promise((resolve, reject) => {
+    const generation = controller.state().generation;
+    const namespace = captureNamespace();
+    let settled = false;
+    let launched: Companion | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cancelSwitch = undefined;
+      error ? reject(error) : resolve();
+    };
+    const timer = setTimeout(() => finish(new Error('Audio route readiness timed out')), 120_000);
+    cancelSwitch = () => finish(new Error('Audio route switch cancelled'));
+    try {
+      launched = (options.startCompanion ?? startCompanion)({ ...runtimePaths(env),
+        config: runtimeConfig(preferences!, selection), generation,
+        onEvent(frame) {
+          if (activation !== lifetime || closed || companion !== launched) return;
+          if (frame.type === 'error') {
+            if (settled) {
+              controller.event({ type: 'error', stage: 'route', message: 'Selected audio route failed; check local audio diagnostics' }, generation);
+              stop();
+            } else finish(new Error('Selected audio route failed; check local audio diagnostics'));
+            return;
+          }
+          if (controller.event(namespace(frame), generation)?.fatal) {
+            if (settled) stop();
+            else finish(new Error('Selected audio route could not remain ready'));
+            return;
+          }
+          if (frame.type === 'ready') finish();
+        },
+        onExit() {
+          if (activation !== lifetime || companion !== launched) return;
+          if (!settled) finish(new Error('Selected audio route exited before readiness'));
+          else stop();
+        },
+      });
+      companion = launched;
+    } catch { finish(new Error('Cannot start selected audio route')); }
+  });
+  const closeAudio = async () => {
+    const old = companion;
+    companion = undefined;
+    old?.close();
+    if (old?.waitClosed) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([old.waitClosed(), new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('Previous audio process did not close')), 3500);
+        })]);
+      } finally { clearTimeout(timer); }
+    }
+  };
+  const switchRoute = async (name: string, signal?: AbortSignal): Promise<Record<string, unknown>> => {
+    if (switching || arming || configuring) return { status: 'busy' };
+    routeName(name);
+    const saved = readRoutes();
+    if (!saved || !Object.hasOwn(saved.routes, name)) return { status: 'unknown', ...routeSummary() };
+    if (!controller.state().generation || controller.state().muted) {
+      selectRoute(name);
+      return { status: 'selected', ...routeSummary() };
+    }
+    switching = true;
+    const activation = lifetime;
+    const valid = () => !closed && activation === lifetime && !signal?.aborted &&
+      !!controller.state().generation && !controller.state().muted;
+    const previous = activeSelection;
+    let closedOld = false;
+    let closingOld = false;
+    const abort = () => { cancelSwitch?.(); stop(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      const result = await pi.exec(runtimePaths(env).executable, ['--devices'], { timeout: 10000, maxBuffer: 65536 });
+      if (!valid()) return { status: 'cancelled' };
+      if (result.code !== 0 || result.killed || result.truncated) return { status: 'unavailable' };
+      const devices: unknown = JSON.parse(result.stdout);
+      const selection = saved.routes[name]!;
+      for (const [key, kind] of [['input', 'Audio/Source'], ['output', 'Audio/Sink']] as const) {
+        const choices = deviceChoices(devices, kind);
+        const physical = selection[key === 'input' ? 'inputDevice' : 'outputDevice'];
+        let matches = choices.filter(item => physical ? item.device === physical : item.name === selection[key]);
+        if (physical && !matches.some(item => item.bluetooth)) {
+          matches = matches.filter(item => item.name === selection[key]);
+        }
+        if (matches.length !== 1) return { status: 'unavailable', message: 'Selected route is absent or ambiguous. Bluetooth requires microphone exposure and WirePlumber headset autoswitch policy; no system settings were changed.' };
+      }
+      if (!sameDeviceSelection(readRoutes()?.routes[name], selection)) return { status: 'changed' };
+      controller.routeChanging();
+      closingOld = true;
+      await closeAudio();
+      closedOld = true;
+      if (!valid()) return { status: 'cancelled' };
+      await launchRoute(selection, activation);
+      if (!valid()) return { status: 'cancelled' };
+      selectRoute(name, undefined, selection);
+      activeSelection = selection;
+      activeRoute = name;
+      controller.routeNotice(`${name} ready.`);
+      flushHandoffAnswer();
+      return { status: 'ready', ...routeSummary() };
+    } catch {
+      if (!valid()) return { status: 'cancelled' };
+      if (closedOld && previous) {
+        try {
+          await closeAudio();
+          if (!valid()) return { status: 'cancelled' };
+          controller.routeChanging();
+          await launchRoute(previous, activation);
+          if (!valid()) return { status: 'cancelled' };
+          controller.routeNotice('Route switch failed. Previous route restored.');
+          flushHandoffAnswer();
+          return { status: 'failed', recovered: true, ...routeSummary() };
+        } catch {}
+      }
+      if (closingOld) stop();
+      return { status: 'failed', recovered: false };
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      switching = false;
+      if (controller.state().enabled) flushHandoffAnswer();
+      else handoffAnswer = undefined;
+    }
+  };
   const stop = () => {
     lifetime++;
+    cancelSwitch?.();
     responseToken = latestPrompt = undefined;
+    handoffAnswer = undefined;
     voiceInputs.clear();
     const old = companion;
     companion = undefined;
@@ -169,7 +352,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   });
   pi.on('context', event => {
     const state = controller.state();
-    if (!state.enabled) { responseToken = undefined; return; }
+    if (!state.enabled && !(switching && state.generation && !state.muted)) {
+      responseToken = undefined;
+      return;
+    }
     const users = event.messages.filter(message => message.role === 'user').map(message =>
       typeof message.content === 'string' ? message.content :
         message.content?.filter(part => part.type === 'text').map(part => part.text).join(''));
@@ -181,6 +367,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       'Eyes-free voice is active for this session: explicitly armed continuous open mic. There is no wake word or classifier. Recognized voice messages are user requests with your normal tool permissions; existing confirmations still apply. Keep normal screen responses useful.',
       'Assume the user cannot see the screen. Provide important answers, outcomes, blockers and questions aloud, including when a reporting integration owns narration. Do not replace a spoken answer with a screen referral. Keep screen responses useful as a supplement, not a prerequisite.',
       'Request screen access only when something genuinely requires manual interaction, such as a blocking confirmation or credential entry. Explain aloud what is needed and why; never bypass existing confirmations or treat spoken approval as terminal approval.',
+      `Saved audio routes: ${JSON.stringify(routeSummary())}. Use voice_route with a saved name only when the user requests a route switch; omit name to list. Switching has a listening gap and does not cancel or repeat your work. Current voice_route control token: generation=${JSON.stringify(state.generation)}, epoch=${state.epoch}.`,
       'Use voice_speak for a separate spoken answer: normally one sentence under 30 words. Include important uncertainty, blockers and needed decisions. Be silent for routine tool activity.',
       'When a task finishes, explicitly announce completion and briefly give its outcome aloud. If work failed, was cancelled, is blocked or still continues elsewhere, say so instead of claiming success. A progress update alone is not a completion report.',
       preferences?.feedback?.progressUpdates === false ? 'Spoken progress updates are disabled. Speak outcomes, blockers and questions, but do not narrate progress.' : 'During long tasks, provide a useful spoken stage update about once a minute when possible: normally 3–8 words, at most 12. Say what you are checking or changing, not a generic reassurance or a narration of every step. Do not expose commands, arguments, secrets or raw tool output. The addon provides brief tool-status reminders if no speech has occurred for a minute.',
@@ -195,6 +382,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       reporter || 'For a simple answer, a short final plain-text reply is spoken automatically. For longer coding results, use voice_speak for a separate brief outcome, blocker or question. Do not narrate tool output. Avoid duplicate spoken summaries.',
       preferences?.feedback?.progressUpdates === false || preferences?.feedback?.idleReminders === false
         ? 'User feedback preferences apply to all reporting integrations: do not generate unsolicited progress or idle notices when that preference is disabled.' : '',
+      switching ? 'Audio routes are switching. Continue your work; speech is temporarily unavailable. A new short final answer is held for the route to become ready.' : '',
       state.muted ? 'Audio is muted. Continue the work and screen reporting; speech is unavailable.' : '',
     ].filter(Boolean).join('\n');
     const playback = controller.playback();
@@ -205,19 +393,31 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   });
   pi.on('message_end', event => {
     const text = spokenAnswer(event.message);
-    if (text && responseToken) controller.answer({ ...responseToken, text });
+    if (text && responseToken) {
+      if (switching && controller.state().starting) handoffAnswer = { ...responseToken, text };
+      else controller.answer({ ...responseToken, text });
+    }
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup, voices. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices']
+    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup <name>, route [name], voices. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices', 'route']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
       let command = args.trim() || 'status';
+      const parts = command.split(/\s+/u);
+      const setupName = parts[0] === 'setup' ? parts[1] ?? 'default' : undefined;
+      if (setupName) command = 'setup';
+      if (parts[0] === 'route') {
+        try { notify(JSON.stringify(parts[1] ? await switchRoute(parts[1]) : routeSummary())); }
+        catch { notify('Cannot select saved route. Check its name and private route settings.', 'error'); }
+        return;
+      }
       if (command === 'off') { stop(); notify('Voice off. Agent work continues.'); return; }
       if (command === 'stop') { controller.silence(); notify('Speech stopped. Agent work continues.'); return; }
       if (command === 'mute') {
         lifetime++;
+        cancelSwitch?.();
         const old = companion, oldAdmission = admission;
         companion = admission = undefined;
         controller.mute(true);
@@ -236,7 +436,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup|voices]', 'warning');
+        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup <name>|route [name]|voices]', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;
@@ -267,7 +467,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           const devices = JSON.parse(result.stdout);
           if (command === 'devices') {
             const inputs = deviceChoices(devices, 'Audio/Source'), outputs = deviceChoices(devices, 'Audio/Sink');
-            notify(`Microphones:\n${inputs.map(item => item.label).join('\n') || '(none)'}\n\nPlayback:\n${outputs.map(item => item.label).join('\n') || '(none)'}\nUse /paj-voice setup to select. Bluetooth microphones are excluded.`);
+            notify(`Microphones:\n${inputs.map(item => item.label).join('\n') || '(none)'}\n\nPlayback:\n${outputs.map(item => item.label).join('\n') || '(none)'}\nUse /paj-voice setup <name> to save a route. Bluetooth needs microphone exposure and WirePlumber headset autoswitch; continuous capture keeps call mode while armed.`);
             return;
           }
           if (!isCurrent()) return;
@@ -284,13 +484,17 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           const confirmed = await current.ui.confirm('Save voice devices?',
             `${input.label}\n${output.label}\nUse headphones. Voice stays off; arming remains a separate confirmation.`);
           if (!confirmed || !isCurrent()) return;
-          (options.saveDevices ?? saveDevices)(deviceSettingsPath(env), { input: input.name, output: output.name });
+          const selection = { input: input.name, output: output.name,
+            ...(input.device ? { inputDevice: input.device } : {}),
+            ...(output.device ? { outputDevice: output.device } : {}) };
+          if (options.saveDevices && setupName === 'default') options.saveDevices(deviceSettingsPath(env), selection);
+          else selectRoute(routeName(setupName!), selection);
           notify('Voice devices saved. Voice remains off.');
           return;
         }
         const selectedPreferences = validateConfig((options.loadConfig ?? loadConfig)(configPath(env)));
-        const config = runtimeConfig(selectedPreferences,
-          (options.loadDevices ?? loadDevices)(deviceSettingsPath(env)));
+        const selectedDevices = (options.loadDevices ?? loadDevices)(deviceSettingsPath(env));
+        const config = runtimeConfig(selectedPreferences, selectedDevices);
         if (controller.state().enabled || controller.state().starting) { notify('Voice is already enabled for this session.'); return; }
         if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
             env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID || (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
@@ -311,15 +515,17 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           generation: state.generation, env });
         admission.validate();
         let launched: Companion | undefined;
+        const namespace = captureNamespace();
         launched = (options.startCompanion ?? startCompanion)({ ...runtimePaths(env), config, generation: state.generation,
           onEvent(frame, generation) {
+            if (companion !== launched) return;
             if (controller.state().generation === generation && frame.type === 'cancelled' && frame.reason === 'utterance_limit') {
               notify('Speech exceeded the utterance limit and was discarded; no request submitted. Use shorter turns.', 'warning');
             }
             if (controller.state().generation === generation && frame.type === 'diagnostic') {
               notify(JSON.stringify({ voiceDiagnostic: frame.stage, details: frame.details }), 'warning');
             }
-            if (controller.event(frame, generation)?.fatal) stop();
+            if (controller.event(namespace(frame), generation)?.fatal) stop();
           },
           onExit(message) {
             if (controller.state().generation !== state.generation || companion !== launched) return;
@@ -332,6 +538,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           },
         });
         companion = launched;
+        activeSelection = selectedDevices;
+        activeRoute = readRoutes()?.active ?? 'default';
         if (!current.isIdle()) controller.newRun();
         notify('Open mic starting. Remain quiet through warm-up; wait for the ready beep. All recognized speech is actionable in this session. Off/mute stops audio, not agent work.');
       } catch (error) {
