@@ -12,7 +12,6 @@ type Tone = 'muted' | 'warning' | 'dim';
 interface Theme {
   fg?(color: Tone, text: string): string;
   bg?(color: 'customMessageBg', text: string): string;
-  getBgAnsi?(color: 'userMessageBg'): string;
   bold?(text: string): string;
 }
 
@@ -43,11 +42,7 @@ const routeLabel = (state: VoiceDisplayState) => state.route
 export function voiceRequestMarkdown(markdown: string, theme?: Theme): string {
   const envelope = /^\[Voice request [\w-]{1,128}:[\w-]{1,128}\](?:\r\n|\n|\r)/u.exec(markdown);
   if (!envelope) return markdown;
-  const label = [...'Voice request'].map(character => {
-    const text = fg(theme, 'warning', bold(theme, character));
-    // Close each glyph before SDK wrapping adds padding; restore the surrounding user bubble.
-    return theme?.bg ? theme.bg('customMessageBg', text) + (theme.getBgAnsi?.('userMessageBg') ?? '') : text;
-  }).join('');
+  const label = [...'[Voice request]'].map(character => fg(theme, 'warning', bold(theme, character))).join('');
   return `${label}\n\n${markdown.slice(envelope[0].length)}`;
 }
 

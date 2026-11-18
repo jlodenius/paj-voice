@@ -13,11 +13,7 @@ const theme = {
     assert.equal(token, 'warning');
     return `\x1b[38;2;255;255;0m${text}\x1b[39m`;
   },
-  bg(token, text) {
-    assert.equal(token, 'customMessageBg');
-    return `\x1b[48;2;51;0;102m${text}\x1b[49m`;
-  },
-  getBgAnsi: token => sdkTheme.theme.getBgAnsi(token),
+  bg() { assert.fail('Voice request labels must not set a background'); },
   bold: text => `\x1b[1m${text}\x1b[22m`,
 };
 
@@ -57,7 +53,7 @@ const render = (text, width, transform = markdown => voiceRequestMarkdown(markdo
   new UserMessageComponent(text, undefined, 1, [transform],
     restored ? 'historic-entry' : undefined, restored ? '2026-01-01T00:00:00Z' : undefined).render(width);
 
-test('actual Pi user terminal render keeps warning/customMessageBg on the short label after Markdown and resize', () => {
+test('actual Pi user terminal render keeps a bracketed yellow label without a custom background after resize', () => {
   const source = `[Voice request generation-long:${'a'.repeat(64)}]\n你好 café 👋 **body**`;
   const component = new UserMessageComponent(source, undefined, 1,
     [markdown => voiceRequestMarkdown(markdown, theme)]);
@@ -67,8 +63,9 @@ test('actual Pi user terminal render keeps warning/customMessageBg on the short 
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     const cells = terminalCells(lines);
     const label = cells.filter(cell => cell.fg === '255,255,0');
-    assert.equal(label.map(cell => cell.text).join('').replaceAll(' ', ''), 'Voicerequest');
-    assert.ok(label.filter(cell => cell.text.trim()).every(cell => cell.bg === '51,0,102'),
+    assert.equal(label.map(cell => cell.text).join('').replaceAll(' ', ''), '[Voicerequest]');
+    const userBg = terminalCells([sdkTheme.theme.bg('userMessageBg', 'x')])[0].bg;
+    assert.ok(label.filter(cell => cell.text.trim()).every(cell => cell.bg === userBg),
       JSON.stringify(label));
     assert.ok(cells.filter(cell => cell.text === '你').every(cell => cell.fg !== '255,255,0'));
     const displayed = plain(lines);
@@ -79,7 +76,7 @@ test('actual Pi user terminal render keeps warning/customMessageBg on the short 
   assert.match(source, /generation-long:/);
 });
 
-test('SDK dark/light bubbles keep label-only purple, uniform padding and adjacent message backgrounds', () => {
+test('SDK dark/light bubbles keep bracketed warning text on the ordinary background with no ANSI bleed', () => {
   const originalTrueColor = getCapabilities().trueColor;
   try {
     for (const [name, trueColor] of ['dark', 'light'].flatMap(name =>
@@ -88,7 +85,6 @@ test('SDK dark/light bubbles keep label-only purple, uniform padding and adjacen
       initTheme(name, false);
       const current = sdkTheme.theme;
       const userBg = terminalCells([current.bg('userMessageBg', 'x')])[0].bg;
-      const labelBg = terminalCells([current.bg('customMessageBg', 'x')])[0].bg;
       const warning = terminalCells([current.fg('warning', 'x')])[0].fg;
       for (const ending of ['\n', '\r\n', '\r']) {
         const body = `你好 café 👋 é${ending}\x1b[0mBody`;
@@ -107,16 +103,16 @@ test('SDK dark/light bubbles keep label-only purple, uniform padding and adjacen
             for (const cell of cells.filter(cell => cell.text !== '\n')) {
               if (cell.fg === warning) {
                 label.push(cell.text);
-                assert.equal(cell.bg, labelBg, `${name}, ${width}, ${JSON.stringify(cell)}`);
+                assert.equal(cell.bg, userBg, `${name}, ${width}, ${JSON.stringify(cell)}`);
               } else {
                 assert.equal(cell.text, ' ');
                 assert.equal(cell.bg, userBg, `${name}, ${width}, label padding`);
               }
             }
           }
-          assert.equal(label.join('').replaceAll(' ', ''), 'Voicerequest');
+          assert.equal(label.join('').replaceAll(' ', ''), '[Voicerequest]');
           const ordinaryBody = new UserMessageComponent(body).render(width);
-          assert.equal(plain(lines).replaceAll(/\s/gu, '').slice('Voicerequest'.length),
+          assert.equal(plain(lines).replaceAll(/\s/gu, '').slice('[Voicerequest]'.length),
             plain(ordinaryBody).replaceAll(/\s/gu, ''), `${name}, ${width}, body matches SDK baseline`);
           assert.equal(source, `[Voice request generation:request]${ending}${body}`);
           const adjacent = new UserMessageComponent('Ordinary 你好 👋').render(width);
@@ -140,6 +136,7 @@ test('only the exact leading voice envelope is hidden; body and ordinary message
   const source = `[Voice request old-generation:old-request]\n${body}`;
   const display = voiceRequestMarkdown(source, theme);
   assert.ok(display.endsWith(body));
+  assert.equal(voiceRequestMarkdown(source), `[Voice request]\n\n${body}`);
   assert.equal(voiceRequestMarkdown(display, theme), display);
   for (const text of ['Voice request abc:def', '[Voice request abc:def]',
     'Quote:\n[Voice request abc:def]\nhello', '[Voice request bad id:request]\nhello',
@@ -181,7 +178,9 @@ test('user-only transformer leaves unique request IDs, dedup, admission, context
     bg: (_token, text) => `\x1b[48;2;70;20;90m${text}\x1b[49m`,
   };
   const recolored = terminalCells(render(second, 20, transform));
-  assert.ok(recolored.some(cell => cell.text === 'V' && cell.fg === '240,220,20' && cell.bg === '70,20,90'));
+  const userBg = terminalCells([sdkTheme.theme.bg('userMessageBg', 'x')])[0].bg;
+  assert.ok(recolored.some(cell => cell.text === 'V' && cell.fg === '240,220,20' && cell.bg === userBg));
+  assert.ok(!recolored.some(cell => cell.bg === '70,20,90'));
   assert.ok(!recolored.some(cell => cell.fg === '255,255,0'));
   await f.command('off');
 });
