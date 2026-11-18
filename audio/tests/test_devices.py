@@ -217,6 +217,18 @@ class ChildTests(unittest.TestCase):
         child.stderr_thread.join(timeout=1)
         return child, popen
 
+    def test_voice_identity_is_registered_before_capture_or_playback_starts(self):
+        for capture in (False, True):
+            with self.subTest(capture=capture):
+                child, popen = self.spawn(self.process(), capture=capture)
+                args = popen.call_args.args[0]
+                properties = json.loads(args[args.index('--properties') + 1])
+                self.assertEqual(properties['application.id'], 'org.paj.voice')
+                self.assertEqual(properties['paj.voice.owner'], str(os.getpid()))
+                self.assertEqual(properties['node.name'],
+                                 'paj_voice_record' if capture else 'paj_voice_play')
+                child.stop()
+
     def test_serial_pinned_raw_args_and_no_fallback(self):
         process = self.process()
         child, popen = self.spawn(process)

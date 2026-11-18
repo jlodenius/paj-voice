@@ -664,6 +664,11 @@ class Runtime:
         with self.lock:
             if self.closed or self.muted or (output_epoch is not None and output_epoch != self.output_epoch):
                 return
+            if (event['type'] in ('playing', 'idle') and isinstance(event.get('id'), str)
+                    and isinstance(event.get('generation'), int)):
+                self.emit({'type': 'playback_state', 'id': event['id'],
+                           'playbackGeneration': event['generation'], 'outputEpoch': self.output_epoch,
+                           'playing': event['type'] == 'playing'})
             if event['type'] == 'playing':
                 if self.speaker_mode:
                     self.owned_playback = True

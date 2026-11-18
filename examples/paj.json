@@ -10,6 +10,12 @@
       "steeringReceipt": "Steering received.",
       "progressUpdates": true,
       "idleReminders": true
+    },
+    "backgroundAudio": {
+      "mode": "off",
+      "gain": 0.2,
+      "apps": [],
+      "excludeApps": []
     }
   }
 }

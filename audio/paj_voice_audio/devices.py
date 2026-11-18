@@ -275,6 +275,8 @@ class Child:
                 "node.dont-fallback": True,
                 "node.dont-reconnect": True,
                 "node.name": "paj_voice_record" if capture else "paj_voice_play",
+                "application.id": "org.paj.voice",
+                "paj.voice.owner": str(os.getpid()),
             }
         )
         args = [

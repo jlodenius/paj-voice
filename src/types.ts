@@ -1,3 +1,5 @@
+import type { BackgroundAudioSettings } from './audio-focus-types.ts';
+
 export type Environment = Record<string, string | undefined>;
 export type NotificationLevel = 'info' | 'warning' | 'error';
 export type SpeechPriority = 'normal' | 'urgent';
@@ -52,6 +54,7 @@ export interface VoicePreferences {
   pauseSeconds: number;
   maxMessageSeconds: number;
   feedback: Feedback;
+  backgroundAudio?: BackgroundAudioSettings;
 }
 
 export interface DeviceSelection {
@@ -118,6 +121,9 @@ export interface CompanionFrame {
   fallback?: unknown;
   speakerMode?: unknown;
   listening?: unknown;
+  playing?: unknown;
+  playbackGeneration?: unknown;
+  outputEpoch?: unknown;
   stage?: unknown;
   message?: unknown;
   reason?: unknown;

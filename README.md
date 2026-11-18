@@ -76,6 +76,7 @@ These are all supported preferences, relative to the shared file's `voice` secti
 | `feedback.steeringReceipt`  | `"Steering received."`  | Addition during active work.             |
 | `feedback.progressUpdates`  | `true`                  | Brief updates during long tasks.         |
 | `feedback.idleReminders`    | `true`                  | Up to three idle reminders.              |
+| `backgroundAudio`           | disabled                | Selected-app ducking; see below.          |
 
 Receipt phrases allow 1–8 words and at most 60 characters, without control characters. Progress
 and idle notices are roughly one minute apart; activity resets idle reminders. Changes apply on
@@ -95,6 +96,49 @@ With an updated Paj addon, incoming agent messages request concise spoken summar
 progress updates. Messages follow Paj's normal delivery queue; raw worker reports are not read aloud.
 An explicitly requested silent response suppresses automatic speech for that run, not future inbox
 announcements.
+
+### Background audio
+
+Background audio is unchanged by default. `/paj-voice ducking preview` inspects application IDs and
+binary names without starting Voice or changing volume. Preview is metadata eligibility, not proof
+that a stream permits volume control. To opt in, add this group inside the shared `voice` section,
+replace the example application with exact identifiers from preview, and rearm:
+
+```json
+{
+  "backgroundAudio": {
+    "mode": "duck",
+    "gain": 0.2,
+    "apps": ["org.example.Player"],
+    "excludeApps": []
+  }
+}
+```
+
+`mode` is `off` or `duck`; ducking requires at least one explicitly selected application. `gain`
+is a relative linear multiplier from 0.05 to 1; 0.2 is roughly -14 dB, not the desktop mixer's 20%.
+Each list accepts up to 32 exact application IDs or binary names; wildcards are unsupported.
+Application exclusions win. Changes apply after off/on, not during an existing armed session.
+
+Only selected PipeWire playback streams with inspectable controls are lowered during actual Voice
+readouts. This slice supports the standard default user server/configuration only; target, runtime or
+configuration overrides, alternate home/config roots and other servers fail closed before connecting
+to the shared broker. Native and Pulse clients may work; locked/passthrough streams and direct ALSA
+are not covered. This is not universal audio focus. Voice output and identifiable call/alert
+roles are excluded; no master/sink volume or player transport is changed. Videos and music keep
+advancing. A browser may mix calls and media or omit roles: do not select mixed-call applications.
+
+Overlapping Voice instances share ownership. Short queued gaps retain attenuation; cancellation,
+off, output loss and shutdown release it. Channel balance and mute are preserved. Baseline gain is
+restored only while the same stream still has the acknowledged owned gain; manual gain changes win
+and prevent re-ducking during that cycle. A stream becoming a call only releases prior attenuation.
+PipeWire has no atomic compare-and-set: races, lost acknowledgements, broker crashes or daemon loss
+can leave audio quiet. Warnings cannot guarantee restoration; use normal app volume controls if needed.
+Onset lowering is best effort, not a guarantee before the first audible sample.
+
+This is not echo cancellation or a continuous open-mic music filter. Restored music can obstruct the
+speaker-mode quiet check or become recognized speech. Headphones are safer; hardware qualification
+requires a separately authorized no-command test. No acoustic qualification is implied by software tests.
 
 ## Usage
 
@@ -129,6 +173,10 @@ Preferences use Pi's agent directory (`PI_CODING_AGENT_DIR`); `PAJ_VOICE_CONFIG`
 file. Routes live in `~/.config/paj-voice/devices.json` (0600); cache uses `~/.cache/paj-voice`.
 Existing device selections are preserved as the `default` route.
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` override those bases. Executable/model paths are package-owned.
+Opt-in ducking uses a private per-user socket under `XDG_RUNTIME_DIR/paj-voice-focus`, or
+`/tmp/paj-voice-focus-<uid>`. Its broker expires lost-client leases and exits when idle; no permanent
+system service is installed. Forced broker termination cannot guarantee restoration, and an abandoned
+startup lock fails closed rather than being taken over automatically.
 
 Older `version`, `stt`, `tts`, `audio`, `turn`, language and runtime-path fields are no longer accepted.
 Replace the old Voice section with the example and run setup; device IDs belong in local storage.

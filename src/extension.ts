@@ -21,8 +21,14 @@ interface VoiceOptions {
   saveRoute?: typeof saveRoute;
   saveFallback?: typeof saveFallback;
   startCompanion?: (options: Parameters<typeof startCompanion>[0]) => Companion;
+  startAudioFocus?: typeof startAudioFocus;
+  previewBackgroundAudio?: (settings: BackgroundAudioSettings) => Promise<FocusPreview>;
 }
-import { configPath, loadConfig, validateConfig, runtimeConfig } from './config.ts';
+import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio } from './config.ts';
+import { startAudioFocus } from './audio-focus-client.ts';
+import { createAudioFocus } from './audio-focus.ts';
+import { createPipeWireFocusGraph } from './pipewire-focus.ts';
+import type { BackgroundAudioSettings, FocusPreview } from './audio-focus-types.ts';
 import { createVoiceController } from './controller.ts';
 import { createAdmission } from './admission.ts';
 import { startCompanion } from './companion.ts';
@@ -83,6 +89,48 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const recoveries: { sessionId: string; text: string }[] = [];
   const notify = (text: string, level: NotificationLevel = 'info') => {
     try { if (ctx?.hasUI) ctx.ui.notify(text, level); } catch {}
+  };
+  let audioFocus: ReturnType<typeof startAudioFocus> | undefined;
+  let focusToken: string | undefined;
+  let focusScope: string | undefined;
+  let focusVersion: [number, number] | undefined;
+  const idleFocus = () => {
+    const token = focusToken;
+    focusToken = undefined;
+    if (token) audioFocus?.idle(token);
+  };
+  const closeFocus = async () => {
+    const previous = audioFocus;
+    audioFocus = undefined;
+    focusToken = focusScope = undefined;
+    focusVersion = undefined;
+    try { await previous?.close(); }
+    catch { notify('Background audio restoration could not be confirmed; check app volume.', 'warning'); }
+  };
+  const focusEvent = (frame: CompanionFrame, generation: string | null, scope: string) => {
+    if (generation !== controller.state().generation) return;
+    if (frame.type === 'availability' && frame.output === false) { idleFocus(); return; }
+    if (frame.type !== 'playback_state' || typeof frame.playing !== 'boolean' ||
+        typeof frame.id !== 'string' || !/^[\x20-\x7e]{1,128}$/u.test(frame.id) ||
+        typeof frame.playbackGeneration !== 'number' || !Number.isSafeInteger(frame.playbackGeneration) ||
+        frame.playbackGeneration < 0 || typeof frame.outputEpoch !== 'number' ||
+        !Number.isSafeInteger(frame.outputEpoch) || frame.outputEpoch < 0) return;
+    const token = `${scope}:${frame.outputEpoch}:${frame.playbackGeneration}:${frame.id}`;
+    if (!frame.playing) { if (token === focusToken) idleFocus(); return; }
+    const state = controller.state();
+    const settings = preferences?.backgroundAudio;
+    if (!settings || settings.mode !== 'duck' || state.muted || !state.outputAvailable ||
+        (!state.enabled && !state.starting)) return;
+    if (focusScope !== scope) { focusScope = scope; focusVersion = undefined; }
+    if (focusVersion && (frame.outputEpoch < focusVersion[0] ||
+        (frame.outputEpoch === focusVersion[0] && frame.playbackGeneration <= focusVersion[1]))) return;
+    focusVersion = [frame.outputEpoch, frame.playbackGeneration];
+    try {
+      audioFocus ??= (options.startAudioFocus ?? startAudioFocus)(settings, { env,
+        onWarning: message => notify(message, 'warning') });
+      focusToken = token;
+      audioFocus.playing(token);
+    } catch { notify('Background audio ducking is unavailable; Voice continues without it.', 'warning'); }
   };
   const queryPaj = () => {
     let api: PajApi | undefined;
@@ -208,6 +256,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const launchRoute = (selection: DeviceSelection, name: string, activation: number): Promise<void> => new Promise((resolve, reject) => {
     const generation = controller.state().generation;
     const namespace = captureNamespace();
+    const focusNamespace = randomUUID();
     let settled = false;
     let launched: Companion | undefined;
     const finish = (error?: Error) => {
@@ -225,6 +274,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         config: runtimeConfig(preferences!, selection, activeFallback), generation,
         onEvent(frame) {
           if (activation !== lifetime || closed || companion !== launched) return;
+          focusEvent(frame, generation, focusNamespace);
           if (frame.type === 'error') {
             if (settled) {
               controller.event({ type: 'error', stage: 'route', message: 'Selected audio route failed; check local audio diagnostics' }, generation);
@@ -253,6 +303,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const old = companion;
     companion = undefined;
     old?.close();
+    await closeFocus();
     if (old?.waitClosed) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -359,6 +410,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     pendingInbox.clear();
     const old = companion;
     companion = undefined;
+    void closeFocus();
     activeRoute = switchingRoute = undefined;
     activeFallback = armedFallback = undefined;
     controller.stop();
@@ -532,13 +584,29 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     }
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup <name>, route [name], fallback [name|off|setup <name>], voices, recover. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'fallback', 'recover']
+    description: 'Continuous open mic: on, off, mute, unmute, stop, status, devices, setup <name>, route [name], fallback [name|off|setup <name>], ducking preview, voices, recover. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'mute', 'unmute', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'fallback', 'ducking preview', 'recover']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
       let command = args.trim() || 'status';
       const parts = command.split(/\s+/u);
+      if (parts[0] === 'ducking') {
+        if (parts.length !== 2 || parts[1] !== 'preview') {
+          notify('Use /paj-voice ducking preview. Enable selected-app ducking in shared preferences, then rearm.', 'warning'); return;
+        }
+        try {
+          const settings = validateBackgroundAudio((preferences ?? (options.loadConfig ?? loadConfig)(configPath(env))).backgroundAudio);
+          let preview: FocusPreview;
+          if (options.previewBackgroundAudio) preview = await options.previewBackgroundAudio(settings);
+          else {
+            const focus = createAudioFocus(createPipeWireFocusGraph());
+            try { preview = await focus.preview(settings); } finally { await focus.close(); }
+          }
+          notify(`Background audio preview (read-only): ${JSON.stringify({ mode: settings.mode, ...preview })}`);
+        } catch { notify('Cannot inspect background audio; no volume changed.', 'warning'); }
+        return;
+      }
       const fallbackSetup = parts[0] === 'fallback' && parts[1] === 'setup';
       const setupName = parts[0] === 'setup' ? parts[1] ?? 'default'
         : fallbackSetup ? parts[2] ?? 'laptop' : undefined;
@@ -604,6 +672,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         cancelSwitch?.();
         const old = companion, oldAdmission = admission;
         companion = admission = undefined;
+        void closeFocus();
         activeRoute = switchingRoute = undefined;
         controller.mute(true);
         try { old?.close(); } finally { oldAdmission?.close(); }
@@ -625,7 +694,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup <name>|route [name]|fallback [name|off|setup <name>]|voices|recover]', 'warning');
+        notify('Usage: /paj-voice [on|off|mute|unmute|stop|status|devices|setup <name>|route [name]|fallback [name|off|setup <name>]|ducking preview|voices|recover]', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;
@@ -712,8 +781,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           ? `Configured fallback ${selectedFallback.name} can automatically open its microphone and speakers if either preferred endpoint fails. It stays active until an explicit route switch or rearm. ` : '';
         const speakerNotice = selectedFallback || selectedDevices.speakerMode
           ? 'Speaker mode pauses recognition during Voice readouts and until quiet; wait for listening before speaking, and use /paj-voice stop to interrupt. ' : '';
+        const duckNotice = selectedPreferences.backgroundAudio?.mode === 'duck'
+          ? `Configured background applications (${selectedPreferences.backgroundAudio.apps.join(', ')}) may be lowered during readouts (linear gain ${selectedPreferences.backgroundAudio.gain}). Restoration is best effort; mixed or unlabelled call audio cannot be reliably separated. This is not echo cancellation or a background-speech filter. ` : '';
         if (!await current.ui.confirm('Arm continuous open mic with normal tools?',
-          `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}Off/mute or session shutdown stops audio and recovery; fatal runtime errors also stop audio. Existing terminal confirmations cannot be approved by voice.`)) return;
+          `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}${duckNotice}Off/mute or session shutdown stops audio and recovery; fatal runtime errors also stop audio. Existing terminal confirmations cannot be approved by voice.`)) return;
         if (closed || lifetime !== activation || id !== ctx?.sessionManager.getSessionId()) throw new Error('Voice arming was cancelled');
         preferences = selectedPreferences;
         armedFallback = selectedFallback;
@@ -725,9 +796,11 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         admission.validate();
         let launched: Companion | undefined;
         const namespace = captureNamespace();
+        const focusNamespace = randomUUID();
         launched = (options.startCompanion ?? startCompanion)({ ...runtimePaths(env), config, generation: state.generation,
           onEvent(frame, generation) {
             if (companion !== launched) return;
+            focusEvent(frame, generation, focusNamespace);
             if (controller.state().generation === generation && frame.type === 'cancelled' && frame.reason === 'utterance_limit') {
               notify('Speech exceeded the utterance limit and was discarded; no request submitted. Use shorter turns.', 'warning');
             }

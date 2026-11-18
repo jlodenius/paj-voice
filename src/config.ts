@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 
 import { errorCode } from './types.ts';
 import type { DeviceSelection, Environment } from './types.ts';
+import type { BackgroundAudioSettings } from './audio-focus-types.ts';
 
 export function configPath(env: Environment = process.env) {
   if (env.PAJ_VOICE_CONFIG) return env.PAJ_VOICE_CONFIG;
@@ -36,15 +37,34 @@ const receipt = (value: unknown, fallback: string, name: string): string => {
   return result.trim();
 };
 
+export function validateBackgroundAudio(value: unknown = {}): BackgroundAudioSettings {
+  keys(value, ['mode', 'gain', 'apps', 'excludeApps'], 'backgroundAudio');
+  const mode = value.mode === undefined ? 'off' : value.mode;
+  if (mode !== 'off' && mode !== 'duck') fail('backgroundAudio.mode must be off or duck');
+  const apps = (name: 'apps' | 'excludeApps') => {
+    const list = value[name] === undefined ? [] : value[name];
+    if (!Array.isArray(list) || list.length > 32 || list.some(item =>
+      typeof item !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u.test(item))) {
+      fail(`backgroundAudio.${name} must contain at most 32 exact application IDs or binary names`);
+    }
+    return [...new Set(list as string[])];
+  };
+  const selected = apps('apps');
+  if (mode === 'duck' && selected.length === 0) fail('backgroundAudio.apps must explicitly select applications before ducking');
+  return { mode, gain: number(value.gain, 0.2, 0.05, 1, 'backgroundAudio.gain must be 0.05–1 linear gain'),
+    apps: selected, excludeApps: apps('excludeApps') };
+}
+
 export function validateConfig(value: unknown) {
-  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback'],
-    'use only voice, volume, speed, pauseSeconds, maxMessageSeconds and feedback; device IDs and runtime tuning are not preferences');
+  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback', 'backgroundAudio'],
+    'use only supported voice preferences; device IDs and runtime tuning are not preferences');
   const voice = value.voice === undefined ? 'ljspeech' : value.voice;
   if (typeof voice !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/u.test(voice)) fail('voice must name an installed voice');
   const feedback = value.feedback === undefined ? {} : value.feedback;
   keys(feedback, ['receipt', 'steeringReceipt', 'progressUpdates', 'idleReminders'], 'feedback');
   return {
     voice,
+    ...(value.backgroundAudio !== undefined ? { backgroundAudio: validateBackgroundAudio(value.backgroundAudio) } : {}),
     volume: number(value.volume, 40, 0, 100, 'volume must be 0–100'),
     speed: number(value.speed, 1, 0.5, 2, 'speed must be 0.5–2'),
     pauseSeconds: number(value.pauseSeconds, 0.8, 0.3, 5, 'pauseSeconds must be 0.3–5'),

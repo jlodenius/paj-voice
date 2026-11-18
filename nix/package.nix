@@ -1,6 +1,7 @@
 {
   lib,
-  stdenvNoCC,
+  stdenv,
+  pkg-config,
   makeWrapper,
   fetchNpmDeps,
   npmHooks,
@@ -11,7 +12,7 @@
 }: let
   speech = import ./speech.nix {
     inherit voiceModels;
-    pkgs = import ./pkgs.nix {system = stdenvNoCC.hostPlatform.system;};
+    pkgs = import ./pkgs.nix {system = stdenv.hostPlatform.system;};
   };
   python = speech.python;
   source = lib.cleanSourceWith {
@@ -25,7 +26,7 @@
       && !(lib.hasSuffix ".pyc" name);
   };
 in
-  stdenvNoCC.mkDerivation {
+  stdenv.mkDerivation {
     pname = "paj-voice";
     version = (builtins.fromJSON (builtins.readFile ../package.json)).version;
     src = source;
@@ -34,7 +35,8 @@ in
       hash = "sha256-CcSp1qqxEb0v2QYyj2XOKGz0HfrIOddSIbwTqtl6GXg=";
     };
     npmFlags = ["--ignore-scripts"];
-    nativeBuildInputs = [makeWrapper nodejs npmHooks.npmConfigHook];
+    nativeBuildInputs = [makeWrapper nodejs npmHooks.npmConfigHook pkg-config];
+    buildInputs = [pipewire];
     nativeCheckInputs = [python3];
     passthru = {
       inherit python;
@@ -47,6 +49,8 @@ in
     buildPhase = ''
       runHook preBuild
       node scripts/build.ts
+      $CC -Wall -Wextra -Werror -O2 audio/focus-control.c \
+        $(pkg-config --cflags --libs libpipewire-0.3) -lm -o paj-voice-focus-control
       runHook postBuild
     '';
     doCheck = true;
@@ -56,6 +60,10 @@ in
       export PYTHONDONTWRITEBYTECODE=1
       export PYTHONPATH="$PWD/audio"
       mkdir -p "$HOME"
+      ./paj-voice-focus-control --self-test
+      $CC -Wall -Wextra -Werror -O2 audio/tests/focus-control-events.c \
+        $(pkg-config --cflags --libs libpipewire-0.3) -lm -o focus-control-events
+      ./focus-control-events
       npm run typecheck
       node --test --test-concurrency=2 tests/*.test.js
       python3 -m unittest discover -s audio/tests -v
@@ -63,9 +71,11 @@ in
     '';
     installPhase = ''
       runHook preInstall
-      mkdir -p "$out/share/paj-voice/audio" "$out/bin"
+      mkdir -p "$out/share/paj-voice/audio" "$out/bin" "$out/libexec"
       cp -r extensions dist examples package.json README.md LICENSE "$out/share/paj-voice/"
       cp -r audio/paj_voice_audio "$out/share/paj-voice/audio/"
+      install -m755 paj-voice-focus-control "$out/bin/paj-voice-focus-control"
+      ln -s ${pipewire}/bin/pw-dump "$out/libexec/paj-voice-pw-dump"
       ln -s ${speech.models} "$out/share/paj-voice/models"
       makeWrapper ${python}/bin/python "$out/bin/paj-voice-audio" \
         --add-flags "-P -m paj_voice_audio" \
