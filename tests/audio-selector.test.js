@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateBackgroundAudio, loadConfig } from '../src/config.ts';
+import { validateBackgroundAudio, backgroundAudioPolicy, loadConfig } from '../src/config.ts';
 import { validFocusSettings, runAudioFocusBroker } from '../src/audio-focus-broker.ts';
 import { startAudioFocus } from '../src/audio-focus-client.ts';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
@@ -10,9 +10,10 @@ import { focusFileSystem } from './fixtures/audio-focus-filesystem.js';
 import { createAudioFocus } from '../src/audio-focus.ts';
 
 test('literal Nix-wrapped executable selectors round-trip through configuration, wire and preview', async () => {
-  const settings = validateBackgroundAudio({ mode: 'duck', gain: 0.2,
-    apps: ['.spotify-wrapped', 'helium'], excludeApps: ['.Discord-wrapped'] });
-  assert.deepEqual(settings.apps, ['.spotify-wrapped', 'helium']);
+  const preferences = validateBackgroundAudio({ enabled: true, gain: 0.2,
+    ignoreApps: ['.Discord-wrapped'] });
+  assert.deepEqual(preferences.ignoreApps, ['.Discord-wrapped']);
+  const settings = backgroundAudioPolicy(preferences);
   assert.equal(validFocusSettings(JSON.parse(JSON.stringify(settings))), true);
   const graph = { async snapshot() { return { generation: 'core', streams: [{ id: 3, serial: '13',
     appId: '', binary: '.spotify-wrapped', role: 'Music', name: 'spotify',
@@ -31,7 +32,7 @@ test('wrapped selectors persist in shared JSON without changing sibling settings
   t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, 'paj.json');
   const shared = { captain: { enabled: false }, voice: { voice: 'ljspeech', pauseSeconds: 2,
-    backgroundAudio: { mode: 'duck', gain: 0.2, apps: ['helium', '.spotify-wrapped'], excludeApps: [] } } };
+    backgroundAudio: { enabled: true, gain: 0.2, ignoreApps: ['helium', '.spotify-wrapped'] } } };
   const before = JSON.stringify(shared);
   await writeFile(file, before);
   const loaded = loadConfig(file);
@@ -40,7 +41,7 @@ test('wrapped selectors persist in shared JSON without changing sibling settings
   assert.equal(await readFile(file, 'utf8'), before);
 });
 
-test('wrapped allowlist and exclusion survive the real client and private broker lease', async t => {
+test('wrapped ignored apps survive the real client and private broker lease', async t => {
   const runtimeDir = await mkdtemp(join(tmpdir(), 'paj-wrapped-selector-'));
   const streams = [
     { id: 3, serial: '13', appId: '', binary: '.spotify-wrapped', role: 'Music', name: 'spotify',
@@ -59,8 +60,8 @@ test('wrapped allowlist and exclusion survive the real client and private broker
   const focus = createAudioFocus(graph);
   const broker = await runAudioFocusBroker({ env: {}, filesystem: focusFileSystem, runtimeDir,
     engine: focus, idleMs: 10000 });
-  const settings = validateBackgroundAudio({ mode: 'duck', gain: 0.2,
-    apps: ['.spotify-wrapped', '.Discord-wrapped'], excludeApps: ['.Discord-wrapped'] });
+  const settings = backgroundAudioPolicy(validateBackgroundAudio({ enabled: true, gain: 0.2,
+    ignoreApps: ['.Discord-wrapped'] }));
   const client = startAudioFocus(settings, { env: {}, filesystem: focusFileSystem, runtimeDir,
     spawn: () => assert.fail('The fake-graph broker already exists') });
   t.after(async () => { await client.close(); await broker.close();
@@ -79,12 +80,12 @@ test('wrapped selectors remain bounded literal identifiers, never paths or patte
   for (const selector of ['.', '..', '..player', '.-player', '/spotify', './spotify',
     '.spotify/*', '.spotify?', '.spotify[0]', '.spotify\n', '.spotify wrapped',
     '.' + 'a'.repeat(128)]) {
-    assert.throws(() => validateBackgroundAudio({ mode: 'duck', apps: [selector] }));
+    assert.throws(() => validateBackgroundAudio({ enabled: true, ignoreApps: [selector] }));
     assert.equal(validFocusSettings({ mode: 'duck', gain: 0.2, apps: [selector], excludeApps: [] }), false);
   }
   for (const selector of ['spotify', '.spotify-wrapped', '.Discord-wrapped', '.' + 'a'.repeat(127)]) {
-    const settings = validateBackgroundAudio({ mode: 'duck', apps: [selector] });
-    assert.equal(validFocusSettings(settings), true);
-    assert.equal(settings.apps[0], selector);
+    const settings = validateBackgroundAudio({ enabled: true, ignoreApps: [selector] });
+    assert.equal(validFocusSettings(backgroundAudioPolicy(settings)), true);
+    assert.equal(settings.ignoreApps[0], selector);
   }
 });

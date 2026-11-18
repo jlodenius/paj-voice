@@ -9,7 +9,7 @@ import { createAudioFocus } from '../src/audio-focus.ts';
 import { startAudioFocus } from '../src/audio-focus-client.ts';
 import { runAudioFocusBroker } from '../src/audio-focus-broker.ts';
 
-const settings = { mode: 'duck', gain: 0.2, apps: ['org.example.Player'], excludeApps: [] };
+const settings = { enabled: true, gain: 0.2, ignoreApps: [] };
 async function until(predicate) {
   const end = Date.now() + 2000;
   while (!predicate()) {
@@ -108,7 +108,7 @@ test('mute, session disposal and replaced native callbacks cannot keep or resurr
   let consent;
   f.ctx.ui.confirm = async (_title, text) => { consent = text; return true; };
   await f.command('on');
-  assert.match(consent, /background applications/);
+  assert.match(consent, /all other inspectable playback/i);
   assert.match(consent, /Restoration is best effort/);
   assert.match(consent, /not echo cancellation/);
   f.audio({ type: 'ready' });

@@ -1,6 +1,6 @@
 import type { BackgroundAudioSettings, FocusGraph, FocusStream, FocusPreview } from './audio-focus-types.ts';
 import { isFocusMetadataLabel } from './audio-focus-types.ts';
-import { validateBackgroundAudio } from './config.ts';
+import { validateFocusPolicy } from './config.ts';
 
 const printable = (value: string) => typeof value === 'string' && /^[\x20-\x7e]{1,256}$/.test(value);
 const roles = new Set(['communication', 'phone', 'alert', 'emergency', 'notification', 'event',
@@ -31,7 +31,7 @@ function supported(stream: FocusStream) {
 function applicationSelector(stream: FocusStream): string | undefined {
   for (const value of [stream.appId, stream.binary]) {
     if (!value) continue;
-    try { return validateBackgroundAudio({ apps: [value] }).apps[0]; } catch {}
+    try { return validateFocusPolicy({ apps: [value] }).apps[0]; } catch {}
   }
   return undefined;
 }
@@ -180,7 +180,7 @@ export function createAudioFocus(graph: FocusGraph, options: {
     async set(owner: string, settings: BackgroundAudioSettings | null, immediate = false): Promise<void> {
       if (closed) throw new Error('Audio focus is closed');
       if (!printable(owner)) throw new Error('Invalid audio focus owner');
-      const validated = settings === null ? null : validateBackgroundAudio(settings);
+      const validated = settings === null ? null : validateFocusPolicy(settings);
       if (validated === null || validated.mode === 'off') owners.delete(owner);
       else {
         if (!owners.has(owner) && owners.size >= 32) throw new Error('Too many audio focus owners');
@@ -202,7 +202,7 @@ export function createAudioFocus(graph: FocusGraph, options: {
       resetIdleCycle();
     },
     async preview(settings: BackgroundAudioSettings): Promise<FocusPreview> {
-      const validated = validateBackgroundAudio(settings);
+      const validated = validateFocusPolicy(settings);
       const snapshot = await graph.snapshot();
       const eligible = new Set<string>();
       const available = new Set<string>();

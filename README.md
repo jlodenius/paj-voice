@@ -107,23 +107,24 @@ inside the shared `voice` section and rearm:
 ```json
 {
   "backgroundAudio": {
-    "mode": "duck-all"
+    "enabled": true
   }
 }
 ```
 
-`duck-all` includes other apps, calls, alerts and other speech, but never Pi Voice outputs across
-sessions. The default remains `off`. Selected-app mode remains available with `"mode": "duck"`
-and a nonempty `apps` list; it excludes identifiable call/alert roles. `apps` is ignored in all mode.
+`enabled` defaults to `false`. When `true`, lowering includes other apps, calls, alerts and other
+speech, but never Pi Voice outputs across sessions. No application selection is required.
+Optional `ignoreApps` defaults to `[]`: apps in this list are never lowered. For example,
+`"ignoreApps": ["org.example.Calls", ".spotify-wrapped"]` leaves those apps unchanged.
 Optional `gain` defaults to 0.2: a relative linear multiplier from 0.05 to 1, roughly -14 dB at 0.2,
 not the desktop mixer's 20%.
-The optional `apps` and `excludeApps` lists accept up to 32 exact application IDs or binary names;
+The optional `ignoreApps` list accepts up to 32 exact application IDs or binary names;
 wildcards are unsupported.
 Nix-wrapped names such as `.spotify-wrapped` are literal selectors, not paths or patterns.
 Application exclusions win. Changes apply after off/on, not during an existing armed session.
 
 Only PipeWire playback streams with inspectable controls and verified identity/provenance are
-lowered during actual Voice readouts. Missing app identity does not require guessing in all mode:
+lowered during actual Voice readouts. Missing app identity does not require guessing:
 verified per-stream binding is sufficient. When app identity is needed and absent on the stream,
 only its uniquely associated client may supply it; association and identity are rechecked before
 writes and readback. Malformed or ambiguous provenance remains untouched.
@@ -132,15 +133,15 @@ This slice supports the standard default user server/configuration only; target,
 configuration overrides, alternate home/config roots and other servers fail closed before connecting
 to the shared broker. Native and Pulse clients may work; locked/passthrough streams and direct ALSA
 are not covered. This is not universal audio focus. Pi Voice output is always excluded; no
-master/sink volume or player transport is changed. Videos and music keep advancing. All mode
-intentionally lowers calls and alerts too. In selected-app mode, a browser may mix calls and media
-or omit roles: do not select mixed-call applications if those calls must stay unchanged.
+master/sink volume or player transport is changed. Videos and music keep advancing. Enabled lowering
+intentionally includes calls and alerts too. A browser may mix calls and media: ignore that entire
+application if those calls must stay unchanged.
 
 Overlapping Voice instances share ownership. Short queued gaps retain attenuation; cancellation,
 off, output loss and shutdown release it. Channel balance and mute are preserved. Baseline gain is
 restored only while the same stream still has the acknowledged owned gain; manual gain changes win
-and prevent re-ducking during that cycle. In selected-app mode, a stream becoming a call only
-releases prior attenuation; all mode can keep it lowered as explicitly configured.
+and prevent re-ducking during that cycle. Calls and alerts remain eligible unless their application
+is explicitly ignored.
 PipeWire has no atomic compare-and-set: races, lost acknowledgements, broker crashes or daemon loss
 can leave audio quiet. Warnings cannot guarantee restoration; use normal app volume controls if needed.
 Onset lowering is best effort, not a guarantee before the first audible sample.
@@ -148,6 +149,17 @@ Onset lowering is best effort, not a guarantee before the first audible sample.
 This is not echo cancellation or a continuous open-mic music filter. Restored music can obstruct the
 speaker-mode quiet check or become recognized speech. Headphones are safer; hardware qualification
 requires a separately authorized no-command test. No acoustic qualification is implied by software tests.
+
+#### Migrating older preferences
+
+Upgrade the Voice package and reload Pi before saving the new fields: older installed parsers reject
+`enabled` and `ignoreApps`. Settings apply on the next manual off/on, not to an already armed session.
+New parsers reject legacy `mode`, `apps` and `excludeApps` with migration guidance; they never silently
+expand a selected-app allowlist into all playback. Replace `mode: "off"` with `enabled: false`, or
+`mode: "duck-all"` with `enabled: true`. Rename `excludeApps` to `ignoreApps` and remove `apps`.
+Migrating `mode: "duck"` requires explicitly choosing whether to enable lowering of all other playback,
+including calls and alerts; keep `enabled: false` until that broader behavior is intended.
+The shared file remains `~/.pi/agent/paj.json`; preserve sibling addon settings when editing it.
 
 ## Usage
 

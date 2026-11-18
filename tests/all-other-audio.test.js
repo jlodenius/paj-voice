@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateConfig } from '../src/config.ts';
+import { validateConfig, backgroundAudioPolicy } from '../src/config.ts';
 import { validFocusSettings, runAudioFocusBroker } from '../src/audio-focus-broker.ts';
 import { startAudioFocus } from '../src/audio-focus-client.ts';
 import { createAudioFocus } from '../src/audio-focus.ts';
@@ -12,9 +12,9 @@ import { join } from 'node:path';
 
 test('all-other playback is one explicit opt-in setting while absent configuration remains off', () => {
   assert.equal(validateConfig({}).backgroundAudio, undefined);
-  const settings = validateConfig({ backgroundAudio: { mode: 'duck-all' } }).backgroundAudio;
-  assert.deepEqual(settings, { mode: 'duck-all', gain: 0.2, apps: [], excludeApps: [] });
-  assert.equal(validFocusSettings(JSON.parse(JSON.stringify(settings))), true);
+  const settings = validateConfig({ backgroundAudio: { enabled: true } }).backgroundAudio;
+  assert.deepEqual(settings, { enabled: true, gain: 0.2, ignoreApps: [] });
+  assert.equal(validFocusSettings(backgroundAudioPolicy(JSON.parse(JSON.stringify(settings)))), true);
   assert.throws(() => validateConfig({ backgroundAudio: { mode: 'duck', apps: [] } }));
 });
 
@@ -38,7 +38,7 @@ test('explicit all-other mode reaches actual playback leases and discloses call 
     } };
   const focus = createAudioFocus(graph, { releaseMs: 5 });
   const broker = await runAudioFocusBroker({ engine: focus, runtimeDir, env: {}, filesystem: focusFileSystem });
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { mode: 'duck-all' } }),
+  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true, ignoreApps: ['alarm-app'] } }),
     startAudioFocus: settings => startAudioFocus(settings, { runtimeDir, env: {}, filesystem: focusFileSystem,
       spawn: () => assert.fail('The fake-graph broker already exists') }) });
   t.after(async () => { await f.command('off'); await broker.close();
@@ -54,8 +54,8 @@ test('explicit all-other mode reaches actual playback leases and discloses call 
   const end = Date.now() + 2000;
   while (streams[0].volumes[0] !== 0.2 && Date.now() < end)
     await new Promise(resolve => setTimeout(resolve, 5));
-  for (const index of [0, 1, 2, 5]) assert.deepEqual(streams[index].volumes, [0.2, 0.1]);
-  for (const index of [3, 4]) assert.deepEqual(streams[index].volumes, [1, 0.5]);
+  for (const index of [0, 1, 5]) assert.deepEqual(streams[index].volumes, [0.2, 0.1]);
+  for (const index of [2, 3, 4]) assert.deepEqual(streams[index].volumes, [1, 0.5]);
   await f.command('off');
   const restored = Date.now() + 2000;
   while (streams[0].volumes[0] !== 1 && Date.now() < restored)

@@ -12,10 +12,9 @@
       "idleReminders": true
     },
     "backgroundAudio": {
-      "mode": "off",
+      "enabled": false,
       "gain": 0.2,
-      "apps": [],
-      "excludeApps": []
+      "ignoreApps": []
     }
   }
 }

@@ -125,7 +125,7 @@ test('the shared example contains only supported user preferences', () => {
   const example = JSON.parse(readFileSync(new URL('../examples/paj.json', import.meta.url), 'utf8'));
   assert.deepEqual(Object.keys(example), ['voice']);
   assert.deepEqual(validateConfig(example.voice), { ...valid(),
-    backgroundAudio: { mode: 'off', gain: 0.2, apps: [], excludeApps: [] } });
+    backgroundAudio: { enabled: false, gain: 0.2, ignoreApps: [] } });
 });
 
 test('README documents every supported preference', () => {

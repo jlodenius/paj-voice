@@ -24,7 +24,7 @@ interface VoiceOptions {
   startAudioFocus?: typeof startAudioFocus;
   previewBackgroundAudio?: (settings: BackgroundAudioSettings) => Promise<FocusPreview>;
 }
-import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio } from './config.ts';
+import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio, backgroundAudioPolicy } from './config.ts';
 import { startAudioFocus } from './audio-focus-client.ts';
 import { createAudioFocus } from './audio-focus.ts';
 import { createPipeWireFocusGraph } from './pipewire-focus.ts';
@@ -119,14 +119,14 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     if (!frame.playing) { if (token === focusToken) idleFocus(); return; }
     const state = controller.state();
     const settings = preferences?.backgroundAudio;
-    if (!settings || settings.mode === 'off' || state.muted || !state.outputAvailable ||
+    if (!settings?.enabled || state.muted || !state.outputAvailable ||
         (!state.enabled && !state.starting)) return;
     if (focusScope !== scope) { focusScope = scope; focusVersion = undefined; }
     if (focusVersion && (frame.outputEpoch < focusVersion[0] ||
         (frame.outputEpoch === focusVersion[0] && frame.playbackGeneration <= focusVersion[1]))) return;
     focusVersion = [frame.outputEpoch, frame.playbackGeneration];
     try {
-      audioFocus ??= (options.startAudioFocus ?? startAudioFocus)(settings, { env,
+      audioFocus ??= (options.startAudioFocus ?? startAudioFocus)(backgroundAudioPolicy(settings), { env,
         onWarning: message => notify(message, 'warning') });
       focusToken = token;
       audioFocus.playing(token);
@@ -593,17 +593,17 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       const parts = command.split(/\s+/u);
       if (parts[0] === 'ducking') {
         if (parts.length !== 2 || parts[1] !== 'preview') {
-          notify('Use /paj-voice ducking preview. Choose ducking mode in shared preferences, then rearm.', 'warning'); return;
+          notify('Use /paj-voice ducking preview. Enable or disable background audio lowering in shared preferences, then rearm.', 'warning'); return;
         }
         try {
           const settings = validateBackgroundAudio((preferences ?? (options.loadConfig ?? loadConfig)(configPath(env))).backgroundAudio);
           let preview: FocusPreview;
-          if (options.previewBackgroundAudio) preview = await options.previewBackgroundAudio(settings);
+          if (options.previewBackgroundAudio) preview = await options.previewBackgroundAudio(backgroundAudioPolicy(settings));
           else {
             const focus = createAudioFocus(createPipeWireFocusGraph());
-            try { preview = await focus.preview(settings); } finally { await focus.close(); }
+            try { preview = await focus.preview(backgroundAudioPolicy(settings)); } finally { await focus.close(); }
           }
-          notify(`Background audio preview (read-only): ${JSON.stringify({ mode: settings.mode, ...preview })}`);
+          notify(`Background audio preview (read-only): ${JSON.stringify({ enabled: settings.enabled, ...preview })}`);
         } catch { notify('Cannot inspect background audio; no volume changed.', 'warning'); }
         return;
       }
@@ -782,10 +782,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         const speakerNotice = selectedFallback || selectedDevices.speakerMode
           ? 'Speaker mode pauses recognition during Voice readouts and until quiet; wait for listening before speaking, and use /paj-voice stop to interrupt. ' : '';
         const duckSettings = selectedPreferences.backgroundAudio;
-        const duckNotice = duckSettings?.mode === 'duck-all'
-          ? `All other inspectable playback, including calls and alerts, may be lowered during readouts (linear gain ${duckSettings.gain}). Pi Voice outputs stay unchanged. Restoration is best effort. This is not echo cancellation or a background-speech filter. `
-          : duckSettings?.mode === 'duck'
-            ? `Configured background applications (${duckSettings.apps.join(', ')}) may be lowered during readouts (linear gain ${duckSettings.gain}). Restoration is best effort; mixed or unlabelled call audio cannot be reliably separated. This is not echo cancellation or a background-speech filter. ` : '';
+        const duckNotice = duckSettings?.enabled
+          ? `All other inspectable playback, including calls and alerts, may be lowered during readouts (linear gain ${duckSettings.gain}), except ignored apps. Pi Voice outputs stay unchanged. Restoration is best effort. This is not echo cancellation or a background-speech filter. ` : '';
         if (!await current.ui.confirm('Arm continuous open mic with normal tools?',
           `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}${duckNotice}Off/mute or session shutdown stops audio and recovery; fatal runtime errors also stop audio. Existing terminal confirmations cannot be approved by voice.`)) return;
         if (closed || lifetime !== activation || id !== ctx?.sessionManager.getSessionId()) throw new Error('Voice arming was cancelled');

@@ -41,7 +41,36 @@ export function isBackgroundAudioSelector(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 128 && /^\.?[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(value);
 }
 
-export function validateBackgroundAudio(value: unknown = {}): BackgroundAudioSettings {
+export interface BackgroundAudioPreferences {
+  enabled: boolean;
+  gain: number;
+  ignoreApps: string[];
+}
+
+export function validateBackgroundAudio(value: unknown = {}): BackgroundAudioPreferences {
+  if (object(value) && ['mode', 'apps', 'excludeApps'].some(key => Object.hasOwn(value, key))) {
+    fail('backgroundAudio legacy mode/apps/excludeApps are unsupported; migrate to enabled and ignoreApps. ' +
+      'Use enabled:false for off; enabled:true for duck-all. Selected-app duck requires explicit consent ' +
+      'to lower all other playback. Rename excludeApps to ignoreApps; remove apps.');
+  }
+  keys(value, ['enabled', 'gain', 'ignoreApps'], 'backgroundAudio');
+  const ignoreApps = value.ignoreApps === undefined ? [] : value.ignoreApps;
+  if (!Array.isArray(ignoreApps) || ignoreApps.length > 32 || !ignoreApps.every(isBackgroundAudioSelector)) {
+    fail('backgroundAudio.ignoreApps must contain at most 32 exact application IDs or binary names');
+  }
+  return {
+    enabled: boolean(value.enabled, false, 'backgroundAudio.enabled must be true or false'),
+    gain: number(value.gain, 0.2, 0.05, 1, 'backgroundAudio.gain must be 0.05–1 linear gain'),
+    ignoreApps: [...new Set(ignoreApps as string[])],
+  };
+}
+
+export function backgroundAudioPolicy(settings: BackgroundAudioPreferences): BackgroundAudioSettings {
+  return { mode: settings.enabled ? 'duck-all' : 'off', gain: settings.gain,
+    apps: [], excludeApps: [...settings.ignoreApps] };
+}
+
+export function validateFocusPolicy(value: unknown = {}): BackgroundAudioSettings {
   keys(value, ['mode', 'gain', 'apps', 'excludeApps'], 'backgroundAudio');
   const mode = value.mode === undefined ? 'off' : value.mode;
   if (mode !== 'off' && mode !== 'duck' && mode !== 'duck-all') fail('backgroundAudio.mode must be off, duck or duck-all');
