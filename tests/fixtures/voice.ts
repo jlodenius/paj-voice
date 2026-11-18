@@ -1,6 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import { Type } from 'typebox';
-import { registerVoice } from '../../src/extension.js';
+import { registerVoice } from '../../src/extension.ts';
 
 export default function (pi) {
   const journal = process.env.VOICE_TEST_JOURNAL;

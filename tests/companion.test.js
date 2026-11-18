@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { startCompanion } from '../src/companion.js';
+import { startCompanion } from '../src/companion.ts';
 
 function run(script, callbacks = {}) {
   return startCompanion({ config: {}, generation: 'g',

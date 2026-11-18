@@ -2,13 +2,26 @@ import array
 import unittest
 
 from paj_voice_audio.input_ready import InputReady
-from paj_voice_audio.stt_eval import Recording
+
+class Receiver:
+    def __init__(self):
+        self.frames = []
+        self.size = 0
+        self.closed = False
+
+    def feed(self, pcm, voiced, captured_at=None):
+        if not self.closed:
+            self.frames.append((pcm, voiced))
+            self.size += len(pcm)
+
+    def close(self):
+        self.closed = True
 
 
 class InputReadyTests(unittest.TestCase):
     def setUp(self):
         self.clock = [10.0]
-        self.recording = Recording(7)
+        self.recording = Receiver()
         self.gate = InputReady(self.recording, clock=lambda: self.clock[0])
 
     def bucket(self, value=0, voiced=False):

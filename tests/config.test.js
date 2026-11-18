@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configPath, loadConfig, validateConfig, runtimeConfig } from '../src/config.js';
+import { configPath, loadConfig, validateConfig, runtimeConfig } from '../src/config.ts';
 
 export const valid = () => ({ voice: 'ljspeech', volume: 40, speed: 1,
   pauseSeconds: 0.8, maxMessageSeconds: 20, feedback: { receipt: 'Got it.',

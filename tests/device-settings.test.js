@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, lstatSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices } from '../src/device-settings.js';
+import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices } from '../src/device-settings.ts';
 
 const devices = [
   { name: 'alsa_input.laptop', description: 'Laptop microphone', class: 'Audio/Source' },

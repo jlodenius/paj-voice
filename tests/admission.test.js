@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAdmission } from '../src/admission.js';
+import { createAdmission } from '../src/admission.ts';
 
 function fixture(withPaj = false) {
   let idle = true, editorBusy = false;

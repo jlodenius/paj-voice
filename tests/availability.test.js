@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createVoiceController } from '../src/controller.js';
+import { createVoiceController } from '../src/controller.ts';
 
 function fixture(overrides = {}) {
   let now = 0, sequence = 0;

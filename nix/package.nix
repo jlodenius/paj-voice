@@ -7,15 +7,9 @@
   python3,
   voiceModels ? {},
 }: let
-  speech = import ./continuous.nix {
+  speech = import ./speech.nix {
     inherit voiceModels;
-    pkgs = import (import ./lab-source.nix) {
-      system = stdenvNoCC.hostPlatform.system;
-      config = {
-        allowUnfree = false;
-        cudaSupport = false;
-      };
-    };
+    pkgs = import ./pkgs.nix {system = stdenvNoCC.hostPlatform.system;};
   };
   python = speech.python;
 in
@@ -32,14 +26,18 @@ in
         && !(lib.hasPrefix "result-" base)
         && !(lib.hasSuffix ".pyc" name);
     };
-    nativeBuildInputs = [makeWrapper];
-    nativeCheckInputs = [nodejs python3];
+    nativeBuildInputs = [makeWrapper nodejs];
+    nativeCheckInputs = [python3];
     passthru = {
       inherit python;
       models = speech.models;
     };
     dontConfigure = true;
-    dontBuild = true;
+    buildPhase = ''
+      runHook preBuild
+      node scripts/build.ts
+      runHook postBuild
+    '';
     doCheck = true;
     checkPhase = ''
       runHook preCheck
@@ -53,8 +51,9 @@ in
     '';
     installPhase = ''
       runHook preInstall
-      mkdir -p "$out/share/paj-voice" "$out/bin"
-      cp -r extensions src audio examples package.json pyproject.toml README.md LICENSE "$out/share/paj-voice/"
+      mkdir -p "$out/share/paj-voice/audio" "$out/bin"
+      cp -r extensions dist examples package.json README.md LICENSE "$out/share/paj-voice/"
+      cp -r audio/paj_voice_audio "$out/share/paj-voice/audio/"
       ln -s ${speech.models} "$out/share/paj-voice/models"
       makeWrapper ${python}/bin/python "$out/bin/paj-voice-audio" \
         --add-flags "-P -m paj_voice_audio" \

@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from paj_voice_audio.cli import main
-from paj_voice_audio.core import Playback, Turns
 from paj_voice_audio.devices import (
     Child,
     Graph,
@@ -255,36 +254,6 @@ class SinkTests(unittest.TestCase):
         child.health.side_effect = RuntimeError("child exited")
         with self.assertRaisesRegex(RuntimeError, "child exited"):
             sink.health()
-
-    def test_child_terminated_before_addressed_event(self):
-        events = []
-        sink, child, _ = self.sink()
-        sink.child = child
-        child.stop.side_effect = lambda: events.append({"type": "child_stopped"})
-        playback = Playback(
-            lambda text: (), sink, events.append, lambda error: None, start_worker=False
-        )
-        playback.active = "old"
-        turns = Turns(
-            {"maxSeconds": 5, "silenceMs": 300, "prefixIntervalMs": 500},
-            ["paj"],
-            lambda pcm: "",
-            playback,
-            events.append,
-            lambda error: None,
-            start_worker=False,
-        )
-        turns.feed(b"\0\0" * 16000, True)
-        turn = turns.current
-        turns.result(turn, "paj test", False)
-        turns.result(turn, "paj test", False)
-        self.assertEqual(
-            [event["type"] for event in events],
-            ["child_stopped", "speech_end", "addressed"],
-        )
-        turns.close()
-        playback.close()
-
 
 class CaptureTests(unittest.TestCase):
     def capture(self):

@@ -1,16 +1,27 @@
 {
   "name": "paj-voice",
   "version": "0.1.0",
+  "private": true,
   "description": "Local, eyes-free voice conversations with an existing Pi session",
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=24" },
   "keywords": ["pi-package", "voice"],
-  "files": ["extensions", "src", "audio", "pyproject.toml", "README.md", "LICENSE", "examples"],
+  "files": ["extensions", "dist", "src", "scripts/build.ts", "tsconfig.json", "audio/paj_voice_audio/*.py", "README.md", "LICENSE", "examples"],
   "scripts": {
+    "build": "node scripts/build.ts",
+    "pretest": "npm run build",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "node --test tests/*.test.js && PYTHONPATH=\"$PWD/audio\" python3 -m unittest discover -s audio/tests -v"
   },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=1.5.2", "typebox": "*" },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.4.7",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": { "optional": true },
     "typebox": { "optional": true }

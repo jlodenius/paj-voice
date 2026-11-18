@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { voiceStatus, voiceWidget } from '../src/voice-ui.js';
+import { voiceStatus, voiceWidget } from '../src/voice-ui.ts';
 
 const colors = { accent: 36, success: 32, warning: 33, error: 31, muted: 90, dim: 90 };
 const theme = {

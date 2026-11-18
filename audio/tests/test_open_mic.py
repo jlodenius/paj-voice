@@ -106,16 +106,10 @@ class OpenMicTests(unittest.TestCase):
             def __init__(self, sink, emit):
                 self.paused = self.closed = False
 
-            def play(self, pcm, kind, ident=None):
+            def play(self, pcm, ident=None):
                 if self.closed:
                     raise AssertionError("Playback after close")
                 played.append(ident)
-
-            def pause(self):
-                self.paused = True
-
-            def discard(self):
-                pass
 
             def cancel(self):
                 self.paused = True
@@ -124,7 +118,7 @@ class OpenMicTests(unittest.TestCase):
                 self.closed = True
 
         for name, replacement in (("validate", lambda value: config), ("Graph", lambda: graph),
-                                  ("SpeechInference", load), ("LabCapture", Capture),
+                                  ("SpeechInference", load), ("Capture", Capture),
                                   ("PipeSink", Sink), ("Speaker", Speaker)):
             stack.enter_context(patch.object(open_mic, name, replacement))
         stack.enter_context(patch.dict(sys.modules, {"pysilero_vad":

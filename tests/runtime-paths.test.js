@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { runtimePaths } from '../src/runtime-paths.js';
-import { validateConfig } from '../src/config.js';
+import { runtimePaths } from '../src/runtime-paths.ts';
+import { validateConfig } from '../src/config.ts';
 
 const valid = () => ({});
 
 test('the installed package owns its executable and cache uses XDG defaults', () => {
   const paths = runtimePaths({}, '/home/test');
   assert.equal(paths.executable, fileURLToPath(new URL('../../../bin/paj-voice-audio',
-    new URL('../src/runtime-paths.js', import.meta.url))));
+    new URL('../src/runtime-paths.ts', import.meta.url))));
   assert.equal(paths.cacheDir, '/home/test/.cache/paj-voice');
   assert.equal(runtimePaths({ XDG_CACHE_HOME: '/custom/cache' }, '/home/test').cacheDir,
     '/custom/cache/paj-voice');

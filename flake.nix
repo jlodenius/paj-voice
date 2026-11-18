@@ -1,7 +1,26 @@
 {
   description = "Local eyes-free voice conversations with Pi";
 
-  outputs = {self}: {
+  outputs = {self}: let
+    forAllSystems = function:
+      builtins.listToAttrs (map (system: {
+        name = system;
+        value = function system (import ./nix/pkgs.nix {inherit system;});
+      }) ["x86_64-linux" "aarch64-linux"]);
+  in {
+    packages = forAllSystems (_: pkgs: {
+      default = pkgs.callPackage ./nix/package.nix {};
+    });
+    checks = forAllSystems (system: _: {default = self.packages.${system}.default;});
+    devShells = forAllSystems (_: pkgs: {
+      default = pkgs.mkShell {
+        packages = [pkgs.nodejs pkgs.python3];
+        PYTHONDONTWRITEBYTECODE = "1";
+        shellHook = ''
+          export npm_config_cache="$PWD/.cache/npm"
+        '';
+      };
+    });
     homeManagerModules.default = {
       config,
       lib,

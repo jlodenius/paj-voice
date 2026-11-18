@@ -24,8 +24,7 @@ async function fixture(t, fakeAudio = true) {
   writeFileSync(join(extensions, 'inspect.ts'),
     `export { default } from ${JSON.stringify(fixturePath('inspect'))};\n`);
   if (fakeAudio) {
-    const name = fakeAudio === 'trial' ? 'agent-trial' : 'voice';
-    const path = fakeAudio === 'host-loader' ? process.env.PAJ_VOICE_HOST_LOADER : fixturePath(name);
+    const path = fakeAudio === 'host-loader' ? process.env.PAJ_VOICE_HOST_LOADER : fixturePath('voice');
     writeFileSync(join(extensions, 'voice.ts'),
       `export { default } from ${JSON.stringify(path)};\n`);
   } else {
@@ -64,11 +63,6 @@ async function fixture(t, fakeAudio = true) {
       responseMode = 'text';
       delta = { role: 'assistant', tool_calls: [{ index: 0, id: 'normal-permissions', type: 'function',
         function: { name: 'bash', arguments: JSON.stringify({ command: 'printf v1-tool-allowed' }) } }] };
-      finish = 'tool_calls';
-    } else if (responseMode === 'canary') {
-      responseMode = 'text';
-      delta = { role: 'assistant', tool_calls: [{ index: 0, id: 'forbidden-canary', type: 'function',
-        function: { name: 'voice_trial_canary', arguments: '{}' } }] };
       finish = 'tool_calls';
     }
     if (responseMode === 'speak') {
@@ -180,7 +174,7 @@ async function fixture(t, fakeAudio = true) {
   const inspect = async () => JSON.parse((await command('/voice-test-inspect')).at(-1).message);
   return { request, command, prompt, settled, inspect, requests, events,
     speakNext: () => { responseMode = 'speak'; },
-    shortNext: () => { responseMode = 'short'; }, canaryNext: () => { responseMode = 'canary'; },
+    shortNext: () => { responseMode = 'short'; },
     ordinaryToolNext: () => { responseMode = 'ordinary-tool'; },
     holdNext() {
       let release, started;
@@ -191,40 +185,18 @@ async function fixture(t, fakeAudio = true) {
     } };
 }
 
-test('real Pi voice trial speaks final text and vetoes an adversarially re-enabled tool', realPi, async t => {
-  const f = await fixture(t, 'trial');
-  await f.command('/trial-test-prepare');
-  assert.deepEqual((await f.inspect()).active, []);
-  f.shortNext();
-  let done = f.settled();
-  await f.command('/trial-test-utterance How many seconds are in a minute?');
-  await done;
-  let snapshot = await f.inspect();
-  assert.equal(snapshot.journal.find(frame => frame.type === 'answer')?.text,
-    'There are sixty seconds in one minute.');
-  assert.match(JSON.stringify(f.requests[0].payload.messages), /ALL model tool calls are blocked/);
-  f.canaryNext();
-  done = f.settled();
-  await f.command('/trial-test-utterance Try to execute the forbidden test tool.');
-  await done;
-  snapshot = await f.inspect();
-  assert.ok(snapshot.journal.some(frame => frame.type === 'blocked' && frame.tool === 'voice_trial_canary'));
-  assert.ok(!snapshot.journal.some(frame => frame.type === 'CANARY_EXECUTED'));
-  await f.command('/trial-test-release');
-  assert.ok((await f.inspect()).active.includes('bash'));
-});
-
-test('real Pi preserves two additions during provider processing and suppresses the old answer', realPi, async t => {
-  const f = await fixture(t, 'trial');
-  await f.command('/trial-test-prepare');
+test('real Pi retains additions during processing and suppresses stale audio', realPi, async t => {
+  const f = await fixture(t);
+  await f.command('/paj-voice on');
+  await f.command('/voice-test-ready');
   const held = f.holdNext();
   f.shortNext();
   const done = f.settled();
   try {
-    await f.command('/trial-test-utterance First question.');
+    await f.command('/voice-test-utterance First question.');
     await held.ready;
-    await f.command('/trial-test-utterance An addition while processing.');
-    await f.command('/trial-test-utterance A second correction.');
+    await f.command('/voice-test-utterance An addition while processing.');
+    await f.command('/voice-test-utterance A second correction.');
   } finally { held.release(); }
   await done;
   const snapshot = await f.inspect();
@@ -232,9 +204,9 @@ test('real Pi preserves two additions during provider processing and suppresses 
   assert.match(context, /First question/);
   assert.match(context, /An addition while processing/);
   assert.match(context, /A second correction/);
-  assert.ok(snapshot.journal.some(frame => frame.type === 'stale_answer' && frame.generation === 1));
-  assert.deepEqual(snapshot.journal.filter(frame => frame.type === 'answer').map(frame => frame.generation), [3]);
-  await f.command('/trial-test-release');
+  assert.ok(!snapshot.journal.some(frame => frame.type === 'speak' &&
+    frame.text === 'There are sixty seconds in one minute.'));
+  await f.command('/paj-voice off');
 });
 
 test('production open mic speaks a short answer and preserves normal Pi tool execution', realPi, async t => {

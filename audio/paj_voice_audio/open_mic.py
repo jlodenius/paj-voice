@@ -9,7 +9,7 @@ import threading
 import time
 
 from .input_ready import InputReady
-from .lab_audio import LabCapture, Segments, Speaker
+from .audio import Capture, Segments, Speaker
 from .devices import Graph, PipeSink
 from .speech import SpeechInference
 
@@ -206,7 +206,7 @@ class Runtime:
                                          silence=config["turn"]["silenceMs"] / 1000,
                                          maximum=config["turn"]["maxSeconds"])
                 self.gate = InputReady(HealthyInput(self.segments))
-                self.capture = LabCapture(graph.paths["pw-record"], source, self.vad_factory,
+                self.capture = Capture(graph.paths["pw-record"], source, self.vad_factory,
                                           config["turn"]["speechThreshold"], self.gate, self.fail)
                 self.stage = "capture-start"
                 self.capture.start()
@@ -238,7 +238,7 @@ class Runtime:
                         self.ready = True
                         self.stage = "listening"
                         self.emit({"type": "ready", "mode": "open-mic", "warmup": summary})
-                        self.speaker.play(self.cue, "demo", ident="ready")
+                        self.speaker.play(self.cue, ident="ready")
                         return
             self.emit({"type": "diagnostic", "stage": "warmup", "details": gate.snapshot()})
             raise RuntimeError("Input did not settle within five seconds")
@@ -257,8 +257,7 @@ class Runtime:
             speaker = self.speaker
             if self.current_playback:
                 self.current_playback[1].set()
-        speaker.pause()
-        speaker.discard()
+        speaker.cancel()
 
     def _segment(self, event, epoch):
         try:
@@ -333,7 +332,7 @@ class Runtime:
                     if self._speech_current(job):
                         done = threading.Event()
                         self.current_playback = (job["id"], done)
-                        self.speaker.play(pcm, "demo", ident=job["id"])
+                        self.speaker.play(pcm, ident=job["id"])
                         played = True
                         self.emit({"type": "speech_start", "id": job["id"]})
                 self.busy["synthesis"] = None
@@ -372,7 +371,6 @@ class Runtime:
                 job.clear()
         if speaker:
             speaker.cancel()
-            speaker.discard()
 
     def _mute(self):
         with self.lock:

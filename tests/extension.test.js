@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { registerVoice } from '../src/extension.js';
+import { registerVoice } from '../src/extension.ts';
 
 const Type = Object.fromEntries(['Object', 'String', 'Optional', 'Integer'].map(name => [name, value => ({ type: name, value })]));
 export function fixture(overrides = {}) {

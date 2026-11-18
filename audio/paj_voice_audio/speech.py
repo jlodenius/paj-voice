@@ -40,11 +40,10 @@ class SpeechInference:
         text = "".join(segment.text for segment in segments).strip()
         return text, (time.monotonic() - started) * 1000
 
-    def synthesize(self, text, deterministic=False):
+    def synthesize(self, text):
         from piper import SynthesisConfig
 
-        config = (SynthesisConfig(noise_scale=0, noise_w_scale=0) if deterministic
-                  else SynthesisConfig(volume=self.volume, length_scale=self.length_scale))
+        config = SynthesisConfig(volume=self.volume, length_scale=self.length_scale)
         result = bytearray()
         for chunk in self.voice.synthesize(text, syn_config=config):
             if (chunk.sample_channels != 1 or chunk.sample_width != 2

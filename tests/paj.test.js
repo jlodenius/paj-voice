@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { createAdmission } from '../src/admission.js';
+import { createAdmission } from '../src/admission.ts';
 
 const source = process.env.PAJ_VOICE_PAJ_EXTENSION
   ? pathToFileURL(resolve(process.env.PAJ_VOICE_PAJ_EXTENSION, 'external-session.ts'))
-  : new URL('../../paj/extensions/paj/external-session.ts', import.meta.url);
+  : undefined;
 
 test('actual Paj reservation interface excludes editor/other addons and releases only voice ownership',
-  { skip: !existsSync(source) }, async () => {
+  { skip: !source || !existsSync(source) }, async () => {
     const { createExternalSession } = await import(source.href);
     let editorBusy = false, idle = true;
     const external = createExternalSession(() => editorBusy, () => {});
