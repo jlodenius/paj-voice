@@ -40,6 +40,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   let deliveryUncertain = false;
   let idleTimer: Timer | null = null;
   let idleReminders = 0;
+  let idleDismissed = false;
+  let idleAcknowledgementEpoch: number | null = null;
   let idleAnnouncement = false;
   let progressTimer: Timer | null = null;
   let statusAnnouncement = false;
@@ -68,13 +70,13 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
   };
   const activity = () => { clearIdle(); clearProgress(); idleReminders = 0; };
   const syncIdle = () => {
-    if (!feedback.idleReminders || !idle() || idleReminders >= 3) { clearIdle(); return; }
+    if (!feedback.idleReminders || idleDismissed || !idle() || idleReminders >= 3) { clearIdle(); return; }
     if (idleTimer !== null) return;
     const target = generation, turn = epoch;
     const timer = setTimer(() => {
       if (idleTimer !== timer) return;
       idleTimer = null;
-      if (!idle() || target !== generation || turn !== epoch || idleReminders >= 3) return;
+      if (idleDismissed || !idle() || target !== generation || turn !== epoch || idleReminders >= 3) return;
       // Reminder playback must not reset its own three-announcement budget.
       idleAnnouncement = true;
       try {
@@ -212,6 +214,16 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       try { return api.speak({ text, generation, epoch, key: 'route-notice' }); }
       finally { statusAnnouncement = previous; }
     },
+    acknowledgeIdle(token: VoiceToken) {
+      if (token.generation !== generation || token.epoch !== epoch) return { status: 'stale' as const };
+      if (!enabled || !ready || muted || disposed) return { status: 'unavailable' as const };
+      if (idleDismissed) return { status: 'already_acknowledged' as const };
+      idleDismissed = true;
+      idleAcknowledgementEpoch = epoch;
+      clearIdle();
+      emit();
+      return { status: 'acknowledged' as const };
+    },
     instructions() { return reporters.values().next().value?.instructions ?? null; },
     playback() { return playback.snapshot(); },
     start(id: string) {
@@ -234,6 +246,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       finalAnswerSpoken = false;
       fallbackSent = false;
       pendingUserSummary = false;
+      idleDismissed = false;
+      idleAcknowledgementEpoch = null;
       running = false;
       agentActive = false;
       activeTools.clear();
@@ -298,15 +312,19 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
       if (target === generation && (turn !== epoch || captureId)) {
         return api.speak({ text, generation: target, epoch: turn, key: 'answer' });
       }
-      if (!turnSpoken && !reporters.size && text) {
+      if (!turnSpoken && (!reporters.size || idleAcknowledgementEpoch === epoch) && text) {
         const result = api.speak({ text, generation: target, epoch: turn, key: 'answer' });
-        if (result.status === 'queued') finalAnswerSpoken = true;
+        if (result.status === 'queued') {
+          finalAnswerSpoken = true;
+          idleAcknowledgementEpoch = null;
+        }
         return result;
       }
       return { status: 'silent' };
     },
     settled(aborted = false) {
       const wasRunning = running;
+      idleAcknowledgementEpoch = null;
       pendingUserSummary = false;
       running = false;
       agentActive = false;
@@ -323,10 +341,20 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
     expectSummary({ fromUser = false } = {}) {
       summaryExpected = true;
       pendingUserSummary ||= fromUser;
+      if (fromUser) {
+        idleDismissed = false;
+        idleAcknowledgementEpoch = null;
+      }
     },
     newRun({ summaryExpected: expected = true } = {}) {
       deliveryUncertain = false;
-      if (!running) summaryExpected = expected || pendingUserSummary;
+      if (!running) {
+        summaryExpected = expected || pendingUserSummary;
+        if (summaryExpected) {
+          idleDismissed = false;
+          idleAcknowledgementEpoch = null;
+        }
+      }
       else if (expected) summaryExpected = true;
       pendingUserSummary = false;
       if (!running) activity();
@@ -399,6 +427,8 @@ export function createVoiceController({ submit, send, changed = () => {}, notify
           record.status = 'submitted';
           running = true;
           summaryExpected = true;
+          idleDismissed = false;
+          idleAcknowledgementEpoch = null;
           inform(result?.steering ? 'Voice addition submitted as steering.' : 'Voice request submitted.', 'info');
           api.speak({ text: result?.steering ? feedback.steeringReceipt : feedback.receipt,
             generation, epoch, key: 'receipt' });

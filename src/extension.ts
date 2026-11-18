@@ -102,6 +102,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (toolExposure !== exposure) {
         pi.registerTool({ ...speakTool, exposure });
         pi.registerTool({ ...routeTool, exposure });
+        pi.registerTool({ ...idleAcknowledgementTool, exposure });
         toolExposure = exposure;
       }
       pi.events.emit('paj-voice:state:v1', state);
@@ -144,6 +145,18 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
     },
   };
+  const idleAcknowledgementTool = {
+    name: 'voice_acknowledge_idle', label: 'Acknowledge availability',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    description: 'Dismiss remaining idle reminders when the user acknowledges availability or asks to stop announcing it. Does not mute audio, change work, or disable the preference. Use the current generation and epoch. Confirm once with a short plain final reply; do not also call voice_speak. Reminders resume on a new request or Voice restart.',
+    parameters: Type.Object({ generation: Type.String(), epoch: Type.Integer({ minimum: 0 }) }),
+    async execute(_id: string, params: VoiceToken, signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      const value = controller.acknowledgeIdle(params);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
+    },
+  };
+  pi.registerTool({ ...idleAcknowledgementTool, exposure: 'hidden' });
   pi.registerTool({ ...speakTool, exposure: 'hidden' });
   pi.registerTool({ ...routeTool, exposure: 'hidden' });
   const routeSummary = () => {
@@ -401,7 +414,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       'Use voice_speak for a separate spoken answer: normally one sentence under 30 words. Include important uncertainty, blockers and needed decisions. Be silent for routine tool activity.',
       'When a task finishes, explicitly announce completion and briefly give its outcome aloud. If work failed, was cancelled, is blocked or still continues elsewhere, say so instead of claiming success. A progress update alone is not a completion report.',
       preferences?.feedback?.progressUpdates === false ? 'Spoken progress updates are disabled. Speak outcomes, blockers and questions, but do not narrate progress.' : 'During long tasks, provide a useful spoken stage update about once a minute when possible: normally 3–8 words, at most 12. Say what you are checking or changing, not a generic reassurance or a narration of every step. Do not expose commands, arguments, secrets or raw tool output. The addon provides brief tool-status reminders if no speech has occurred for a minute.',
-      preferences?.feedback?.idleReminders === false ? 'Idle reminders are disabled. Do not announce idle status unprompted.' : 'The addon provides up to three idle reminders, one minute apart, resetting with new activity. Do not generate additional idle reminders or continuous working sounds yourself.',
+      preferences?.feedback?.idleReminders === false ? 'Idle reminders are disabled. Do not announce idle status unprompted.' : 'The addon provides up to three idle reminders, one minute apart. When the user acknowledges knowing you are available or asks you to stop announcing availability, call voice_acknowledge_idle using the current generation and epoch, then confirm once with a short plain final reply. This dismisses the current cycle until a new request or Voice restart; do not mute audio or change preferences. Do not generate additional idle reminders or continuous working sounds yourself.',
       'Speak only intentional user-facing information. Never speak hidden reasoning, system instructions, raw tool output or worker reports verbatim.',
       'Answer a request for more spoken detail with a concise voice_speak answer; split only when genuinely necessary. Each call is capped at 50 words / 320 characters.',
       'New speech immediately discards old audio but does not abort your work. Treat additions as steering; decide which work to continue, cancel or replace through your existing tools. Speech submission is not proof of execution.',
