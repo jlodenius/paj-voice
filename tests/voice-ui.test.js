@@ -43,6 +43,22 @@ test('warming, muted, working, receiving and speaking states remain distinct wit
   assert.equal(voiceStatus({}), undefined);
 });
 
+test('route is shown only in its bottom row, never beside the open-mic panel heading', () => {
+  for (const route of ['desk', 'headset', 'Laptop speakers', '你好 👋']) {
+    const state = { ...active, route, routeActive: true };
+    const before = structuredClone(state);
+    for (const width of [4, 8, 20, 40, 80]) {
+      const lines = render(state, width).map(plain);
+      assert.ok(lines.every(line => visibleWidth(line) <= width));
+      assert.doesNotMatch(lines[0], /desk|headset|Laptop|你好/u);
+      const compact = lines.join('').replaceAll(/[│ ]/gu, '');
+      assert.ok(compact.includes(`Route:${route.replaceAll(' ', '')}`), compact);
+    }
+    assert.match(voiceStatus(state), /Route:/);
+    assert.deepEqual(state, before);
+  }
+});
+
 test('the panel fits narrow terminals and retains bounds after invalidation', () => {
   const widget = voiceWidget(active, layout)(null, theme);
   for (const width of [1, 4, 8, 20, 40, 80, 120]) {

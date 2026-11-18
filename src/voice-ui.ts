@@ -12,6 +12,7 @@ type Tone = 'muted' | 'warning' | 'dim';
 interface Theme {
   fg?(color: Tone, text: string): string;
   bg?(color: 'customMessageBg', text: string): string;
+  getBgAnsi?(color: 'userMessageBg'): string;
   bold?(text: string): string;
 }
 
@@ -40,10 +41,14 @@ const routeLabel = (state: VoiceDisplayState) => state.route
   : undefined;
 
 export function voiceRequestMarkdown(markdown: string, theme?: Theme): string {
-  const envelope = /^\[Voice request [\w-]{1,128}:[\w-]{1,128}\]\n/u.exec(markdown);
+  const envelope = /^\[Voice request [\w-]{1,128}:[\w-]{1,128}\](?:\r\n|\n|\r)/u.exec(markdown);
   if (!envelope) return markdown;
-  const label = fg(theme, 'warning', bold(theme, 'Voice request'));
-  return `${theme?.bg?.('customMessageBg', label) ?? label}\n\n${markdown.slice(envelope[0].length)}`;
+  const label = [...'Voice request'].map(character => {
+    const text = fg(theme, 'warning', bold(theme, character));
+    // Close each glyph before SDK wrapping adds padding; restore the surrounding user bubble.
+    return theme?.bg ? theme.bg('customMessageBg', text) + (theme.getBgAnsi?.('userMessageBg') ?? '') : text;
+  }).join('');
+  return `${label}\n\n${markdown.slice(envelope[0].length)}`;
 }
 
 export function voiceStatus(state: VoiceDisplayState, theme?: Theme) {
@@ -69,7 +74,7 @@ export function voiceWidget(state: VoiceDisplayState, layout: VoiceLayout) {
         return background(fg(theme, 'warning', '│ ') +
           fg(theme, color, strong ? bold(theme, content) : content) + fg(theme, 'warning', ' │'));
       };
-      const heading = fit(` VOICE MODE | ${view.badge}${state.route ? ` | ${state.route}` : ''} `, width - 2);
+      const heading = fit(` VOICE MODE | ${view.badge} `, width - 2);
       return [
         background(fg(theme, 'warning', '╭') + fg(theme, view.tone, bold(theme, heading)) +
           fg(theme, 'warning', '─'.repeat(width - 2 - visibleWidth(heading)) + '╮')),

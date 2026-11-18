@@ -27,7 +27,8 @@ test('route visuals distinguish saved selection from ready audio through startup
   assert.match(panel(f), /Selected: desk/);
   assert.doesNotMatch(panel(f), /Route: desk/);
   ready(f);
-  assert.match(panel(f), /VOICE MODE \| OPEN MIC \| desk/);
+  assert.match(panel(f), /VOICE MODE \| OPEN MIC/);
+  assert.doesNotMatch(panel(f).split('\n')[0], /desk/);
   assert.match(panel(f), /Route: desk/);
   assert.match(status(f), /Route: desk/);
   await f.command('mute');

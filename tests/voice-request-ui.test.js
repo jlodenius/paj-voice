@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initTheme, UserMessageComponent } from '@earendil-works/pi-coding-agent';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { getCapabilities, setCapabilityOverrides, visibleWidth } from '@earendil-works/pi-tui';
 import { voiceRequestMarkdown } from '../src/voice-ui.ts';
 import { fixture } from './fixtures/extension.js';
 
+const sdkTheme = await import(new URL('./modes/interactive/theme/theme.js',
+  import.meta.resolve('@earendil-works/pi-coding-agent')));
 initTheme('dark', false);
 const theme = {
   fg(token, text) {
@@ -15,6 +17,7 @@ const theme = {
     assert.equal(token, 'customMessageBg');
     return `\x1b[48;2;51;0;102m${text}\x1b[49m`;
   },
+  getBgAnsi: token => sdkTheme.theme.getBgAnsi(token),
   bold: text => `\x1b[1m${text}\x1b[22m`,
 };
 
@@ -36,6 +39,11 @@ function terminalCells(lines) {
             if (code === 38) fg = color;
             else bg = color;
             i += 4;
+          } else if ((code === 38 || code === 48) && codes[i + 1] === 5) {
+            const color = `index:${codes[i + 2]}`;
+            if (code === 38) fg = color;
+            else bg = color;
+            i += 2;
           }
         }
       } else if (match[2]) cells.push({ text: match[2], fg, bg });
@@ -69,6 +77,62 @@ test('actual Pi user terminal render keeps warning/customMessageBg on the short 
   }
   assert.equal(plain(render(source, 80, undefined, true)), plain(render(source, 80)));
   assert.match(source, /generation-long:/);
+});
+
+test('SDK dark/light bubbles keep label-only purple, uniform padding and adjacent message backgrounds', () => {
+  const originalTrueColor = getCapabilities().trueColor;
+  try {
+    for (const [name, trueColor] of ['dark', 'light'].flatMap(name =>
+      [true, false].map(trueColor => [name, trueColor]))) {
+      setCapabilityOverrides({ trueColor });
+      initTheme(name, false);
+      const current = sdkTheme.theme;
+      const userBg = terminalCells([current.bg('userMessageBg', 'x')])[0].bg;
+      const labelBg = terminalCells([current.bg('customMessageBg', 'x')])[0].bg;
+      const warning = terminalCells([current.fg('warning', 'x')])[0].fg;
+      for (const ending of ['\n', '\r\n', '\r']) {
+        const body = `你好 café 👋 é${ending}\x1b[0mBody`;
+        const source = `[Voice request generation:request]${ending}${body}`;
+        assert.ok(voiceRequestMarkdown(source, current).endsWith(body));
+        const component = new UserMessageComponent(source, undefined, 1,
+          [markdown => voiceRequestMarkdown(markdown, current)]);
+        for (const width of [5, 6, 8, 12, 16, 20, 40, 80]) {
+          component.invalidate();
+          const lines = component.render(width);
+          assert.ok(lines.every(line => visibleWidth(line) === width), `${name}, ${width}`);
+          const label = [];
+          for (const line of lines) {
+            const cells = terminalCells([line]);
+            if (!cells.some(cell => cell.fg === warning)) continue;
+            for (const cell of cells.filter(cell => cell.text !== '\n')) {
+              if (cell.fg === warning) {
+                label.push(cell.text);
+                assert.equal(cell.bg, labelBg, `${name}, ${width}, ${JSON.stringify(cell)}`);
+              } else {
+                assert.equal(cell.text, ' ');
+                assert.equal(cell.bg, userBg, `${name}, ${width}, label padding`);
+              }
+            }
+          }
+          assert.equal(label.join('').replaceAll(' ', ''), 'Voicerequest');
+          const ordinaryBody = new UserMessageComponent(body).render(width);
+          assert.equal(plain(lines).replaceAll(/\s/gu, '').slice('Voicerequest'.length),
+            plain(ordinaryBody).replaceAll(/\s/gu, ''), `${name}, ${width}, body matches SDK baseline`);
+          assert.equal(source, `[Voice request generation:request]${ending}${body}`);
+          const adjacent = new UserMessageComponent('Ordinary 你好 👋').render(width);
+          const before = terminalCells(adjacent);
+          const after = terminalCells([...lines, ...adjacent]).slice(-before.length);
+          assert.deepEqual(after, before, `${name}, ${width}, adjacent message`);
+          const blank = terminalCells([lines.at(-1)]).filter(cell => cell.text !== '\n');
+          assert.ok(blank.every(cell => cell.bg === userBg), `${name}, ${width}, bottom padding`);
+          assert.doesNotMatch(plain(lines), /generation:request|\r/u);
+        }
+      }
+    }
+  } finally {
+    setCapabilityOverrides({ trueColor: originalTrueColor });
+    initTheme('dark', false);
+  }
 });
 
 test('only the exact leading voice envelope is hidden; body and ordinary messages keep normal rendering', () => {
