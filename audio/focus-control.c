@@ -3,6 +3,7 @@
 #include <spa/param/props.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/iter.h>
+#include <spa/utils/result.h>
 #include <sys/prctl.h>
 #include <signal.h>
 #include <unistd.h>
@@ -30,7 +31,7 @@ struct state {
     float expected[CHANNELS], desired[CHANNELS];
     uint32_t channels;
     bool mute, restore, all, cookie_ok, identity_ok, params_ok, success, failed;
-    int phase, pending, param_count, param_seq;
+    int phase, pending, param_count, param_seq, request_seq;
 };
 static void fail(struct state *s) {
     s->failed = true;
@@ -275,7 +276,10 @@ static void sync_next(struct state *s) {
 }
 static void enumerate(struct state *s, int phase) {
     s->phase = phase; s->params_ok = false; s->param_count = 0;
-    if (pw_node_enum_params(s->node, ++s->param_seq, SPA_PARAM_Props, 0, 2, NULL) < 0) { fail(s); return; }
+    int seq = ++s->request_seq;
+    int result = pw_node_enum_params(s->node, seq, SPA_PARAM_Props, 0, 2, NULL);
+    if (result < 0) { fail(s); return; }
+    s->param_seq = SPA_RESULT_IS_ASYNC(result) ? result : seq;
     sync_next(s);
 }
 static bool current_identity(const struct state *s) {

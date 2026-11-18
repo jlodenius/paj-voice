@@ -3,6 +3,7 @@
 #include <spa/param/props.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/iter.h>
+#include <spa/utils/result.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <poll.h>
@@ -71,7 +72,7 @@ static int fake_enum(struct pw_node *node, int seq, uint32_t id, uint32_t start,
                      uint32_t num, const struct spa_pod *filter) {
     CHECK(node == (struct pw_node *)&node_handle);
     CHECK(seq >= 0 && id == SPA_PARAM_Props && start == 0 && num == 2 && filter == NULL);
-    fake.enum_seq = seq; fake.enums++;
+    fake.enum_seq = SPA_RESULT_IS_ASYNC(fake.enum_result) ? fake.enum_result : seq; fake.enums++;
     return fake.enum_result;
 }
 static int fake_set(struct pw_node *node, uint32_t id, uint32_t flags, const struct spa_pod *pod) {
@@ -735,8 +736,29 @@ static void correlated_parameter_rounds(void) {
     CHECK(s.failed && !s.success && fake.writes == 0);
     puts("native callbacks: only fresh current-round Props can authorize a write or its readback acknowledgement");
 }
+static void asynchronous_parameter_rounds(void) {
+    struct state s;
+    fixture(&s); done(&s); bound_info(&s, 32, &props);
+    fake.enum_result = SPA_RESULT_RETURN_ASYNC(7);
+    done(&s);
+    CHECK(s.phase == 2 && fake.enums == 1 && fake.writes == 0);
+    param_request(&s, 1, SPA_PARAM_Props, SPA_TYPE_OBJECT_Props, s.expected, s.mute);
+    CHECK(!s.params_ok && s.param_count == 0 && !s.failed);
+    param(&s, s.expected, s.mute);
+    CHECK(s.params_ok && !s.failed);
+    const int initial_seq = fake.enum_seq;
+    done(&s); CHECK(s.phase == 3 && fake.writes == 1);
+    fake.enum_result = SPA_RESULT_RETURN_ASYNC(11);
+    done(&s); CHECK(s.phase == 4 && !s.params_ok);
+    param_request(&s, initial_seq, SPA_PARAM_Props, SPA_TYPE_OBJECT_Props, s.desired, s.mute);
+    CHECK(!s.params_ok && s.param_count == 0);
+    param(&s, s.desired, s.mute); done(&s);
+    CHECK(s.success && !s.failed && fake.writes == 1);
+    puts("native callbacks: remote asynchronous enumeration result sequences fence both parameter rounds");
+}
 int main(void) {
     alarm(15);
+    asynchronous_parameter_rounds();
     correlated_parameter_rounds();
     registry_association_authority();
     metadata_labels();
