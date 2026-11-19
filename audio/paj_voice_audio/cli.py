@@ -93,6 +93,10 @@ class Protocol:
     def __init__(self, output):
         self.output = output
         self.queue = queue.Queue(maxsize=128)
+        # Observations must not consume a control slot needed to complete recorder teardown.
+        self.diagnostics = queue.Queue(maxsize=32)
+        self.condition = threading.Condition()
+        self.closing = False
         self.failed = threading.Event()
         self.thread = threading.Thread(
             target=self._write, daemon=True, name="voice-protocol"
@@ -100,32 +104,58 @@ class Protocol:
         self.thread.start()
 
     def emit(self, frame):
+        diagnostic = isinstance(frame, dict) and frame.get('type') == 'availability_diagnostic'
         if self.failed.is_set():
+            if diagnostic:
+                return
             raise RuntimeError("Parent protocol output closed")
-        line = json.dumps(frame, ensure_ascii=True, separators=(",", ":")) + "\n"
-        if len(line) > 65536:
-            raise RuntimeError("Parent protocol event exceeds line limit")
         try:
-            self.queue.put_nowait(line)
-        except queue.Full:
-            raise RuntimeError("Parent protocol output queue full") from None
+            line = json.dumps(frame, ensure_ascii=True, separators=(",", ":")) + "\n"
+        except Exception:
+            if diagnostic:
+                return
+            raise
+        if len(line) > 65536:
+            if diagnostic:
+                return
+            raise RuntimeError("Parent protocol event exceeds line limit")
+        with self.condition:
+            if diagnostic and (self.closing or self.failed.is_set()):
+                return
+            try:
+                (self.diagnostics if diagnostic else self.queue).put_nowait(line)
+            except queue.Full:
+                if diagnostic:
+                    return
+                raise RuntimeError("Parent protocol output queue full") from None
+            self.condition.notify()
 
     def _write(self):
         try:
             while True:
-                frame = self.queue.get()
-                if frame is None:
-                    return
+                with self.condition:
+                    self.condition.wait_for(lambda: self.closing or not self.queue.empty()
+                                            or not self.diagnostics.empty())
+                    try:
+                        frame = self.queue.get_nowait()
+                    except queue.Empty:
+                        if self.closing:
+                            return
+                        frame = self.diagnostics.get_nowait()
                 self.output.write(frame)
                 self.output.flush()
         except (OSError, ValueError):
             self.failed.set()
 
     def close(self):
-        try:
-            self.queue.put(None, timeout=0.2)
-        except queue.Full:
-            pass
+        with self.condition:
+            self.closing = True
+            while True:
+                try:
+                    self.diagnostics.get_nowait()
+                except queue.Empty:
+                    break
+            self.condition.notify_all()
         self.thread.join(timeout=1)
 
 

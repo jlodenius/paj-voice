@@ -38,6 +38,7 @@ from the last 15 minutes. Status includes a summary with reason counts, recordin
 These diagnostics stay only in memory, survive Voice off, and clear on session boundaries/shutdown.
 Reading them performs no device query, process start, IPC, configuration access or recovery action.
 They are separate from background audio focus diagnostics and do not control audio behavior.
+Observations are best effort and may be dropped under transport pressure; absence is not health proof.
 
 The closed reason codes distinguish graph/endpoint resolution failures, capture health failures and
 successful input/output recovery. `inputPresent` and `outputPresent` mean the same selected endpoint
