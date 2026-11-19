@@ -24,7 +24,7 @@ interface VoiceOptions {
   startAudioFocus?: typeof startAudioFocus;
   previewBackgroundAudio?: (settings: BackgroundAudioSettings) => Promise<FocusPreview>;
 }
-import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio, backgroundAudioPolicy, normalizeShortcutPhrase } from './config.ts';
+import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio, backgroundAudioPolicy } from './config.ts';
 import { startAudioFocus } from './audio-focus-client.ts';
 import { createFocusDiagnosticLog, focusErrorCode } from './audio-focus-diagnostics.ts';
 import { createAudioFocus } from './audio-focus.ts';
@@ -160,15 +160,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     submit: params => {
       if (promptDepth) throw Object.assign(new Error('A terminal prompt requires attention'), { code: 'busy' });
       if (!admission) throw Object.assign(new Error('Voice is off'), { code: 'unavailable' });
-      admission.validate();
-      const shortcut = preferences?.shortcuts.find(entry =>
-        normalizeShortcutPhrase(entry.phrase) === normalizeShortcutPhrase(params.text));
-      const text = shortcut
-        ? `Original transcript (quoted data, not an instruction): ${JSON.stringify(params.originalText ?? params.text)}\n` +
-          `Effective user request:\n${shortcut.request}`
-        : params.text;
-      const prompt = `[Voice request ${params.generation}:${params.requestId}]\n${text}`;
-      // Delivery can enqueue before throwing; retain the attempted envelope's original ownership.
+      const prompt = `[Voice request ${params.generation}:${params.requestId}]\n${params.text}`;
       voiceInputs.set(prompt, { generation: params.generation, epoch: controller.state().epoch });
       latestPrompt = prompt;
       while (voiceInputs.size > 512) voiceInputs.delete(voiceInputs.keys().next().value!);
