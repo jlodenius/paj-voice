@@ -268,6 +268,13 @@ def child_exec(parent, command):
     return 1
 
 
+class ChildStartError(RuntimeError):
+    def __init__(self, child, confirmed):
+        super().__init__('Audio child startup failed; process was stopped' if confirmed
+                         else 'Audio child startup failed; process closure unconfirmed')
+        self.child = child
+
+
 class Child:
     def __init__(self, executable, node, rate, capture):
         properties = json.dumps(
@@ -296,6 +303,12 @@ class Child:
             properties,
             "-",
         ]
+        self.closed = False
+        self.stop_complete = False
+        self.fault = None
+        self.lock = threading.RLock()
+        self.stderr_thread = None
+        self.stderr_started = False
         self.process = subprocess.Popen(
             [
                 sys.executable,
@@ -312,23 +325,26 @@ class Child:
             bufsize=0,
             start_new_session=True,
         )
-        self.closed = False
-        self.stop_complete = False
-        self.fault = None
-        self.lock = threading.RLock()
-        self.stderr_thread = threading.Thread(
-            target=self._stderr, daemon=True, name="pipewire-errors"
-        )
-        self.stderr_thread.start()
-        if not capture:
-            fd = self.process.stdin.fileno()
-            os.set_blocking(fd, False)
+        try:
+            self.stderr_thread = threading.Thread(
+                target=self._stderr, daemon=True, name="pipewire-errors"
+            )
+            self.stderr_thread.start()
+            self.stderr_started = True
+            if not capture:
+                fd = self.process.stdin.fileno()
+                os.set_blocking(fd, False)
+                try:
+                    fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, 8192)
+                except OSError:
+                    if fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ) > 65536:
+                        raise RuntimeError("PipeWire playback pipe exceeds buffer limit")
+        except Exception as error:
             try:
-                fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, 8192)
-            except OSError:
-                if fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ) > 65536:
-                    self.stop()
-                    raise RuntimeError("PipeWire playback pipe exceeds buffer limit")
+                self.stop()
+            except Exception:
+                raise ChildStartError(self, False) from error
+            raise ChildStartError(self, True) from error
 
     def _stderr(self):
         pending = b""
@@ -384,7 +400,7 @@ class Child:
                     except OSError:
                         pass
             self.stop_complete = True
-        if threading.current_thread() is not self.stderr_thread:
+        if self.stderr_started and threading.current_thread() is not self.stderr_thread:
             self.stderr_thread.join(timeout=0.2)
 
 
@@ -398,6 +414,7 @@ class PipeSink:
         self.lock = threading.RLock()
         self.serial = 0
         self.child = None
+        self.retired_children = []
         self.closed = False
         self.draining = False
 
@@ -415,9 +432,13 @@ class PipeSink:
                     if self.closed or serial != self.serial:
                         return False
                     if self.child is None:
-                        self.child = self.launch(
-                            self.executable, self.node, self.rate, False
-                        )
+                        try:
+                            self.child = self.launch(
+                                self.executable, self.node, self.rate, False
+                            )
+                        except ChildStartError as error:
+                            self.child = error.child
+                            raise
                         lead_in = self.rate * self.LEAD_IN_MS // 1000 * 2
                     child = self.child
                     child.health()
@@ -477,8 +498,21 @@ class PipeSink:
             self.serial += 1
             child, self.child = self.child, None
             self.draining = False
-        if child:
-            child.stop()
+            if child is not None:
+                self.retired_children.append(child)
+            retired = list(self.retired_children)
+        failure = None
+        for child in retired:
+            try:
+                child.stop()
+            except Exception as error:
+                failure = error
+            else:
+                with self.lock:
+                    if child in self.retired_children:
+                        self.retired_children.remove(child)
+        if failure is not None:
+            raise failure
 
     def health(self):
         with self.lock:
@@ -510,14 +544,16 @@ class PipeCapture:
         self.last_pcm = time.monotonic()
 
     def start(self):
-        self.child = self.launch(self.executable, self.node, 16000, True)
+        try:
+            self.child = self.launch(self.executable, self.node, 16000, True)
+        except ChildStartError as error:
+            self.child = error.child
+            raise
         self.last_pcm = time.monotonic()
-        self.threads = [
-            threading.Thread(target=self._read, daemon=True, name="pipewire-capture"),
-            threading.Thread(target=self._process, daemon=True, name="voice-vad"),
-        ]
-        for thread in self.threads:
+        for target, name in ((self._read, 'pipewire-capture'), (self._process, 'voice-vad')):
+            thread = threading.Thread(target=target, daemon=True, name=name)
             thread.start()
+            self.threads.append(thread)
 
     def _enqueue(self, frame):
         try:

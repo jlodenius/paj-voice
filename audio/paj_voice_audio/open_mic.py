@@ -388,9 +388,15 @@ class Runtime:
                     with self.lock:
                         was_ready = self.ready
                         self.epoch += 1
-                        resources = self.gate, self.capture, self.speaker, self.sink
-                        self.capture = self.gate = self.speaker = self.sink = None
+                        if self.capture is not None or self.gate is not None or self.segments is not None:
+                            self.retired_inputs.append((self.gate, self.capture, self.segments))
+                        resources = self.speaker, self.sink
+                        self.capture = self.gate = self.segments = self.speaker = self.sink = None
                     self._close(resources)
+                    if not self._retry_input_cleanup():
+                        self.fail(RuntimeError('Microphone closure unconfirmed; Voice stopped for privacy. Recorder cleanup will retry.'),
+                                  stage='input-start-closure')
+                        return
                     if self.closed or self.muted:
                         return
                     self._remaining(transition_deadline)
@@ -946,7 +952,7 @@ class Runtime:
                 capture.start()
             self.emit({'type': 'warming'})
         except Exception:
-            self._suspend(input_lost=True, epoch=epoch)
+            self._suspend(input_lost=True, epoch=epoch, strict_input=True)
 
     def _arm_recovered_input(self, source):
         with self.lock:

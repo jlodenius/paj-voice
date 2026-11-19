@@ -221,6 +221,20 @@ class ChildTests(unittest.TestCase):
         child.stderr_thread.join(timeout=1)
         return child, popen
 
+    def test_partial_child_constructor_failure_reaps_process_without_joining_unstarted_thread(self):
+        process = self.process()
+        thread = SimpleNamespace(start=Mock(side_effect=RuntimeError('Synthetic thread creation failure')),
+                                 join=Mock(side_effect=RuntimeError('Cannot join unstarted thread')))
+        with patch('paj_voice_audio.devices.subprocess.Popen', return_value=process), \
+                patch('paj_voice_audio.devices.threading.Thread', return_value=thread):
+            with self.assertRaises(RuntimeError) as raised:
+                Child('/synthetic/recorder', SOURCE, 16000, True)
+        self.assertTrue(process.terminate.called or process.kill.called)
+        self.assertIsNotNone(process.poll())
+        thread.join.assert_not_called()
+        self.assertIs(raised.exception.child.process, process)
+        self.assertTrue(raised.exception.child.stop_complete)
+
     def test_voice_identity_is_registered_before_capture_or_playback_starts(self):
         for capture in (False, True):
             with self.subTest(capture=capture):
@@ -338,6 +352,32 @@ class SinkTests(unittest.TestCase):
         child.stop.assert_called_once()
         self.assertIsNone(sink.child)
 
+    def test_sink_retains_partial_child_startup_failure_until_abort_cleanup_succeeds(self):
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = OSError('Synthetic wait failure')
+        process.kill.side_effect = OSError('Synthetic kill failure')
+        thread = SimpleNamespace(start=Mock(side_effect=RuntimeError('Synthetic stderr start failure')),
+                                 join=Mock(side_effect=RuntimeError('Unstarted thread')))
+        sink = PipeSink('/synthetic/player', SINK, 22050, launch=Child)
+        with patch('paj_voice_audio.devices.subprocess.Popen', return_value=process), \
+                patch('paj_voice_audio.devices.threading.Thread', return_value=thread):
+            with self.assertRaises(RuntimeError):
+                sink.write(b'\0\0', lambda: True)
+        self.assertIs(sink.child.process, process)
+        with self.assertRaises(OSError):
+            sink.close()
+        self.assertTrue(any(child.process is process for child in sink.retired_children))
+        def reap(timeout):
+            process.poll.return_value = -9
+            return -9
+        process.wait.side_effect = reap
+        process.kill.side_effect = None
+        sink.close()
+        self.assertFalse(sink.retired_children)
+        self.assertIsNotNone(process.poll())
+        thread.join.assert_not_called()
+
     def test_abort_before_launch_and_during_backpressure_discards_stale_pcm(self):
         sink, child, launch = self.sink()
 
@@ -386,6 +426,51 @@ class CaptureTests(unittest.TestCase):
         )
         self.addCleanup(capture.close)
         return capture, child, launch, turns, errors
+
+    def test_capture_retains_partial_constructor_child_when_initial_and_retried_cleanup_fail(self):
+        process = Mock()
+        process.poll.return_value = None
+        process.stderr = io.BytesIO()
+        process.wait.side_effect = subprocess.TimeoutExpired('synthetic-recorder', 0.3)
+        process.kill.side_effect = OSError('Synthetic kill failure')
+        thread = SimpleNamespace(start=Mock(side_effect=RuntimeError('Synthetic thread start failure')),
+                                 join=Mock(side_effect=RuntimeError('Unstarted thread')))
+        capture = PipeCapture('/synthetic/recorder', SOURCE, Vad, 0.01, Mock(), Mock(), launch=Child)
+        with patch('paj_voice_audio.devices.subprocess.Popen', return_value=process), \
+                patch('paj_voice_audio.devices.threading.Thread', return_value=thread):
+            with self.assertRaises(RuntimeError):
+                capture.start()
+        self.assertIsNotNone(capture.child)
+        self.assertIs(capture.child.process, process)
+        self.assertIsNone(process.poll())
+        with self.assertRaises(OSError):
+            capture.close()
+        self.assertFalse(capture.close_complete)
+        process.kill.side_effect = None
+        def wait(timeout):
+            process.poll.return_value = -9
+            return -9
+        process.wait.side_effect = wait
+        capture.close()
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(capture.close_complete)
+        self.assertGreaterEqual(process.terminate.call_count, 3)
+        thread.join.assert_not_called()
+
+    def test_capture_thread_start_failure_keeps_child_and_never_joins_unstarted_threads(self):
+        capture, child, *_ = self.capture()
+        child.process.poll.return_value = None
+        child.stop.side_effect = lambda: setattr(child.process.poll, 'return_value', 0)
+        thread = SimpleNamespace(start=Mock(side_effect=RuntimeError('Synthetic VAD thread failure')),
+                                 join=Mock(side_effect=RuntimeError('Unstarted thread')))
+        with patch('paj_voice_audio.devices.threading.Thread', return_value=thread):
+            with self.assertRaisesRegex(RuntimeError, 'Synthetic VAD'):
+                capture.start()
+        self.assertIs(capture.child, child)
+        capture.close()
+        child.stop.assert_called_once()
+        thread.join.assert_not_called()
+        self.assertTrue(capture.close_complete)
 
     def test_capture_close_retries_child_stop_after_a_failed_first_close(self):
         capture, child, *_ = self.capture()

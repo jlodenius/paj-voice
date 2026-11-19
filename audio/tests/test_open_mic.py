@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from paj_voice_audio import open_mic
+from paj_voice_audio.audio import Capture as NativeCapture
 from paj_voice_audio.devices import Child, Node
 from paj_voice_audio.speech import SpeechInference, Transcription
 
@@ -164,6 +165,99 @@ class OpenMicTests(unittest.TestCase):
             now[0] += 0.1
             runtime.segments.feed(b"\0\0" * 1600, True)
         return now
+
+    def test_timed_warmup_partial_child_constructor_failure_cannot_lose_a_live_recorder(self):
+        for cleanup_confirmed in (True, False):
+            with self.subTest(cleanup_confirmed=cleanup_confirmed):
+                now = [0]
+                runtime, events, _, _, _, _, _ = self.fixture(clock=lambda: now[0])
+                speaker, sink = runtime.speaker, runtime.sink
+                runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+                before = len(events)
+                process = Mock()
+                process.poll.return_value = None
+                def reap(timeout):
+                    process.poll.return_value = -9
+                    return -9
+                process.wait.side_effect = reap if cleanup_confirmed else OSError('Synthetic wait failure')
+                process.kill.side_effect = None if cleanup_confirmed else OSError('Synthetic kill failure')
+                thread = types.SimpleNamespace(start=Mock(side_effect=RuntimeError('Synthetic stderr start failure')),
+                                               join=Mock(side_effect=RuntimeError('Unstarted thread')))
+                created = []
+                def capture(*args):
+                    candidate = NativeCapture(*args)
+                    created.append(candidate)
+                    return candidate
+                now[0] = 1
+                with patch.object(open_mic, 'Capture', capture), \
+                        patch('paj_voice_audio.devices.subprocess.Popen', return_value=process) as popen, \
+                        patch('paj_voice_audio.devices.threading.Thread', return_value=thread):
+                    runtime._health_tick(0)
+                    self.assertEqual(len(created), 1)
+                    self.assertIs(created[0].child.process, process)
+                    self.assertTrue(process.terminate.called)
+                    thread.join.assert_not_called()
+                    if cleanup_confirmed:
+                        self.assertFalse(runtime.failed)
+                        self.assertTrue(created[0].close_complete)
+                        self.assertTrue(runtime.output_available)
+                        self.assertIs(runtime.speaker, speaker)
+                        self.assertIs(runtime.sink, sink)
+                        self.assertFalse(speaker.closed or sink.closed)
+                        self.assertEqual(runtime.input_pause['phase'], 'held')
+                    else:
+                        self.assertTrue(runtime.failed and runtime.closed)
+                        self.assertIsNone(process.poll())
+                        self.assertFalse(runtime.shutdown_complete.is_set())
+                        self.assertTrue(any(resources[1] is created[0] for resources in runtime.retired_inputs))
+                        self.assertFalse(any(e['type'] == 'input_pause_state' and e['phase'] != 'warming'
+                                             for e in events[before:]))
+                        self.assertEqual(next(e['stage'] for e in events[before:] if e['type'] == 'error'),
+                                         'input-pause-closure')
+                        runtime.command({'type': 'input_pause', 'id': 'new', 'seconds': 1})
+                        process.wait.side_effect = reap
+                        process.kill.side_effect = None
+                        runtime.shutdown()
+                        self.assertFalse(runtime.retired_inputs)
+                        self.assertTrue(created[0].close_complete)
+                        self.assertTrue(runtime.shutdown_complete.is_set())
+                    now[0] = 100
+                    runtime._health_tick(0)
+                    self.assertEqual(popen.call_count, 1)
+                    self.assertIsNotNone(process.poll())
+                    self.assertFalse(any(e['type'] == 'input_pause_state' and e['phase'] == 'resumed'
+                                         for e in events[before:]))
+                runtime.shutdown()
+
+    def test_initial_capture_partial_start_failure_never_falls_back_over_an_unreaped_child(self):
+        def prepare(config, graph, models):
+            config['audio']['fallback'] = {'name': 'fallback', 'input': 'other', 'output': 'speaker'}
+            graph.bind = Mock(wraps=graph.bind)
+        runtime, events, _, _, _, graph, release = self.fixture(hold_load=True, prepare=prepare)
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = OSError('Synthetic wait failure')
+        process.kill.side_effect = OSError('Synthetic kill failure')
+        thread = types.SimpleNamespace(start=Mock(side_effect=RuntimeError('Synthetic stderr start failure')),
+                                       join=Mock(side_effect=RuntimeError('Unstarted thread')))
+        with patch.object(open_mic, 'Capture', NativeCapture), \
+                patch('paj_voice_audio.devices.subprocess.Popen', return_value=process) as popen, \
+                patch('paj_voice_audio.devices.threading.Thread', return_value=thread):
+            release.set()
+            wait_for(lambda: runtime.closed)
+            self.assertTrue(runtime.failed)
+            self.assertTrue(any(resources[1].child.process is process for resources in runtime.retired_inputs))
+            self.assertEqual(popen.call_count, 1)
+            self.assertFalse(runtime.using_fallback)
+            self.assertFalse(any(e['type'] == 'ready' for e in events))
+        def reap(timeout):
+            process.poll.return_value = -9
+            return -9
+        process.wait.side_effect = reap
+        process.kill.side_effect = None
+        runtime.shutdown()
+        self.assertIsNotNone(process.poll())
+        self.assertFalse(runtime.retired_inputs)
 
     def test_pause_close_exception_never_acknowledges_privacy_and_retries_owned_recorder(self):
         runtime, events, captures, *_ = self.fixture(capture_process=True)
