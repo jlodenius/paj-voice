@@ -136,7 +136,12 @@ recognized text as a JSON-quoted string, including its original case and surroun
 remain inspectable in the normal Pi message UI/history and go to the configured model provider with
 normal session retention. There is no new audit file or raw-text history, and focus diagnostics do
 not receive either text. The existing bounded in-memory voice-envelope ownership map is cleared on
-stop; only successful normal admission updates it. Submission acknowledgement means delivery, not
+stop. It records attempted envelopes before admission sends them: delivery can enqueue a request and
+then throw, leaving delivery uncertain. Retaining the attempt's original epoch and latest-intent
+fence prevents later noise or older model context from making an old answer fresh. This ownership
+record is not confirmation of delivery; only successful normal admission produces a submission
+receipt.
+Uncertain attempts are never automatically resent. Submission acknowledgement means delivery, not
 execution or confirmation that speech was recognized correctly.
 
 ## Recovering long dictation

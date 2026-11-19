@@ -168,11 +168,11 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           `Effective user request:\n${shortcut.request}`
         : params.text;
       const prompt = `[Voice request ${params.generation}:${params.requestId}]\n${text}`;
-      const result = admission.submit({ ...params, text: prompt });
+      // Delivery can enqueue before throwing; retain the attempted envelope's original ownership.
       voiceInputs.set(prompt, { generation: params.generation, epoch: controller.state().epoch });
       latestPrompt = prompt;
       while (voiceInputs.size > 512) voiceInputs.delete(voiceInputs.keys().next().value!);
-      return result;
+      return admission.submit({ ...params, text: prompt });
     },
     notify,
     close: () => stop(),

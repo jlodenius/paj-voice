@@ -125,6 +125,85 @@ test('expansions use normal steering and duplicate/uncertain delivery is never r
   assert.equal(uncertain.notices.some(([text]) => text === 'Voice request submitted.'), false);
 });
 
+for (const [name, config] of [['configured shortcuts', { shortcuts }], ['default shortcuts', {}]]) {
+  test(`uncertain enqueued speech retains its original ownership after cancelled noise: ${name}`, async t => {
+    const f = await armed(t, config);
+    let attempts = 0;
+    f.pi.sendUserMessage = (...args) => {
+      attempts++;
+      f.messages.push(args);
+      throw new Error('synthetic accepted uncertain');
+    };
+    utter(f, 'status update');
+    const originalEpoch = f.controller.state().epoch;
+    utter(f, 'status update');
+    assert.equal(attempts, 1);
+    assert.equal(f.messages.length, 1);
+    if (config.shortcuts) assert.ok(f.messages[0][0].includes('Effective user request:\n' + request));
+    f.audio({ type: 'addressed', id: 'noise' });
+    f.audio({ type: 'cancelled', id: 'noise', reason: 'unreliable_speech' });
+    assert.ok(f.controller.state().epoch > originalEpoch);
+    await f.event('before_agent_start', { messageType: 'user' });
+    await f.event('agent_start');
+    await f.event('context', { messages: [{ role: 'user', content: f.messages[0][0] }] });
+    const text = 'This answer belongs to the uncertain earlier capture.';
+    await f.event('message_end', { message: { role: 'assistant', stopReason: 'stop',
+      content: [{ type: 'text', text }] } });
+    assert.equal(f.frames.some(frame => frame.type === 'speak' && frame.text === text), false);
+    assert.ok(f.notices.some(([notice]) => notice.includes('will not resend')));
+    assert.equal(f.notices.some(([notice]) => notice === 'Voice request submitted.'), false);
+    assert.equal(f.frames.some(frame => frame.text === 'Got it.'), false);
+  });
+
+  for (const priorRequest of [false, true]) {
+    test(`uncertain speech missing from context fences older answers (${priorRequest ? 'prior request' : 'empty context'}): ${name}`, async t => {
+      const f = await armed(t, config);
+      if (priorRequest) {
+        utter(f, 'An earlier request', 'earlier');
+        await f.event('agent_start');
+      }
+      const users = f.messages.map(([content]) => ({ role: 'user', content }));
+      let attempts = 0;
+      f.pi.sendUserMessage = () => { attempts++; throw new Error('synthetic uncertain before enqueue'); };
+      utter(f, 'status update', 'uncertain');
+      utter(f, 'status update', 'uncertain');
+      assert.equal(attempts, 1);
+      assert.equal(f.messages.length, priorRequest ? 1 : 0);
+      await f.event('before_agent_start', { messageType: 'user' });
+      await f.event('agent_start');
+      const context = await f.event('context', { messages: users });
+      assert.match(context.messages.at(-1).content, /latest voice request has not reached this model context/u);
+      const text = 'This old answer must not become fresh speech.';
+      await f.event('message_end', { message: { role: 'assistant', stopReason: 'stop',
+        content: [{ type: 'text', text }] } });
+      assert.equal(f.frames.some(frame => frame.type === 'speak' && frame.text === text), false);
+      assert.ok(f.notices.some(([notice]) => notice.includes('will not resend')));
+      assert.equal(f.notices.filter(([notice]) => notice === 'Voice request submitted.').length, priorRequest ? 1 : 0);
+    });
+  }
+
+  test(`known ordinary rejection gates still reject without receipts: ${name}`, async t => {
+    for (const gate of ['editor', 'reservation', 'terminal']) {
+      const f = await armed(t, config);
+      let blocked = true;
+      const paj = { version: 1, getSnapshot: () => ({ editorBusy: blocked && gate === 'editor',
+        identity: { id: 'primary', role: 'primary', pid: process.pid, piSessionId: 'session-one' } }),
+        tryReserve: () => !(blocked && gate === 'reservation'), release() {} };
+      f.events.on('paj:external:v1', query => query.reply(paj));
+      if (gate === 'terminal') await f.event('ui_prompt_start');
+      utter(f, 'status update', 'blocked');
+      assert.equal(f.messages.length, 0, gate);
+      assert.equal(f.notices.some(([notice]) => notice === 'Voice request submitted.'), false, gate);
+      assert.equal(f.frames.some(frame => frame.text === 'Got it.'), false, gate);
+      blocked = false;
+      if (gate === 'terminal') await f.event('ui_prompt_end');
+      utter(f, 'status update', 'fresh');
+      assert.equal(f.messages.length, 1, gate);
+      assert.ok(f.notices.some(([notice]) => notice === 'Voice request submitted.'), gate);
+    }
+  });
+}
+
 test('ordinary terminal, pending idle, Paj editor/reservation and off gates still reject', async t => {
   const terminal = await armed(t);
   await terminal.event('ui_prompt_start');
