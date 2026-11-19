@@ -8,10 +8,14 @@ import { focusRuntimeDirectory, focusSocketPath, verifyFocusSocket, validFocusSe
   FOCUS_FRAME_BYTES, FOCUS_HEARTBEAT_MS } from './audio-focus-broker.ts';
 import type { FocusFileSystem } from './audio-focus-broker.ts';
 import { assertDefaultFocusEnvironment, focusSpawnEnvironment } from './audio-focus-environment.ts';
+import { safeFocusDiagnostic, focusErrorCode, focusElapsed, focusSignal, decodeFocusDiagnostic,
+  isFocusDiagnosticMessage } from './audio-focus-diagnostics.ts';
+import type { FocusDiagnostic } from './audio-focus-diagnostics.ts';
 
 export interface AudioFocusClientOptions {
   env?: Record<string, string | undefined>;
   onWarning?: (message: string) => void;
+  onDiagnostic?: (event: FocusDiagnostic) => void;
   runtimeDir?: string;
   filesystem?: FocusFileSystem;
   connect?: (path: string) => Socket;
@@ -35,7 +39,12 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
   let nextId = 0;
   let buffer = Buffer.alloc(0);
   let closePromise: Promise<void> | undefined;
-  const pending = new Map<number, { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  const pending = new Map<number, { resolve: () => void; reject: (error: Error) => void;
+    timer: NodeJS.Timeout; operation: 'set' | 'idle' | 'ping' | 'close'; started: number }>();
+  const diagnostic = (event: FocusDiagnostic) => {
+    const safe = safeFocusDiagnostic(event);
+    if (safe) { try { options.onDiagnostic?.(safe); } catch {} }
+  };
   const warning = () => {
     if (!warned) {
       warned = true;
@@ -56,28 +65,57 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
     pending.clear();
     if (!closed) warning();
   };
-  const send = (op: string, token?: string): Promise<void> => {
+  const send = (op: 'set' | 'idle' | 'ping' | 'close', token?: string): Promise<void> => {
     if (!socket || socket.destroyed || pending.size >= 16 || socket.writableLength > FOCUS_FRAME_BYTES) {
+      diagnostic({ component: 'client', operation: op, reason: 'request_unavailable' });
       return Promise.reject(new Error('Background audio focus connection unavailable'));
     }
     const id = ++nextId;
     const message = { v: 1, id, op, ...(token === undefined ? {} : { token }), ...(op === 'set' ? { settings: policy } : {}) };
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { fail(); warning(); }, 2500);
+      const started = performance.now();
+      const timer = setTimeout(() => {
+        diagnostic({ component: 'client', operation: op, reason: 'ack_timeout',
+          elapsedMs: focusElapsed(started), timeoutMs: 2500 });
+        fail(); warning();
+      }, 2500);
       timer.unref();
-      pending.set(id, { resolve, reject, timer });
-      socket!.write(JSON.stringify(message) + '\n');
+      pending.set(id, { resolve, reject, timer, operation: op, started });
+      try { socket!.write(JSON.stringify(message) + '\n'); }
+      catch (error) {
+        clearTimeout(timer);
+        pending.delete(id);
+        diagnostic({ component: 'client', operation: op, reason: 'request_failed',
+          elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+        reject(new Error('Background audio focus request write failed'));
+      }
     });
   };
   const attach = (connected: Socket) => {
     socket = connected;
     buffer = Buffer.alloc(0);
-    socket.on('error', () => { if (socket === connected) fail(); });
-    socket.on('close', () => { if (socket === connected) fail(); });
+    socket.on('error', error => {
+      if (socket !== connected) return;
+      if (!failed && !closed) diagnostic({ component: 'client', operation: 'connect', reason: 'socket_error',
+        code: focusErrorCode(error) });
+      fail();
+    });
+    socket.on('close', () => {
+      if (socket !== connected) return;
+      if (!failed && !closed) {
+        const request = pending.values().next().value;
+        diagnostic({ component: 'client', operation: request?.operation ?? 'idle', reason: 'socket_closed',
+          ...(request ? { elapsedMs: focusElapsed(request.started) } : {}) });
+      }
+      fail();
+    });
     socket.on('data', chunk => {
       if (socket !== connected) return;
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > FOCUS_FRAME_BYTES) { fail(); return; }
+      if (buffer.length > FOCUS_FRAME_BYTES) {
+        diagnostic({ component: 'client', operation: 'protocol', reason: 'protocol_invalid' });
+        fail(); return;
+      }
       let newline: number;
       while ((newline = buffer.indexOf(10)) !== -1) {
         const frame = buffer.subarray(0, newline).toString('utf8');
@@ -86,7 +124,11 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
           const reply = JSON.parse(frame) as { v?: unknown; id?: unknown; ok?: unknown; warning?: unknown };
           if (reply.v === 1 && typeof reply.warning === 'string' && reply.warning.length <= 256 &&
               Object.keys(reply).every(key => ['v', 'warning'].includes(key))) {
-            try { options.onWarning?.(reply.warning); } catch {}
+            if (isFocusDiagnosticMessage(reply.warning)) {
+              const event = decodeFocusDiagnostic(reply.warning);
+              if (event) diagnostic(event);
+              else diagnostic({ component: 'client', operation: 'protocol', reason: 'protocol_invalid' });
+            } else { try { options.onWarning?.(reply.warning); } catch {} }
             continue;
           }
           if (reply.v !== 1 || !Number.isSafeInteger(reply.id) || reply.ok !== true ||
@@ -95,27 +137,69 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
           if (!request) throw new Error();
           clearTimeout(request.timer);
           pending.delete(reply.id as number);
+          if (request.operation !== 'ping') diagnostic({ component: 'client', operation: request.operation,
+            reason: 'acknowledged', elapsedMs: focusElapsed(request.started) });
           request.resolve();
-        } catch { fail(); return; }
+        } catch {
+          diagnostic({ component: 'client', operation: 'protocol', reason: 'protocol_invalid' });
+          fail(); return;
+        }
       }
     });
     heartbeat = setInterval(() => { void send('ping').catch(fail); }, FOCUS_HEARTBEAT_MS);
     heartbeat.unref();
   };
   const connect = async (path: string): Promise<Socket> => {
-    await verifyFocusSocket(path, options.filesystem);
+    const started = performance.now();
+    try { await verifyFocusSocket(path, options.filesystem); }
+    catch (error) {
+      diagnostic({ component: 'client', operation: 'connect', reason: 'connect_failed',
+        elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+      throw error;
+    }
     return new Promise((resolve, reject) => {
-      const connection = (options.connect ?? createConnection)(path);
-      const timer = setTimeout(() => { connection.destroy(); reject(new Error('Focus connect timed out')); }, 400);
-      connection.once('error', error => { clearTimeout(timer); reject(error); });
-      connection.once('connect', () => { clearTimeout(timer); resolve(connection); });
+      let connection: Socket;
+      try { connection = (options.connect ?? createConnection)(path); }
+      catch (error) {
+        diagnostic({ component: 'client', operation: 'connect', reason: 'connect_failed',
+          elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+        reject(error); return;
+      }
+      const timer = setTimeout(() => {
+        diagnostic({ component: 'client', operation: 'connect', reason: 'connect_timeout',
+          elapsedMs: focusElapsed(started), timeoutMs: 400 });
+        connection.destroy(); reject(new Error('Focus connect timed out'));
+      }, 400);
+      connection.once('error', error => {
+        clearTimeout(timer);
+        diagnostic({ component: 'client', operation: 'connect', reason: 'connect_failed',
+          elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+        reject(error);
+      });
+      connection.once('connect', () => {
+        clearTimeout(timer);
+        diagnostic({ component: 'client', operation: 'connect', reason: 'connected', elapsedMs: focusElapsed(started) });
+        resolve(connection);
+      });
     });
   };
   const open = async () => {
     const env = { ...(options.env ?? process.env) };
-    assertDefaultFocusEnvironment(env);
-    const path = await focusSocketPath(options.runtimeDir ??
-      await focusRuntimeDirectory(env, options.filesystem), options.filesystem);
+    try { assertDefaultFocusEnvironment(env); }
+    catch (error) {
+      diagnostic({ component: 'client', operation: 'environment', reason: 'environment_rejected' });
+      throw error;
+    }
+    let path: string;
+    const started = performance.now();
+    try {
+      path = await focusSocketPath(options.runtimeDir ??
+        await focusRuntimeDirectory(env, options.filesystem), options.filesystem);
+    } catch (error) {
+      diagnostic({ component: 'client', operation: 'runtime', reason: 'runtime_rejected',
+        elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+      throw error;
+    }
     if (closed || !current) return;
     let connected: Socket;
     try { connected = await connect(path); }
@@ -125,10 +209,30 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
       if (closed || !current) return;
       const safeEnv = focusSpawnEnvironment(env);
       const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
-      const child = (options.spawn ?? spawnProcess)(process.execPath,
-        [fileURLToPath(new URL(`./audio-focus-broker.${extension}`, import.meta.url))],
-        { env: safeEnv, detached: true, stdio: 'ignore' });
-      child.on('error', () => { if (!closed) warning(); });
+      let child: ChildProcess;
+      try {
+        child = (options.spawn ?? spawnProcess)(process.execPath,
+          [fileURLToPath(new URL(`./audio-focus-broker.${extension}`, import.meta.url))],
+          { env: safeEnv, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+      } catch (error) {
+        diagnostic({ component: 'client', operation: 'spawn', reason: 'spawn_failed', code: focusErrorCode(error) });
+        throw error;
+      }
+      diagnostic({ component: 'client', operation: 'spawn', reason: 'spawned' });
+      child.on('error', error => {
+        diagnostic({ component: 'client', operation: 'spawn', reason: 'spawn_failed', code: focusErrorCode(error) });
+        if (!closed) warning();
+      });
+      child.on('message', message => {
+        if (!message || typeof message !== 'object' || !('type' in message) ||
+            message.type !== 'paj-voice-focus-diagnostic' || !('event' in message)) return;
+        const event = safeFocusDiagnostic(message.event);
+        if (event) diagnostic(event);
+      });
+      child.on('exit', (code, signal) => diagnostic({ component: 'broker', operation: 'startup', reason: 'broker_exit',
+        ...(typeof code === 'number' && code >= 0 && code <= 255 ? { exitCode: code } : {}),
+        ...(signal ? { signal: focusSignal(signal) } : {}), elapsedMs: focusElapsed(started) }));
+      child.channel?.unref();
       child.unref();
       let lastError: unknown;
       let result: Socket | undefined;
@@ -157,7 +261,11 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
   };
   const playing = (token: string) => {
     if (closed || failed || !token || token.length > 256 || current === token) return;
-    try { assertDefaultFocusEnvironment(options.env ?? process.env); } catch { fail(); return; }
+    try { assertDefaultFocusEnvironment(options.env ?? process.env); }
+    catch {
+      diagnostic({ component: 'client', operation: 'environment', reason: 'environment_rejected' });
+      fail(); return;
+    }
     current = token;
     revision++;
     clearTimeout(idleClose);
@@ -203,7 +311,13 @@ export function startAudioFocus(settings: BackgroundAudioSettings, options: Audi
     closePromise = (async () => {
       if (failed) warning();
       if (socket && !socket.destroyed) {
-        try { await send('close'); } catch { warning(); }
+        const started = performance.now();
+        try { await send('close'); }
+        catch (error) {
+          diagnostic({ component: 'client', operation: 'close', reason: 'cleanup_failed',
+            elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+          warning();
+        }
       }
       fail();
       await opening;

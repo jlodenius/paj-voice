@@ -2,11 +2,20 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { FocusAssociatedClient, FocusGraph, FocusStream } from './audio-focus-types.ts';
 import { isFocusMetadataLabel } from './audio-focus-types.ts';
+import { focusElapsed, focusErrorCode, focusSignal, safeFocusDiagnostic } from './audio-focus-diagnostics.ts';
+import type { FocusDiagnostic } from './audio-focus-diagnostics.ts';
 
 export interface FocusCommandLimits { timeoutMs: number; maxOutputBytes: number }
+export interface FocusCommandResult {
+  stdout: string;
+  exitCode: number;
+  signal?: string;
+  timedOut?: boolean;
+  errorCode?: FocusDiagnostic['code'];
+}
 export interface PipeWireFocusOptions {
-  execute?: (file: string, args: string[], limits: FocusCommandLimits) =>
-    Promise<{ stdout: string; exitCode: number }>;
+  execute?: (file: string, args: string[], limits: FocusCommandLimits) => Promise<FocusCommandResult>;
+  onDiagnostic?: (event: FocusDiagnostic) => void;
   dumpPath?: string;
   controlPath?: string;
 }
@@ -15,7 +24,11 @@ const execute: NonNullable<PipeWireFocusOptions['execute']> = (file, args, bound
   new Promise(resolve => {
     execFile(file, args, { timeout: bounds.timeoutMs, maxBuffer: bounds.maxOutputBytes,
       killSignal: 'SIGKILL', encoding: 'utf8' }, (error, stdout) => {
-      resolve({ exitCode: error ? 1 : 0, stdout: error ? '' : stdout });
+      resolve({ exitCode: error ? typeof error.code === 'number' ? error.code : 1 : 0,
+        stdout: error ? '' : stdout,
+        ...(error ? { errorCode: focusErrorCode(error),
+          timedOut: error.killed === true && error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+          ...(error.signal ? { signal: error.signal } : {}) } : {}) });
     });
   });
 const record = (value: unknown): Record<string, unknown> | undefined =>
@@ -81,24 +94,48 @@ function parseNode(value: unknown, objects: ObjectIndex): FocusStream | undefine
 }
 export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): FocusGraph {
   const run = options.execute ?? execute;
+  const diagnostic = (event: FocusDiagnostic) => {
+    const safe = safeFocusDiagnostic(event);
+    if (safe) { try { options.onDiagnostic?.(safe); } catch {} }
+  };
   return {
     async snapshot() {
-      let result: { stdout: string; exitCode: number };
+      const started = performance.now();
+      let result: FocusCommandResult;
       try {
         result = await run(options.dumpPath
           ?? fileURLToPath(new URL('../../../libexec/paj-voice-pw-dump', import.meta.url)),
           ['--no-colors'], limits);
-      } catch { throw new Error('PipeWire snapshot unavailable'); }
-      if (result.exitCode !== 0 || Buffer.byteLength(result.stdout) > limits.maxOutputBytes)
+      } catch (error) {
+        diagnostic({ component: 'helper', operation: 'snapshot', reason: 'snapshot_failed',
+          elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
         throw new Error('PipeWire snapshot unavailable');
+      }
+      if (result.exitCode !== 0 || Buffer.byteLength(result.stdout) > limits.maxOutputBytes) {
+        diagnostic({ component: 'helper', operation: 'snapshot', reason: 'snapshot_failed',
+          elapsedMs: focusElapsed(started), timeoutMs: limits.timeoutMs,
+          ...(Number.isInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode <= 255
+            ? { exitCode: result.exitCode } : {}),
+          ...(result.signal ? { signal: focusSignal(result.signal) } : {}),
+          ...(result.errorCode ? { code: focusErrorCode({ code: result.errorCode }) } : {}) });
+        throw new Error('PipeWire snapshot unavailable');
+      }
       let entries: unknown;
       try { entries = JSON.parse(result.stdout); }
-      catch { throw new Error('Invalid PipeWire snapshot'); }
-      if (!Array.isArray(entries) || entries.length > 32768) throw new Error('Invalid PipeWire snapshot');
+      catch {
+        diagnostic({ component: 'helper', operation: 'snapshot', reason: 'snapshot_invalid', elapsedMs: focusElapsed(started) });
+        throw new Error('Invalid PipeWire snapshot');
+      }
+      if (!Array.isArray(entries) || entries.length > 32768) {
+        diagnostic({ component: 'helper', operation: 'snapshot', reason: 'snapshot_invalid', elapsedMs: focusElapsed(started) });
+        throw new Error('Invalid PipeWire snapshot');
+      }
       const cores = entries.map(record).filter(v => v?.type === 'PipeWire:Interface:Core');
       const cookie = record(cores[0]?.info)?.cookie;
-      if (cores.length !== 1 || !integer(cookie) || (cookie as number) > 0xffffffff)
+      if (cores.length !== 1 || !integer(cookie) || (cookie as number) > 0xffffffff) {
+        diagnostic({ component: 'helper', operation: 'snapshot', reason: 'snapshot_invalid', elapsedMs: focusElapsed(started) });
         throw new Error('Missing PipeWire core cookie');
+      }
       const objects: ObjectIndex = { ids: new Map(), serials: new Map() };
       for (const value of entries) {
         const entry = record(value), id = entry?.id;
@@ -111,6 +148,12 @@ export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): Fo
         objects.ids.get(v.id) !== undefined && objects.serials.get(v.serial) === 1) };
     },
     async compareAndSet(generation, stream, volumes, restore = false, allOtherPlayback = false) {
+      const started = performance.now();
+      const operation = restore ? 'restore' : 'set';
+      const reject = () => {
+        diagnostic({ component: 'helper', operation, reason: 'policy_rejected', elapsedMs: focusElapsed(started) });
+        return false;
+      };
       if (typeof generation !== 'string' || !/^(0|[1-9][0-9]{0,9})$/u.test(generation)
           || Number(generation) > 0xffffffff || !stream || typeof stream.serial !== 'string'
           || !serial(stream.serial) || !integer(stream.id) || stream.id > 0xffffffff
@@ -122,7 +165,7 @@ export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): Fo
           || ((stream.muted || (protectedRole(stream.role) && !allOtherPlayback)) && !restore)
           || (restore && volumes.some((value, index) => value < stream.volumes[index]!))
           || ownStream(stream.appId, stream.name))
-        return false;
+        return reject();
       const client = stream.associatedClient;
       if (client !== undefined && (!record(client) || !integer(client.id) || client.id > 0xffffffff
           || client.id === stream.id || !serial(client.serial) || client.serial === stream.serial
@@ -131,7 +174,7 @@ export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): Fo
           || !isFocusMetadataLabel(client.name) || !isFocusMetadataLabel(client.applicationName)
           || ownStream(client.appId, client.name)
           || ownStream('', client.applicationName) || (protectedRole(client.role) && !restore && !allOtherPlayback)
-          || (client.source === 'client' && (stream.appId !== client.appId || stream.binary !== client.binary)))) return false;
+          || (client.source === 'client' && (stream.appId !== client.appId || stream.binary !== client.binary)))) return reject();
       try {
         const result = await run(options.controlPath
           ?? fileURLToPath(new URL('../../../bin/paj-voice-focus-control', import.meta.url)), [generation, stream.serial, String(stream.id), stream.appId,
@@ -140,8 +183,20 @@ export function createPipeWireFocusGraph(options: PipeWireFocusOptions = {}): Fo
           ...(client ? [client.source, String(client.id), client.serial, client.appId, client.binary,
             client.role, client.name, client.applicationName] : []),
           ...(allOtherPlayback ? ['1'] : [])], { timeoutMs: 1800, maxOutputBytes: 1024 });
-        return result.exitCode === 0 && result.stdout === 'ok\n';
-      } catch { return false; }
+        const acknowledged = result.exitCode === 0 && result.stdout === 'ok\n';
+        if (!acknowledged) diagnostic({ component: 'helper', operation,
+          reason: result.timedOut ? 'helper_timeout' : result.exitCode !== 0 ? 'helper_exit' : 'helper_ack_invalid',
+          elapsedMs: focusElapsed(started), timeoutMs: 1800,
+          ...(Number.isInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode <= 255
+            ? { exitCode: result.exitCode } : {}),
+          ...(result.signal ? { signal: focusSignal(result.signal) } : {}),
+          ...(result.errorCode ? { code: focusErrorCode({ code: result.errorCode }) } : {}) });
+        return acknowledged;
+      } catch (error) {
+        diagnostic({ component: 'helper', operation, reason: 'helper_exception',
+          elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+        return false;
+      }
     },
   };
 }

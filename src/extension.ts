@@ -26,6 +26,7 @@ interface VoiceOptions {
 }
 import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio, backgroundAudioPolicy } from './config.ts';
 import { startAudioFocus } from './audio-focus-client.ts';
+import { createFocusDiagnosticLog, focusErrorCode } from './audio-focus-diagnostics.ts';
 import { createAudioFocus } from './audio-focus.ts';
 import { createPipeWireFocusGraph } from './pipewire-focus.ts';
 import type { BackgroundAudioSettings, FocusPreview } from './audio-focus-types.ts';
@@ -49,6 +50,8 @@ function captureNamespace() {
 
 export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, options: VoiceOptions) {
   const env = options.env ?? process.env;
+  const focusDiagnostics = createFocusDiagnosticLog();
+  let focusDiagnosticLifetime = 0;
   const readRoutes = () => (options.loadRoutes ?? loadRoutes)(deviceSettingsPath(env));
   const selectRoute = (name: string, selection?: DeviceSelection, expected?: DeviceSelection) =>
     (options.saveRoute ?? saveRoute)(deviceSettingsPath(env), name, selection, expected);
@@ -95,6 +98,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let focusToken: string | undefined;
   let focusScope: string | undefined;
   let focusVersion: [number, number] | undefined;
+  let focusDiagnosticOwner: number | undefined;
   const idleFocus = () => {
     const token = focusToken;
     focusToken = undefined;
@@ -102,11 +106,18 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   };
   const closeFocus = async () => {
     const previous = audioFocus;
+    const diagnosticLifetime = focusDiagnosticOwner;
     audioFocus = undefined;
+    focusDiagnosticOwner = undefined;
     focusToken = focusScope = undefined;
     focusVersion = undefined;
     try { await previous?.close(); }
-    catch { notify('Background audio restoration could not be confirmed; check app volume.', 'warning'); }
+    catch (error) {
+      if (!closed && diagnosticLifetime === focusDiagnosticLifetime) {
+        focusDiagnostics.record({ component: 'client', operation: 'close', reason: 'cleanup_failed', code: focusErrorCode(error) });
+      }
+      notify('Background audio restoration could not be confirmed; check app volume.', 'warning');
+    }
   };
   const focusEvent = (frame: CompanionFrame, generation: string | null, scope: string) => {
     if (generation !== controller.state().generation) return;
@@ -127,8 +138,13 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         (frame.outputEpoch === focusVersion[0] && frame.playbackGeneration <= focusVersion[1]))) return;
     focusVersion = [frame.outputEpoch, frame.playbackGeneration];
     try {
+      const diagnosticLifetime = focusDiagnosticLifetime;
+      if (!audioFocus) focusDiagnosticOwner = diagnosticLifetime;
       audioFocus ??= (options.startAudioFocus ?? startAudioFocus)(backgroundAudioPolicy(settings), { env,
-        onWarning: message => notify(message, 'warning') });
+        onWarning: message => notify(message, 'warning'),
+        onDiagnostic: event => {
+          if (!closed && diagnosticLifetime === focusDiagnosticLifetime) focusDiagnostics.record(event);
+        } });
       focusToken = token;
       audioFocus.playing(token);
     } catch { notify('Background audio ducking is unavailable; Voice continues without it.', 'warning'); }
@@ -466,6 +482,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     catch { stop(); notify('Voice stopped because its Paj target changed.', 'warning'); }
   });
   pi.on('session_start', (_event, current) => {
+    focusDiagnosticLifetime++;
+    focusDiagnostics.clear();
     recoveries.length = 0;
     inboxIds.clear();
     pendingInbox.clear();
@@ -478,6 +496,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.on('session_shutdown', () => {
     recoveries.length = 0;
     closed = true;
+    focusDiagnosticLifetime++;
+    focusDiagnostics.clear();
     stop();
     controller.dispose();
     unsubscribe?.();
@@ -640,8 +660,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     }
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, route [name], fallback [name|off|setup <name>], ducking preview, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'pause', 'resume', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'fallback', 'ducking preview', 'recover', 'mute', 'unmute']
+    description: 'Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'pause', 'resume', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'fallback', 'ducking preview', 'ducking diagnostics', 'recover', 'mute', 'unmute']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
@@ -650,8 +670,12 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (command === 'unmute') command = 'resume';
       const parts = command.split(/\s+/u);
       if (parts[0] === 'ducking') {
+        if (parts.length === 2 && parts[1] === 'diagnostics') {
+          notify(`Background audio diagnostics (read-only): ${JSON.stringify(focusDiagnostics.snapshot())}`);
+          return;
+        }
         if (parts.length !== 2 || parts[1] !== 'preview') {
-          notify('Use /paj-voice ducking preview. Enable or disable background audio lowering in shared preferences, then rearm.', 'warning'); return;
+          notify('Use /paj-voice ducking preview or diagnostics. Enable or disable background audio lowering in shared preferences, then rearm.', 'warning'); return;
         }
         try {
           const settings = validateBackgroundAudio((preferences ?? (options.loadConfig ?? loadConfig)(configPath(env))).backgroundAudio);
@@ -748,11 +772,11 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       }
       if (command === 'on' && controller.state().muted) stop();
       if (command === 'status') {
-        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}`);
+        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}`);
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|route [name]|fallback [name|off|setup <name>]|ducking preview|voices|recover]. Compatibility aliases: mute, unmute.', 'warning');
+        notify('Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|voices|recover]. Compatibility aliases: mute, unmute.', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;

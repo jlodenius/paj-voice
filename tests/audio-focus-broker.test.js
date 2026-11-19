@@ -516,7 +516,7 @@ test('spawn is lazy, detached, same Node and fixed adjacent helper with sanitize
   assert.equal(spawned.file, process.execPath);
   assert.deepEqual(spawned.args, [fileURLToPath(new URL('../dist/audio-focus-broker.js', import.meta.url))]);
   assert.equal(spawned.options.detached, true);
-  assert.equal(spawned.options.stdio, 'ignore');
+  assert.deepEqual(spawned.options.stdio, ['ignore', 'ignore', 'ignore', 'ipc']);
   assert.deepEqual(spawned.options.env, { PATH: '/bin', HOME: userInfo().homedir, XDG_RUNTIME_DIR: root });
   await client.close();
 });

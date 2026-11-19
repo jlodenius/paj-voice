@@ -8,6 +8,8 @@ import type { Stats } from 'node:fs';
 import type { BackgroundAudioSettings } from './audio-focus-types.ts';
 import { assertDefaultFocusEnvironment } from './audio-focus-environment.ts';
 import { isBackgroundAudioSelector } from './config.ts';
+import { createFocusDiagnosticSender, encodeFocusDiagnostic, safeFocusDiagnostic, focusErrorCode, focusElapsed } from './audio-focus-diagnostics.ts';
+import type { FocusDiagnostic } from './audio-focus-diagnostics.ts';
 
 export const FOCUS_FRAME_BYTES = 16384;
 export const FOCUS_HEARTBEAT_MS = 2000;
@@ -24,7 +26,7 @@ export interface FocusFileSystem {
 }
 const localFileSystem: FocusFileSystem = { lstat };
 export interface BrokerOptions {
-  engine?: Engine | ((onWarning: (message: string) => void) => Engine);
+  engine?: Engine | ((onWarning: (message: string) => void, onDiagnostic: (event: FocusDiagnostic) => void) => Engine);
   filesystem?: FocusFileSystem;
   server?: Server;
   runtimeDir?: string;
@@ -32,6 +34,7 @@ export interface BrokerOptions {
   idleMs?: number;
   deadlineMs?: number;
   onWarning?: (message: string) => void;
+  onDiagnostic?: (event: FocusDiagnostic) => void;
 }
 
 export function validFocusSettings(value: unknown): value is BackgroundAudioSettings {
@@ -109,14 +112,32 @@ function alive(path: string): Promise<boolean> {
 }
 
 export async function runAudioFocusBroker(options: BrokerOptions = {}) {
+  const started = performance.now();
+  const clients = new Set<Socket>();
+  const diagnostic = (event: FocusDiagnostic, excluded?: Socket) => {
+    const safe = safeFocusDiagnostic(event);
+    if (!safe) return;
+    try { options.onDiagnostic?.(safe); } catch {}
+    const encoded = encodeFocusDiagnostic(safe);
+    if (!encoded) return;
+    const frame = JSON.stringify({ v: 1, warning: encoded }) + '\n';
+    for (const socket of clients) {
+      if (socket !== excluded && !socket.destroyed && socket.writableLength <= FOCUS_FRAME_BYTES) socket.write(frame);
+    }
+  };
   if (options.engine === undefined) {
-    assertDefaultFocusEnvironment(process.env);
-    assertDefaultFocusEnvironment(options.env ?? process.env);
-    if (options.env && options.env.XDG_RUNTIME_DIR !== process.env.XDG_RUNTIME_DIR) {
-      throw new Error('Default user PipeWire runtime must match the broker process environment');
+    try {
+      assertDefaultFocusEnvironment(process.env);
+      assertDefaultFocusEnvironment(options.env ?? process.env);
+      if (options.env && options.env.XDG_RUNTIME_DIR !== process.env.XDG_RUNTIME_DIR) {
+        throw new Error('Default user PipeWire runtime must match the broker process environment');
+      }
+    } catch (error) {
+      diagnostic({ component: 'broker', operation: 'environment', reason: 'environment_rejected',
+        elapsedMs: focusElapsed(started) });
+      throw error;
     }
   }
-  const clients = new Set<Socket>();
   const warn = (message: string) => {
     const warning = message.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 256);
     try { options.onWarning?.(warning); } catch {}
@@ -126,17 +147,32 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     }
   };
   const filesystem = options.filesystem ?? localFileSystem;
-  const runtimeDir = options.runtimeDir ?? await focusRuntimeDirectory(options.env, filesystem);
-  const path = await focusSocketPath(runtimeDir, filesystem);
+  let runtimeDir: string;
+  let path: string;
+  try {
+    runtimeDir = options.runtimeDir ?? await focusRuntimeDirectory(options.env, filesystem);
+    path = await focusSocketPath(runtimeDir, filesystem);
+  } catch (error) {
+    diagnostic({ component: 'broker', operation: 'runtime', reason: 'runtime_rejected',
+      elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+    throw error;
+  }
   const lock = join(runtimeDir, 'starting');
-  await mkdir(lock, { mode: 0o700 });
+  try { await mkdir(lock, { mode: 0o700 }); }
+  catch (error) {
+    diagnostic({ component: 'broker', operation: 'startup', reason: 'startup_failed',
+      elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
+    throw error;
+  }
   const server = options.server ?? createServer();
   let engine: Engine;
   try {
-    engine = (typeof options.engine === 'function' ? options.engine(warn) : options.engine) ??
+    engine = (typeof options.engine === 'function' ? options.engine(warn, diagnostic) : options.engine) ??
       (await import('./audio-focus.ts')).createAudioFocus(
-      (await import('./pipewire-focus.ts')).createPipeWireFocusGraph(), { onWarning: warn });
+      (await import('./pipewire-focus.ts')).createPipeWireFocusGraph({ onDiagnostic: diagnostic }), { onWarning: warn });
   } catch (error) {
+    diagnostic({ component: 'broker', operation: 'startup', reason: 'startup_failed',
+      elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
     await rmdir(lock);
     throw error;
   }
@@ -145,7 +181,11 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
   let closing: Promise<void> | undefined;
   let stopping = false;
   const waitForCleanup = async (job: Promise<void>) => {
-    const timer = setTimeout(() => warn('Background audio cleanup is taking longer than expected'), 3000);
+    const timer = setTimeout(() => {
+      diagnostic({ component: 'broker', operation: 'cleanup', reason: 'cleanup_slow',
+        elapsedMs: 3000, timeoutMs: 3000 });
+      warn('Background audio cleanup is taking longer than expected');
+    }, 3000);
     try { await job; } finally { clearTimeout(timer); }
   };
   const scheduleIdle = () => {
@@ -159,7 +199,10 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     closing = (async () => {
       await Promise.allSettled([...releases.values()].map(release => release()));
       for (const socket of clients) socket.destroy();
-      await waitForCleanup(engine.close()).catch(() => warn('Background audio restoration could not be confirmed'));
+      await waitForCleanup(engine.close()).catch(error => {
+        diagnostic({ component: 'broker', operation: 'cleanup', reason: 'cleanup_failed', code: focusErrorCode(error) });
+        warn('Background audio restoration could not be confirmed');
+      });
       await new Promise<void>(resolve => server.close(() => resolve()));
     })();
     return closing;
@@ -177,6 +220,7 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     let releasePromise: Promise<void> | undefined;
     const release = (closeId?: number) => {
       if (releasePromise) return releasePromise;
+      const released = performance.now();
       ended = true;
       token = undefined;
       if (closeId === undefined) socket.destroy();
@@ -190,15 +234,24 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
           reply(closeId);
           socket.end();
         }
-      }).catch(() => {
+      }).catch(error => {
+        diagnostic({ component: 'broker', operation: closeId === undefined ? 'release' : 'close', reason: 'cleanup_failed',
+          elapsedMs: focusElapsed(released), code: focusErrorCode(error) });
         warn('Background audio restoration could not be confirmed');
         socket.destroy();
       });
       return releasePromise;
     };
     releases.set(socket, release);
-    socket.setTimeout(options.deadlineMs ?? FOCUS_DEADLINE_MS, () => { void release(); });
-    socket.on('error', () => { void release(); });
+    socket.setTimeout(options.deadlineMs ?? FOCUS_DEADLINE_MS, () => {
+      diagnostic({ component: 'broker', operation: 'release', reason: 'request_failed',
+        timeoutMs: Math.min(600_000, options.deadlineMs ?? FOCUS_DEADLINE_MS) });
+      void release();
+    });
+    socket.on('error', error => {
+      diagnostic({ component: 'broker', operation: 'connect', reason: 'socket_error', code: focusErrorCode(error) });
+      void release();
+    });
     socket.on('end', () => { void release(); });
     socket.on('close', () => {
       void release().finally(() => {
@@ -214,12 +267,18 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     socket.on('data', chunk => {
       if (ended) return;
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > FOCUS_FRAME_BYTES) { void release(); return; }
+      if (buffer.length > FOCUS_FRAME_BYTES) {
+        diagnostic({ component: 'broker', operation: 'protocol', reason: 'protocol_invalid' }, socket);
+        void release(); return;
+      }
       let newline: number;
       while ((newline = buffer.indexOf(10)) !== -1) {
         const frame = buffer.subarray(0, newline).toString('utf8');
         buffer = buffer.subarray(newline + 1);
-        if (++pending > 32) { void release(); return; }
+        if (++pending > 32) {
+          diagnostic({ component: 'broker', operation: 'protocol', reason: 'request_unavailable' }, socket);
+          void release(); return;
+        }
         let message: Record<string, unknown>;
         try {
           const parsed: unknown = JSON.parse(frame);
@@ -233,8 +292,12 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
           if ((message.op === 'set' || message.op === 'idle') &&
               (typeof message.token !== 'string' || !message.token.length || message.token.length > 256)) throw new Error();
           if (message.op === 'set' && (!validFocusSettings(message.settings) || message.settings.mode === 'off')) throw new Error();
-        } catch { void release(); return; }
+        } catch {
+          diagnostic({ component: 'broker', operation: 'protocol', reason: 'protocol_invalid' }, socket);
+          void release(); return;
+        }
         if (message.op === 'close') { void release(message.id as number); return; }
+        const received = performance.now();
         tail = tail.then(async () => {
           if (ended) return;
           if (message.op === 'set') {
@@ -245,7 +308,11 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
             await engine.set(owner, null);
           }
           if (!ended) reply(message.id as number);
-        }).catch(() => { warn('Background audio focus failed'); void release(); }).finally(() => { pending--; });
+        }).catch(error => {
+          diagnostic({ component: 'broker', operation: message.op as 'set' | 'idle' | 'ping', reason: 'request_failed',
+            elapsedMs: focusElapsed(received), code: focusErrorCode(error) });
+          warn('Background audio focus failed'); void release();
+        }).finally(() => { pending--; });
       }
     });
   });
@@ -265,19 +332,31 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     bound = true;
     await chmod(path, 0o600);
   } catch (error) {
+    diagnostic({ component: 'broker', operation: 'startup', reason: 'startup_failed',
+      elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
     if (bound) await close();
     else await waitForCleanup(engine.close()).catch(() => {});
     throw error;
   } finally {
     await rmdir(lock);
   }
-  server.on('error', () => { warn('Background audio broker socket failed'); void close(); });
+  server.on('error', error => {
+    diagnostic({ component: 'broker', operation: 'connect', reason: 'socket_error', code: focusErrorCode(error) });
+    warn('Background audio broker socket failed'); void close();
+  });
   scheduleIdle();
   return { path, close };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  void runAudioFocusBroker({ onWarning: message => process.stderr.write(message + '\n') }).then(broker => {
+  const sendDiagnostic = createFocusDiagnosticSender((event, done) => {
+    if (!process.connected || !process.send) throw new Error('Diagnostic channel unavailable');
+    process.send({ type: 'paj-voice-focus-diagnostic', event }, () => done());
+  });
+  void runAudioFocusBroker({ onWarning: message => process.stderr.write(message + '\n'),
+    onDiagnostic(event) {
+      if (process.connected) sendDiagnostic(event);
+    } }).then(broker => {
     for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => { void broker.close(); });
   }).catch(() => { process.exitCode = 1; });
 }

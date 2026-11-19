@@ -91,6 +91,24 @@ and `excludeApps` fields are rejected with migration guidance:
 Older `version`, `stt`, `tts`, `audio`, `turn`, language, and runtime-path preferences are also
 unsupported. Use the [current example](../examples/paj.json), preserving other addon sections.
 
+## Background-audio diagnostics
+
+`/paj-voice ducking diagnostics` shows recent safe diagnostics without opening audio, connecting to a
+broker, or changing gain. They are also included in `/paj-voice status`.
+
+The list identifies the client, shared broker, or native helper; the operation; and a fixed reason
+code, with elapsed/timeout milliseconds and sanitized process exit, signal, or OS error codes when
+available. Acknowledgement means the operation was processed, not proof of audible restoration.
+No application names, device IDs, paths, media titles, URLs, transcripts, raw process output, or
+credentials are stored. Normal warnings remain unchanged. Older loaded Voice clients can display
+safe diagnostic records as warnings; reload affected sessions together when upgrading.
+
+History is memory-only, limited to 32 entries for 15 minutes in this Pi session. It survives Voice
+off/cleanup for inspection, but clears on session change or shutdown. Startup and cleanup diagnostics
+are best effort; a crash may prevent delivery. Diagnostics cannot recover an earlier unlogged cause,
+do not retry gain writes, and do not prove that audio remains quiet. Use normal app volume controls
+if needed. A controlled live duck/restore test is a separate step, not part of this command.
+
 ## Development
 
 Maintained Pi code is TypeScript; Python handles local audio. JavaScript in `dist` is generated.
