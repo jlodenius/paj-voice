@@ -140,14 +140,52 @@ unsupported. Use the [current example](../examples/paj.json), preserving other a
 
 ## Background-audio diagnostics
 
-`/paj-voice ducking diagnostics` shows recent safe diagnostics without opening audio, connecting to a
-broker, or changing gain. They are also included in `/paj-voice status`.
+`/paj-voice ducking diagnostics` shows current focus status alongside recent safe diagnostics. Both
+are also included in `/paj-voice status`. Reading either command never creates a focus client, reads
+settings files, opens audio, connects/spawns, acquires/sends/pings/retries, schedules focus control
+timers, closes/restores, or changes gain/configuration. Status uses cached route information; use
+`/paj-voice route` to read saved routes afresh.
+
+Current status contains only these memory-only, independent copies:
+
+- `armedPolicy`: enabled and linear gain from the validated arm snapshot, not saved preferences.
+  It is null without an armed snapshot (including after off); paused Voice retains that snapshot.
+  An armed snapshot with no background-audio section means disabled and gain `0.2`.
+- `client.state`: `not_created` when no current client exists; `unavailable` for an existing external
+  client without a usable getter; otherwise `idle`, `connecting`, `connected`, `failed`, `closing`,
+  or `closed`. Connected means a local socket was attached, not proof of audible lowering, a
+  successful set acknowledgement, or restoration. Idle means no current local playback intent.
+  Closing/closed describe local client cleanup, never confirmed restoration.
+- `client.leasePresent`: whether the client currently holds a local intent token. This is NOT a
+  confirmed broker lease. False, idle, or closed likewise cannot prove restoration. It is null when
+  the existing client's status is unavailable; absent clients report false.
+- `client.terminal`: one actual terminal failure's safe reason/origin and age, retained for that
+  client object's lifetime even after history expires. Successful close is not a failure. An initial
+  terminal failure is not replaced by later cleanup; failed cleanup alone can supply the record.
+  Only directly correlated failures supply codes; unrelated helper events, successes, or earlier
+  recoverable connection errors do not become terminal causes. Uncorrelated failures use `unknown`.
+  Ages saturate at 2,147,483,647 milliseconds. The client's optional `now` test clock affects only
+  observational age, never control timers, deadlines, or retry delays.
+- `trace.observed`: playback-state frames reaching the current companion callback, including invalid
+  frames and rejected generations. `acceptedPlaying` counts true transitions passing existing gates
+  before construction/dispatch; `playingCalls` counts attempted `playing()` calls, including calls
+  ignored by an already-failed client. None proves gain changed. All counters saturate at 1,000,000.
+- `trace.lastSkip`: the last historical rejected decision, not a current terminal cause. Fixed values
+  are `generation`, `invalid_frame`, `policy_off`, `inactive_output_unavailable`, `version_duplicate`,
+  and `construction_dispatch_error`, or null before a rejection. Normal playback end is not failure
+  and does not clear or replace the last skip. Gate order and control decisions are unchanged.
+
+Trace counters and last skip survive off/rearm, clearing with session history on session change or
+shutdown. Existing generation, companion/scope, version, and session fences reject stale callbacks;
+retired client warnings cannot leak into a new client/session. Off drops the current client, so its
+status becomes `not_created`, while bounded history remains available. No frame bodies or IDs are
+retained by the trace. No status data is written to persistent files.
 
 The list identifies the client, shared broker, or native helper; the operation; and a fixed reason
 code, with elapsed/timeout milliseconds and sanitized process exit, signal, or OS error codes when
 available. Acknowledgement means the operation was processed, not proof of audible restoration.
 No application names, device IDs, paths, media titles, URLs, transcripts, raw process output, or
-credentials are stored. Normal warnings remain unchanged. Older loaded Voice clients can display
+credentials are stored. Existing warning messages remain unchanged. Older loaded Voice clients can display
 safe diagnostic records as warnings; reload affected sessions together when upgrading.
 
 History is memory-only, limited to 32 entries for 15 minutes in this Pi session. It survives Voice
@@ -155,6 +193,10 @@ off/cleanup for inspection, but clears on session change or shutdown. Startup an
 are best effort; a crash may prevent delivery. Diagnostics cannot recover an earlier unlogged cause,
 do not retry gain writes, and do not prove that audio remains quiet. Use normal app volume controls
 if needed. A controlled live duck/restore test is a separate step, not part of this command.
+
+This visibility is prospective, not a sound-loss fix or a diagnosis. Loading a new build resets local
+objects; it cannot inspect an older loaded client's private closure or recover expired history. No
+broker/native wire operation or recovery behavior is added.
 
 ## Development
 

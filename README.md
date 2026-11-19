@@ -109,6 +109,8 @@ To exempt an app, add its exact ID or executable name to `ignoreApps`, such as `
 Only supported PipeWire playback can be lowered. Music keeps playing; it is not paused. Volume
 restoration is best effort: if a warning says audio may remain quiet, adjust the app's volume manually.
 `/paj-voice ducking preview` lists eligible apps without changing volume.
+`/paj-voice ducking diagnostics` shows read-only current focus status and bounded recent history;
+see [diagnostic meanings and limits](docs/reference.md#background-audio-diagnostics).
 
 ## What to know
 

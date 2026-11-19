@@ -26,7 +26,7 @@ interface VoiceOptions {
 }
 import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio, backgroundAudioPolicy } from './config.ts';
 import { startAudioFocus } from './audio-focus-client.ts';
-import { createFocusDiagnosticLog, focusErrorCode } from './audio-focus-diagnostics.ts';
+import { createFocusDiagnosticLog, focusErrorCode, safeFocusDiagnostic } from './audio-focus-diagnostics.ts';
 import { createAudioFocus } from './audio-focus.ts';
 import { createPipeWireFocusGraph } from './pipewire-focus.ts';
 import type { BackgroundAudioSettings, FocusPreview } from './audio-focus-types.ts';
@@ -52,7 +52,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const env = options.env ?? process.env;
   const focusDiagnostics = createFocusDiagnosticLog();
   let focusDiagnosticLifetime = 0;
-  const readRoutes = () => (options.loadRoutes ?? loadRoutes)(deviceSettingsPath(env));
+  let cachedRoutes: ReturnType<typeof loadRoutes>;
+  const readRoutes = () => cachedRoutes = (options.loadRoutes ?? loadRoutes)(deviceSettingsPath(env));
   const selectRoute = (name: string, selection?: DeviceSelection, expected?: DeviceSelection) =>
     (options.saveRoute ?? saveRoute)(deviceSettingsPath(env), name, selection, expected);
   let ctx: ExtensionContext | undefined;
@@ -99,6 +100,41 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let focusScope: string | undefined;
   let focusVersion: [number, number] | undefined;
   let focusDiagnosticOwner: number | undefined;
+  let focusClientEpoch = 0;
+  let closingFocusEpoch: number | undefined;
+  type FocusSkip = 'generation' | 'invalid_frame' | 'policy_off' | 'inactive_output_unavailable' |
+    'version_duplicate' | 'construction_dispatch_error';
+  const newFocusTrace = () => ({ observed: 0, acceptedPlaying: 0, playingCalls: 0, lastSkip: null as FocusSkip | null });
+  let focusTrace = newFocusTrace();
+  const countFocus = (key: 'observed' | 'acceptedPlaying' | 'playingCalls') => {
+    focusTrace[key] = Math.min(1_000_000, focusTrace[key] + 1);
+  };
+  const focusStatus = () => {
+    const unavailable = { state: 'unavailable', leasePresent: null, terminal: null };
+    const client = (() => {
+      if (!audioFocus) return { state: 'not_created', leasePresent: false, terminal: null };
+      try {
+        const value = audioFocus.snapshot?.();
+        if (!value || !['connecting', 'connected', 'idle', 'failed', 'closing', 'closed'].includes(value.state) ||
+            typeof value.leasePresent !== 'boolean') return unavailable;
+        let terminal = null;
+        if (value.terminal !== null) {
+          if (!value.terminal || !Number.isInteger(value.terminal.ageMs) ||
+              value.terminal.ageMs < 0 || value.terminal.ageMs > 2_147_483_647) return unavailable;
+          const { ageMs, ...event } = value.terminal;
+          const safe = event.reason === 'unknown' && Object.keys(event).length === 1
+            ? { reason: 'unknown' } : safeFocusDiagnostic(event);
+          if (!safe) return unavailable;
+          terminal = { ...safe, ageMs };
+        }
+        return { state: value.state, leasePresent: value.leasePresent, terminal };
+      } catch { return unavailable; }
+    })();
+    const state = controller.state();
+    const armed = state.enabled || state.starting || state.muted ? preferences : undefined;
+    return { armedPolicy: armed ? { enabled: armed.backgroundAudio?.enabled ?? false,
+      gain: armed.backgroundAudio?.gain ?? 0.2 } : null, client, trace: { ...focusTrace } };
+  };
   const idleFocus = () => {
     const token = focusToken;
     focusToken = undefined;
@@ -108,6 +144,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const previous = audioFocus;
     const diagnosticLifetime = focusDiagnosticOwner;
     audioFocus = undefined;
+    const clientEpoch = focusClientEpoch++;
+    if (previous) closingFocusEpoch = clientEpoch;
     focusDiagnosticOwner = undefined;
     focusToken = focusScope = undefined;
     focusVersion = undefined;
@@ -116,38 +154,62 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (!closed && diagnosticLifetime === focusDiagnosticLifetime) {
         focusDiagnostics.record({ component: 'client', operation: 'close', reason: 'cleanup_failed', code: focusErrorCode(error) });
       }
-      notify('Background audio restoration could not be confirmed; check app volume.', 'warning');
+      if (!closed && diagnosticLifetime === focusDiagnosticLifetime && !audioFocus && closingFocusEpoch === clientEpoch) {
+        notify('Background audio restoration could not be confirmed; check app volume.', 'warning');
+      }
+    } finally {
+      if (closingFocusEpoch === clientEpoch) closingFocusEpoch = undefined;
     }
   };
   const focusEvent = (frame: CompanionFrame, generation: string | null, scope: string) => {
-    if (generation !== controller.state().generation) return;
+    if (frame.type === 'playback_state') countFocus('observed');
+    if (generation !== controller.state().generation) {
+      if (frame.type === 'playback_state') focusTrace.lastSkip = 'generation';
+      return;
+    }
     if (frame.type === 'availability' && frame.output === false) { idleFocus(); return; }
-    if (frame.type !== 'playback_state' || typeof frame.playing !== 'boolean' ||
+    if (frame.type !== 'playback_state') return;
+    if (typeof frame.playing !== 'boolean' ||
         typeof frame.id !== 'string' || !/^[\x20-\x7e]{1,128}$/u.test(frame.id) ||
         typeof frame.playbackGeneration !== 'number' || !Number.isSafeInteger(frame.playbackGeneration) ||
         frame.playbackGeneration < 0 || typeof frame.outputEpoch !== 'number' ||
-        !Number.isSafeInteger(frame.outputEpoch) || frame.outputEpoch < 0) return;
+        !Number.isSafeInteger(frame.outputEpoch) || frame.outputEpoch < 0) {
+      focusTrace.lastSkip = 'invalid_frame'; return;
+    }
     const token = `${scope}:${frame.outputEpoch}:${frame.playbackGeneration}:${frame.id}`;
     if (!frame.playing) { if (token === focusToken) idleFocus(); return; }
     const state = controller.state();
     const settings = preferences?.backgroundAudio;
     if (!settings?.enabled || state.muted || !state.outputAvailable ||
-        (!state.enabled && !state.starting)) return;
+        (!state.enabled && !state.starting)) {
+      focusTrace.lastSkip = !settings?.enabled ? 'policy_off' : 'inactive_output_unavailable'; return;
+    }
     if (focusScope !== scope) { focusScope = scope; focusVersion = undefined; }
     if (focusVersion && (frame.outputEpoch < focusVersion[0] ||
-        (frame.outputEpoch === focusVersion[0] && frame.playbackGeneration <= focusVersion[1]))) return;
+        (frame.outputEpoch === focusVersion[0] && frame.playbackGeneration <= focusVersion[1]))) {
+      focusTrace.lastSkip = 'version_duplicate'; return;
+    }
+    countFocus('acceptedPlaying');
     focusVersion = [frame.outputEpoch, frame.playbackGeneration];
     try {
       const diagnosticLifetime = focusDiagnosticLifetime;
+      const clientEpoch = focusClientEpoch;
       if (!audioFocus) focusDiagnosticOwner = diagnosticLifetime;
       audioFocus ??= (options.startAudioFocus ?? startAudioFocus)(backgroundAudioPolicy(settings), { env,
-        onWarning: message => notify(message, 'warning'),
+        onWarning: message => {
+          if (!closed && diagnosticLifetime === focusDiagnosticLifetime &&
+              (clientEpoch === focusClientEpoch || (!audioFocus && closingFocusEpoch === clientEpoch))) notify(message, 'warning');
+        },
         onDiagnostic: event => {
           if (!closed && diagnosticLifetime === focusDiagnosticLifetime) focusDiagnostics.record(event);
         } });
       focusToken = token;
+      countFocus('playingCalls');
       audioFocus.playing(token);
-    } catch { notify('Background audio ducking is unavailable; Voice continues without it.', 'warning'); }
+    } catch {
+      focusTrace.lastSkip = 'construction_dispatch_error';
+      notify('Background audio ducking is unavailable; Voice continues without it.', 'warning');
+    }
   };
   const queryPaj = () => {
     let api: PajApi | undefined;
@@ -273,9 +335,9 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.registerTool({ ...speakTool, exposure: 'hidden' });
   pi.registerTool({ ...routeTool, exposure: 'hidden' });
   pi.registerTool({ ...pauseInputTool, exposure: 'hidden' });
-  const routeSummary = () => {
+  const routeSummary = (cached = false) => {
     try {
-      const saved = readRoutes();
+      const saved = cached ? cachedRoutes : readRoutes();
       const state = controller.state();
       const preferred = activeRoute ?? saved?.active ?? null;
       const current = state.generation && !state.muted
@@ -504,6 +566,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.on('session_start', (_event, current) => {
     focusDiagnosticLifetime++;
     focusDiagnostics.clear();
+    focusTrace = newFocusTrace();
+    cachedRoutes = undefined;
     recoveries.length = 0;
     inboxIds.clear();
     pendingInbox.clear();
@@ -518,6 +582,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     closed = true;
     focusDiagnosticLifetime++;
     focusDiagnostics.clear();
+    focusTrace = newFocusTrace();
+    cachedRoutes = undefined;
     stop();
     controller.dispose();
     unsubscribe?.();
@@ -706,7 +772,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       }
       if (parts[0] === 'ducking') {
         if (parts.length === 2 && parts[1] === 'diagnostics') {
-          notify(`Background audio diagnostics (read-only): ${JSON.stringify(focusDiagnostics.snapshot())}`);
+          notify(`Background audio focus status: ${JSON.stringify(focusStatus())}\nBackground audio diagnostics (read-only): ${JSON.stringify(focusDiagnostics.snapshot())}`);
           return;
         }
         if (parts.length !== 2 || parts[1] !== 'preview') {
@@ -807,7 +873,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       }
       if (command === 'on' && controller.state().muted) stop();
       if (command === 'status') {
-        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary())}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}`);
+        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary(true))}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio focus status: ${JSON.stringify(focusStatus())}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}`);
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
