@@ -177,8 +177,10 @@ Current status contains only these memory-only, independent copies:
 
 Trace counters and last skip survive off/rearm, clearing with session history on session change or
 shutdown. Existing generation, companion/scope, version, and session fences reject stale callbacks;
-retired client warnings cannot leak into a new client/session. Off drops the current client, so its
-status becomes `not_created`, while bounded history remains available. No frame bodies or IDs are
+each client's warnings retire only when its own close settles (or session invalidation fences them).
+Pending cleanup uncertainty still warns even if replacement clients exist or multiple closes overlap;
+new playback cannot confirm old restoration. Off drops the current client, so its status becomes
+`not_created`, while bounded history remains available. No frame bodies or IDs are
 retained by the trace. No status data is written to persistent files.
 
 The list identifies the client, shared broker, or native helper; the operation; and a fixed reason

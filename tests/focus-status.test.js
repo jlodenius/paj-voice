@@ -247,6 +247,101 @@ test('current cleanup warnings survive off, but retired warning callbacks stay f
   assert.equal(f.notices.length, before);
 });
 
+function pendingCleanupFixture() {
+  const clients = [];
+  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+    startAudioFocus(_policy, options) {
+      let resolve, reject;
+      const closing = new Promise((done, fail) => { resolve = done; reject = fail; });
+      const client = { ...options, resolve, reject };
+      clients.push(client);
+      return { playing() {}, idle() {}, close: () => closing,
+        snapshot: () => ({ state: 'connected', leasePresent: true, terminal: null }) };
+    } });
+  const arm = async () => {
+    await f.command('on'); f.audio({ type: 'ready' });
+    f.audio({ type: 'playback_state', playing: true, id: 'one', outputEpoch: 1, playbackGeneration: 1 });
+  };
+  return { f, clients, arm };
+}
+
+test('each pending cleanup can warn across replacements and overlapping closes until its own settlement', async () => {
+  const { f, clients, arm } = pendingCleanupFixture();
+  await arm(); await f.command('off');
+  await arm(); await f.command('off');
+  await arm();
+  for (let index = 0; index < 2; index++) {
+    const warning = `Pending cleanup ${index} remains unconfirmed`;
+    clients[index].onWarning(warning);
+    assert.ok(f.notices.some(([message]) => message === warning));
+  }
+  clients[0].resolve(); await settle();
+  const before = f.notices.length;
+  clients[0].onWarning('Retired cleanup must not warn');
+  assert.equal(f.notices.length, before);
+  clients[1].onWarning('Second cleanup is still pending');
+  assert.equal(f.notices.at(-1)[0], 'Second cleanup is still pending');
+  clients[1].resolve(); await settle();
+  const settled = f.notices.length;
+  clients[1].onWarning('Second retired cleanup must not warn');
+  assert.equal(f.notices.length, settled);
+  clients[0].onDiagnostic({ component: 'client', operation: 'close', reason: 'cleanup_failed' });
+  await f.command('ducking diagnostics');
+  assert.deepEqual(readStatus(f).client, { state: 'connected', leasePresent: true, terminal: null });
+  clients[2].resolve(); await f.command('off'); await settle();
+});
+
+test('pending close rejection still warns after replacement without changing current client status', async () => {
+  const { f, clients, arm } = pendingCleanupFixture();
+  await arm(); await f.command('off'); await arm();
+  clients[0].reject(Error('private-cleanup-error')); await settle();
+  assert.ok(f.notices.some(([message, level]) => level === 'warning' &&
+    message === 'Background audio restoration could not be confirmed; check app volume.'));
+  const before = f.notices.length;
+  clients[0].onWarning('Retired rejection callback must not warn');
+  assert.equal(f.notices.length, before);
+  await f.command('status');
+  assert.deepEqual(readStatus(f).client, { state: 'connected', leasePresent: true, terminal: null });
+  assert.doesNotMatch(f.notices.at(-1)[0], /private-cleanup-error/);
+  clients[1].resolve(); await f.command('off'); await settle();
+});
+
+test('session invalidation fences pending cleanup callbacks and close rejection even before settlement', async () => {
+  const { f, clients, arm } = pendingCleanupFixture();
+  await arm(); await f.command('off'); await f.event('session_start'); await arm();
+  const before = f.notices.length;
+  clients[0].onWarning('Old session pending cleanup must not warn');
+  clients[0].onDiagnostic({ component: 'client', operation: 'close', reason: 'cleanup_failed' });
+  clients[0].reject(Error('private-old-session')); await settle();
+  assert.equal(f.notices.length, before);
+  await f.command('ducking diagnostics');
+  assert.deepEqual(readStatus(f).client, { state: 'connected', leasePresent: true, terminal: null });
+  assert.match(f.notices.at(-1)[0], /diagnostics \(read-only\): \[\]/);
+  clients[1].resolve(); await f.command('off'); await settle();
+});
+
+test('failed construction retires its warning callback without retiring the replacement client', async () => {
+  const callbacks = [];
+  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+    startAudioFocus(_policy, options) {
+      callbacks.push(options.onWarning);
+      if (callbacks.length === 1) throw Error('private-construction');
+      return { playing() {}, idle() {}, async close() {},
+        snapshot: () => ({ state: 'connected', leasePresent: true, terminal: null }) };
+    } });
+  await f.command('on'); f.audio({ type: 'ready' });
+  f.audio({ type: 'playback_state', playing: true, id: 'one', outputEpoch: 1, playbackGeneration: 1 });
+  f.audio({ type: 'playback_state', playing: true, id: 'two', outputEpoch: 1, playbackGeneration: 2 });
+  const before = f.notices.length;
+  callbacks[0]('Failed constructor callback must not warn');
+  assert.equal(f.notices.length, before);
+  callbacks[1]('Current client uncertainty still warns');
+  assert.equal(f.notices.at(-1)[0], 'Current client uncertainty still warns');
+  await f.command('ducking diagnostics');
+  assert.deepEqual(readStatus(f).client, { state: 'connected', leasePresent: true, terminal: null });
+  await f.command('off'); await settle();
+});
+
 test('unknown or unsafe external snapshots never invent a healthy existing client', async t => {
   let value = { state: 'connected', leasePresent: true, terminal: null };
   const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),

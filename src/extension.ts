@@ -100,8 +100,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let focusScope: string | undefined;
   let focusVersion: [number, number] | undefined;
   let focusDiagnosticOwner: number | undefined;
-  let focusClientEpoch = 0;
-  let closingFocusEpoch: number | undefined;
+  let retireFocusWarnings: (() => void) | undefined;
   type FocusSkip = 'generation' | 'invalid_frame' | 'policy_off' | 'inactive_output_unavailable' |
     'version_duplicate' | 'construction_dispatch_error';
   const newFocusTrace = () => ({ observed: 0, acceptedPlaying: 0, playingCalls: 0, lastSkip: null as FocusSkip | null });
@@ -143,9 +142,9 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const closeFocus = async () => {
     const previous = audioFocus;
     const diagnosticLifetime = focusDiagnosticOwner;
+    const retireWarnings = retireFocusWarnings;
     audioFocus = undefined;
-    const clientEpoch = focusClientEpoch++;
-    if (previous) closingFocusEpoch = clientEpoch;
+    retireFocusWarnings = undefined;
     focusDiagnosticOwner = undefined;
     focusToken = focusScope = undefined;
     focusVersion = undefined;
@@ -153,12 +152,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     catch (error) {
       if (!closed && diagnosticLifetime === focusDiagnosticLifetime) {
         focusDiagnostics.record({ component: 'client', operation: 'close', reason: 'cleanup_failed', code: focusErrorCode(error) });
-      }
-      if (!closed && diagnosticLifetime === focusDiagnosticLifetime && !audioFocus && closingFocusEpoch === clientEpoch) {
         notify('Background audio restoration could not be confirmed; check app volume.', 'warning');
       }
     } finally {
-      if (closingFocusEpoch === clientEpoch) closingFocusEpoch = undefined;
+      retireWarnings?.();
     }
   };
   const focusEvent = (frame: CompanionFrame, generation: string | null, scope: string) => {
@@ -192,17 +189,26 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     countFocus('acceptedPlaying');
     focusVersion = [frame.outputEpoch, frame.playbackGeneration];
     try {
-      const diagnosticLifetime = focusDiagnosticLifetime;
-      const clientEpoch = focusClientEpoch;
-      if (!audioFocus) focusDiagnosticOwner = diagnosticLifetime;
-      audioFocus ??= (options.startAudioFocus ?? startAudioFocus)(backgroundAudioPolicy(settings), { env,
-        onWarning: message => {
-          if (!closed && diagnosticLifetime === focusDiagnosticLifetime &&
-              (clientEpoch === focusClientEpoch || (!audioFocus && closingFocusEpoch === clientEpoch))) notify(message, 'warning');
-        },
-        onDiagnostic: event => {
-          if (!closed && diagnosticLifetime === focusDiagnosticLifetime) focusDiagnostics.record(event);
-        } });
+      if (!audioFocus) {
+        const diagnosticLifetime = focusDiagnosticLifetime;
+        let retired = false;
+        const retireWarnings = () => { retired = true; };
+        retireFocusWarnings = retireWarnings;
+        focusDiagnosticOwner = diagnosticLifetime;
+        try {
+          audioFocus = (options.startAudioFocus ?? startAudioFocus)(backgroundAudioPolicy(settings), { env,
+            onWarning: message => {
+              if (!closed && !retired && diagnosticLifetime === focusDiagnosticLifetime) notify(message, 'warning');
+            },
+            onDiagnostic: event => {
+              if (!closed && diagnosticLifetime === focusDiagnosticLifetime) focusDiagnostics.record(event);
+            } });
+        } catch (error) {
+          retireWarnings();
+          if (retireFocusWarnings === retireWarnings) retireFocusWarnings = undefined;
+          throw error;
+        }
+      }
       focusToken = token;
       countFocus('playingCalls');
       audioFocus.playing(token);
