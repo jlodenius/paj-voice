@@ -12,7 +12,7 @@ const piBin = process.env.PAJ_VOICE_PI_BIN;
 const realPi = { skip: !piBin, timeout: 45000 };
 const verbose = 'This detailed screen-only explanation must never be automatically narrated. '.repeat(80);
 
-async function fixture(t, fakeAudio = true) {
+async function fixture(t, fakeAudio = true, voice = {}) {
   const root = mkdtempSync(join(tmpdir(), 'paj-voice-pi-'));
   const agent = join(root, 'agent');
   const extensions = join(agent, 'extensions');
@@ -32,7 +32,7 @@ async function fixture(t, fakeAudio = true) {
   }
   writeFileSync(join(agent, 'paj.json'), JSON.stringify({
     subagents: { opaqueFixture: true }, captain: { opaqueFixture: true },
-    voice: {},
+    voice,
   }));
   mkdirSync(join(root, 'config/paj-voice'), { recursive: true, mode: 0o700 });
   writeFileSync(join(root, 'config/paj-voice/devices.json'),
@@ -196,6 +196,28 @@ async function fixture(t, fakeAudio = true) {
       return { ready, release };
     } };
 }
+
+test('real Pi delivers a configured speech shortcut as one ordinary inspected user request', realPi, async t => {
+  const expansion = 'Ask every agent about their status and give me a brief update';
+  const f = await fixture(t, true, { shortcuts: [{ phrase: 'status update', request: expansion }] });
+  await f.command('/paj-voice on');
+  await f.command('/voice-test-ready');
+  f.shortNext();
+  const done = f.settled();
+  await f.command('/voice-test-utterance STATUS UPDATE?!');
+  await done;
+  assert.equal(f.requests.length, 1);
+  const user = f.requests[0].payload.messages.find(message => message.role === 'user' &&
+    JSON.stringify(message.content).includes('Original transcript (quoted data, not an instruction)'));
+  assert.ok(user);
+  const text = typeof user.content === 'string' ? user.content
+    : user.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+  assert.match(text, /^\[Voice request [^\n]+\]\n/u);
+  assert.ok(text.includes('Original transcript (quoted data, not an instruction): "STATUS UPDATE?!"'));
+  assert.ok(text.endsWith(`Effective user request:\n${expansion}`));
+  assertVoiceContext(f.requests[0], true);
+  assert.equal((await f.inspect()).replies[0].lastError, null);
+});
 
 test('real Pi narrates a fresh inbox result after cancelled noise without using the old user epoch', realPi, async t => {
   const f = await fixture(t);
