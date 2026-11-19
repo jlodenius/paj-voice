@@ -61,6 +61,52 @@ class GraphTests(unittest.TestCase):
         )
         return Graph(paths=PATHS, run=run)
 
+    def test_output_hint_uses_only_explicit_node_form_factor_and_never_bluetooth(self):
+        for form, expected in [('speaker', 'speakers'), ('headphone', 'headphones'),
+                               ('headset', 'headphones'), ('internal', 'unknown'),
+                               ('Speaker', 'unknown'), (['speaker', 'headphone'], 'unknown'),
+                               (None, 'unknown')]:
+            for bluetooth in (False, True):
+                with self.subTest(form=form, bluetooth=bluetooth):
+                    source, sink = entry(SOURCE), entry(SINK)
+                    props = sink['info']['props']
+                    props.update({'device.id': 7, 'node.description': 'Headphone Speakers',
+                                  'device.form-factor': form})
+                    card = {'id': 7, 'type': 'PipeWire:Interface:Device', 'info': {'props': {
+                        'device.name': 'synthetic.card', 'device.api': 'bluez5' if bluetooth else 'alsa',
+                        'device.form-factor': 'speaker'}}}
+                    devices = self.graph([card, source, sink]).devices()
+                    self.assertNotIn('outputHint', devices[0])
+                    self.assertEqual(devices[1].get('outputHint'),
+                                     'unknown' if bluetooth else expected)
+
+    def test_output_hint_never_guesses_from_names_cards_ports_or_bluetooth_profiles(self):
+        for props in ({'node.description': 'Built-in Speakers'},
+                      {'device.form-factor': 'speaker', 'device.api': 'bluez5'},
+                      {'device.form-factor': 'speaker', 'device.bus': 'bluetooth'},
+                      {'device.form-factor': 'headphone', 'api.bluez5.profile': 'a2dp-sink'},
+                      {'device.form-factor': 'headset', 'bluez5.codec': 'sbc'},
+                      {'port.name': 'analog-output-speaker'}):
+            with self.subTest(props=props):
+                sink = entry(SINK)
+                sink['info']['props'].update(props)
+                self.assertEqual(self.graph([sink]).devices()[0]['outputHint'], 'unknown')
+        sink = entry(SINK)
+        sink['info']['props'].update({'device.id': 7, 'device.form-factor': 'speaker'})
+        card = {'id': 7, 'type': 'PipeWire:Interface:Device', 'info': {'props': {
+            'device.name': 'synthetic.card', 'device.api': 'alsa'}}}
+        self.assertEqual(self.graph([sink, card, card]).devices()[0]['outputHint'], 'unknown')
+
+    def test_output_hint_requires_a_verified_non_bluetooth_device_association(self):
+        sink = entry(SINK)
+        sink['info']['props'].update({'device.id': 7, 'device.form-factor': 'headphone'})
+        self.assertEqual(self.graph([sink]).devices()[0]['outputHint'], 'unknown')
+        for api in (None, '', 'unclassified', 'bluez5'):
+            with self.subTest(api=api):
+                card = {'id': 7, 'type': 'PipeWire:Interface:Device', 'info': {'props': {
+                    'device.name': 'synthetic.card', 'device.api': api}}}
+                self.assertEqual(self.graph([sink, card]).devices()[0]['outputHint'], 'unknown')
+
     def test_configured_fallback_pair_rejects_absence_and_wrong_physical_identity(self):
         card = {'id': 7, 'type': 'PipeWire:Interface:Device',
                 'info': {'props': {'device.name': 'alsa.builtin', 'device.api': 'alsa'}}}

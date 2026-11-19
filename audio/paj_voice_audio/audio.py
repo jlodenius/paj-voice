@@ -71,8 +71,9 @@ class Segments:
                 }
                 self.clear_preroll()
                 self.pause()
-                self.emit({"type": "onset", "id": self.serial,
-                           "epoch": self.current["epoch"], "at": now})
+                if self.emit({"type": "onset", "id": self.serial,
+                              "epoch": self.current["epoch"], "at": now}) is False:
+                    self.discard()
             else:
                 turn = self.current
                 limit = int((self.maximum + 1) * 16000) * 2

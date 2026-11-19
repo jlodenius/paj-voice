@@ -120,6 +120,22 @@ def resolve_node(entries, name, kind, device=None):
     return select_node(entries, node_properties(matches[0]).get('node.name'), kind)
 
 
+def output_hint(entries, props, node):
+    cards = [entry for entry in entries if entry.get('type') == 'PipeWire:Interface:Device'
+             and str(entry.get('id')) == str(props.get('device.id'))]
+    if (node.bluetooth or props.get('device.api') == 'bluez5'
+            or props.get('device.bus') == 'bluetooth'
+            or any(key.startswith(('api.bluez5.', 'bluez5.')) for key in props)
+            or len(cards) != 1
+            or node_properties(cards[0]).get('device.api') != 'alsa'
+            or any(node_properties(card).get('device.api') == 'bluez5'
+                   or node_properties(card).get('device.bus') == 'bluetooth' for card in cards)):
+        return 'unknown'
+    form = props.get('device.form-factor')
+    return {'speaker': 'speakers', 'headphone': 'headphones', 'headset': 'headphones'}.get(
+        form if isinstance(form, str) else None, 'unknown')
+
+
 class Graph:
     def __init__(self, paths=None, run=None, clock=time.monotonic):
         self.clock = clock
@@ -171,6 +187,8 @@ class Graph:
                     **({"device": node.device} if node.device else {}),
                     **({"bluetooth": True} if node.bluetooth else {}),
                     "class": node.kind,
+                    **({"outputHint": output_hint(entries, props, node)}
+                       if node.kind == "Audio/Sink" else {}),
                     "description": props.get("node.description", ""),
                 }
             )

@@ -43,7 +43,7 @@ def wait_for(predicate):
 
 class OpenMicTests(unittest.TestCase):
     def fixture(self, hold_load=False, capture_process=False, bluetooth=False, transition=False, prepare=None,
-                clock=None):
+                clock=None, native_playback=False, write=None):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
@@ -110,6 +110,16 @@ class OpenMicTests(unittest.TestCase):
         class Sink:
             def __init__(self, *args):
                 self.closed = False
+                self.rate = 16000
+
+            def abort(self):
+                pass
+
+            def write(self, pcm, current):
+                return write(pcm, current) if write else current()
+
+            def drain(self, current):
+                pass
 
             def health(self):
                 pass
@@ -134,7 +144,7 @@ class OpenMicTests(unittest.TestCase):
 
         for name, replacement in (("validate", lambda value: config), ("Graph", lambda: graph),
                                   ("SpeechInference", load), ("Capture", Capture),
-                                  ("PipeSink", Sink), ("Speaker", Speaker)):
+                                  ("PipeSink", Sink), ("Speaker", open_mic.Speaker if native_playback else Speaker)):
             stack.enter_context(patch.object(open_mic, name, replacement))
         stack.enter_context(patch.dict(sys.modules, {"pysilero_vad":
                             types.SimpleNamespace(SileroVoiceActivityDetector=object)}))
@@ -148,7 +158,7 @@ class OpenMicTests(unittest.TestCase):
         runtime.command({"type": "configure", "config": {}})
         self.assertTrue(load_entered.wait(1))
         if not hold_load:
-            wait_for(lambda: runtime.ready and ("ready" in played or runtime.target is None))
+            wait_for(lambda: runtime.ready and (native_playback or "ready" in played or runtime.target is None))
         if clock:
             runtime.clock = clock
         return runtime, events, captures, played, models, graph, release_load

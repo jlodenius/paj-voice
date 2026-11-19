@@ -237,6 +237,8 @@ class FallbackTests(unittest.TestCase):
         test_open_mic.wait_for(lambda: not runtime.owned_playback)
         self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
         now[0] += 0.6
+        self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
+        now[0] += 0.9
         self.assertTrue(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
         self.assertFalse(any(event['type'] == 'addressed' for event in events))
 
@@ -264,6 +266,8 @@ class FallbackTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
         now[0] += 0.6
+        self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
+        now[0] += 0.9
         self.assertTrue(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
 
     def test_startup_model_fault_is_not_replaced_by_fallback(self):
@@ -300,6 +304,8 @@ class FallbackTests(unittest.TestCase):
         now[0] += 1
         runtime._speaker_event({'type': 'idle', 'id': 'readout', 'generation': 1})
         now[0] += 1
+        self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
+        now[0] += 0.9
         self.assertTrue(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
         self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, True, start + 0.5))
         self.assertFalse(runtime._capture_allowed(b'\0\0' * 512, True, start + 1.3))
@@ -307,6 +313,7 @@ class FallbackTests(unittest.TestCase):
         runtime.gate.receiver.feed(b'\0\0' * 512, True, captured_at=start + 1.3)
         self.assertFalse(any(event['type'] == 'addressed' for event in events))
         models.transcribe.assert_not_called()
+        now[0] += 0.01
         self.assertTrue(runtime._capture_allowed(b'\0\0' * 512, False, now[0]))
 
     def test_old_cancelled_activity_cannot_release_current_answer_guard(self):

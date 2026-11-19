@@ -369,7 +369,7 @@ class Runtime:
                         self.epoch += 1
                         epoch = self.epoch
                         self.segments = Segments(lambda event, bound=epoch: self._segment(event, bound),
-                                                 lambda bound=epoch: self._interrupt(bound), lambda bound=epoch: bound,
+                                                 lambda: None, lambda bound=epoch: bound,
                                                  silence=config["turn"]["silenceMs"] / 1000,
                                                  maximum=config["turn"]["maxSeconds"])
                         self.gate = InputReady(HealthyInput(self.segments, self._capture_allowed))
@@ -500,27 +500,31 @@ class Runtime:
                     self.guard_quiet = None
                 elif self.guard_quiet is None:
                     self.guard_quiet = captured
-                if (not voiced and (not self.guard_voiced or (self.guard_quiet is not None
-                        and captured - self.guard_quiet >= self.config['turn']['silenceMs'] / 1000))):
+                if (not voiced and self.guard_quiet is not None
+                        and captured - self.guard_quiet >= self.config['turn']['silenceMs'] / 1000):
                     self.guard_voiced = False
+                    self.acoustic_until = max(self.acoustic_until, captured)
                     self._set_listening(True)
                 allowed = self.listening
             else:
                 allowed = True
             segments = self.segments
             if not allowed:
-                self.input_active = False
-                for ident in self.pending:
-                    self.emit({'type': 'cancelled', 'id': ident, 'reason': 'capture_paused'})
-                self.pending.clear()
-                while True:
-                    try:
-                        self.jobs.get_nowait().clear()
-                    except queue.Empty:
-                        break
+                self._drop_pending_capture()
         if not allowed and segments:
             segments.discard()
         return allowed
+
+    def _drop_pending_capture(self):
+        self.input_active = False
+        for ident in self.pending:
+            self.emit({'type': 'cancelled', 'id': ident, 'reason': 'capture_paused'})
+        self.pending.clear()
+        while True:
+            try:
+                self.jobs.get_nowait().clear()
+            except queue.Empty:
+                break
 
     def _capture_fault(self, error, epoch):
         with self.lock:
@@ -593,7 +597,8 @@ class Runtime:
 
     def _interrupt(self, epoch):
         with self.lock:
-            if self.closed or self.muted or self._input_blocked() or self.epoch != epoch:
+            if (self.closed or self.muted or self._input_blocked() or self.epoch != epoch
+                    or (self.speaker_mode and not self.listening)):
                 return
             self.input_active = True
             self.revision += 1
@@ -612,9 +617,15 @@ class Runtime:
         try:
             ident = f"e{epoch}-t{event['id']}"
             with self.lock:
-                if self.closed or self.muted or self._input_blocked() or not self.ready or not self.input_available or self.epoch != epoch:
-                    return
+                if (self.closed or self.muted or self._input_blocked() or not self.ready
+                        or not self.input_available or self.epoch != epoch
+                        or (self.speaker_mode and not self.listening)):
+                    return False
                 if event["type"] == "onset":
+                    # Admission can race playback; fence the onset before interrupting output.
+                    if self.speaker_mode and event.get('at', self.clock()) <= self.acoustic_until:
+                        return False
+                    self._interrupt(epoch)
                     if len(self.pending) >= 4:
                         raise RuntimeError("Too many pending utterances")
                     self.pending.add(ident)
@@ -622,6 +633,8 @@ class Runtime:
                 elif event["type"] == "truncated":
                     self.emit({"type": "limit", "id": ident})
                 elif event["type"] == "endpoint":
+                    if ident not in self.pending:
+                        return
                     self.input_active = False
                     if not event["pcm"]:
                         self.pending.discard(ident)
@@ -758,6 +771,7 @@ class Runtime:
                     self.guard_quiet = None
                     self.guard_voiced = False
                     self._set_listening(False)
+                    self._drop_pending_capture()
                 return
             if event['type'] == 'idle':
                 token = (event.get('generation'), event.get('id'))
@@ -924,10 +938,10 @@ class Runtime:
             epoch, pause_revision = self.epoch, self.pause_revision
             self.guard_voiced = False
             self.guard_quiet = None
-            if not self.owned_playback and self.clock() > self.acoustic_until:
+            if not self.speaker_mode and not self.owned_playback and self.clock() > self.acoustic_until:
                 self._set_listening(True)
         segments = Segments(lambda event: self._segment(event, epoch),
-                            lambda: self._interrupt(epoch), lambda: epoch,
+                            lambda: None, lambda: epoch,
                             silence=self.config['turn']['silenceMs'] / 1000,
                             maximum=self.config['turn']['maxSeconds'])
         gate = InputReady(HealthyInput(segments, self._capture_allowed))
