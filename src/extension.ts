@@ -19,6 +19,8 @@ interface VoiceOptions {
   saveDevices?: typeof saveDevices;
   loadRoutes?: typeof loadRoutes;
   saveRoute?: typeof saveRoute;
+  saveRouteBinding?: typeof saveRouteBinding;
+  updateRouteProtection?: typeof updateRouteProtection;
   saveFallback?: typeof saveFallback;
   startCompanion?: (options: Parameters<typeof startCompanion>[0]) => Companion;
   startAudioFocus?: typeof startAudioFocus;
@@ -35,7 +37,7 @@ import { createAdmission } from './admission.ts';
 import { startCompanion } from './companion.ts';
 import { spokenAnswer } from './speech-text.ts';
 import { runtimePaths } from './runtime-paths.ts';
-import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices, loadRoutes, saveRoute, saveFallback, routeName, sameDeviceSelection } from './device-settings.ts';
+import { deviceChoices, deviceSettingsPath, loadDevices, saveDevices, loadRoutes, saveRoute, saveRouteBinding, updateRouteProtection, saveFallback, routeName, sameDeviceSelection } from './device-settings.ts';
 import { voiceRequestMarkdown, voiceStatus, voiceWidget } from './voice-ui.ts';
 import type { VoiceDisplayState, VoiceLayout } from './voice-ui.ts';
 
@@ -753,8 +755,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     }
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'pause', 'resume', 'stop', 'status', 'devices', 'setup', 'voices', 'route', 'fallback', 'ducking preview', 'ducking diagnostics', 'recover', 'mute', 'unmute']
+    description: 'Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, protection <name> [speakers|headphones], route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'pause', 'resume', 'stop', 'status', 'devices', 'setup', 'protection', 'voices', 'route', 'fallback', 'ducking preview', 'ducking diagnostics', 'recover', 'mute', 'unmute']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
@@ -803,6 +805,49 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (parts[0] === 'route') {
         try { notify(JSON.stringify(parts[1] ? await switchRoute(parts[1]) : routeSummary())); }
         catch { notify('Cannot select saved route. Check its name and private route settings.', 'error'); }
+        return;
+      }
+      if (parts[0] === 'protection') {
+        if (!parts[1] || parts.length > 3 || (parts[2] && !['speakers', 'headphones'].includes(parts[2]))) {
+          notify('Use /paj-voice protection <name> [speakers|headphones]. Voice must be off.', 'warning'); return;
+        }
+        if (controller.state().generation || arming || configuring) {
+          notify('Turn Voice off before editing protection; the armed runtime uses its original snapshot.', 'warning'); return;
+        }
+        if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
+            env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID ||
+            (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
+          notify('Edit protection in a main Pi TUI session.', 'warning'); return;
+        }
+        configuring = true;
+        const activation = lifetime, session = current.sessionManager.getSessionId();
+        const isCurrent = () => !closed && activation === lifetime && ctx === current && current.mode === 'tui' && current.hasUI &&
+          session === ctx?.sessionManager.getSessionId() && !controller.state().generation;
+        try {
+          const name = routeName(parts[1]);
+          const before = readRoutes();
+          const expected = before?.routes[name];
+          if (!expected) throw new Error('Unknown saved route; set it up first');
+          const speakers = 'Speakers / uncertain — protection ON (half-duplex)';
+          const headphones = 'I confirm headphones — protection OFF (full-duplex)';
+          const mode = parts[2] ?? await current.ui.select(
+            `Protection for ${name}: ${expected.speakerMode === undefined ? 'legacy route, choice required' : expected.speakerMode ? 'currently ON' : 'currently OFF'}`,
+            [speakers, headphones]);
+          if (!mode || !isCurrent()) return;
+          if (!['speakers', 'headphones', speakers, headphones].includes(mode)) throw new Error('Invalid protection choice');
+          const speakerMode = mode === 'speakers' || mode === speakers;
+          if (before?.fallback === name && !speakerMode) throw new Error('Automatic fallback requires protection; it cannot be disabled');
+          if (!await current.ui.confirm(`Set ${name} protection ${speakerMode ? 'ON' : 'OFF'}?`,
+            `${speakerMode
+              ? 'Half-duplex, not acoustic echo cancellation: recognition pauses for ALL Voice output plus its tail and until quiet. No voice barge-in during readouts; use typed /paj-voice stop, also shown in the panel.'
+              : 'Confirm you are using headphones. Full-duplex voice interruption remains available; speakers may transcribe Voice output as new commands.'}
+Only speaker protection changes. Exact endpoints, preferred route and fallback remain unchanged. Voice stays off; applies at the next manual arm.`)) return;
+          if (!isCurrent()) return;
+          (options.updateRouteProtection ?? updateRouteProtection)(deviceSettingsPath(env), name, speakerMode, expected);
+          notify(`Protection ${speakerMode ? 'ON (half-duplex)' : 'OFF (confirmed headphones, full-duplex)'} saved for ${name}. Endpoints, preferred and fallback unchanged. Voice remains off; applies at next manual arm.`);
+          updateDisplay();
+        } catch (error) { notify(`Cannot edit protection: ${errorMessage(error)}`, 'error'); }
+        finally { configuring = false; }
         return;
       }
       if (parts[0] === 'fallback' && !fallbackSetup) {
@@ -883,7 +928,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|voices|recover]. Compatibility aliases: mute, unmute.', 'warning');
+        notify('Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|protection <name> [speakers|headphones]|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|voices|recover]. Compatibility aliases: mute, unmute.', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;
@@ -905,12 +950,14 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
             env.PAJ_PARENT_PI_SESSION_ID || env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID ||
             (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary'))) throw new Error('Select devices in a main Pi TUI session');
         if (command === 'setup') {
+          routeName(setupName!);
           if (fallbackSetup && setupName === readRoutes()?.active) throw new Error('Choose a different fallback route name; the preferred binding must remain unchanged');
           configuring = true; ownsSetup = true;
         }
         if (command === 'devices' || command === 'setup') {
           const activation = lifetime, id = current.sessionManager.getSessionId();
-          const isCurrent = () => !closed && activation === lifetime &&
+          const before = command === 'setup' ? readRoutes() : undefined;
+          const isCurrent = () => !closed && activation === lifetime && ctx === current && current.mode === 'tui' && current.hasUI &&
             id === ctx?.sessionManager.getSessionId() && !controller.state().generation;
           const result = await pi.exec(runtimePaths(env).executable, ['--devices'], { timeout: 10000, maxBuffer: 32768 });
           if (result.code !== 0 || result.killed || result.truncated) throw new Error('Cannot enumerate audio devices');
@@ -921,29 +968,53 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
             return;
           }
           if (!isCurrent()) return;
-          const local = (options.loadDevices ?? loadDevices)(deviceSettingsPath(env), false);
+          const local = before?.routes[setupName!] ?? (options.loadDevices ?? loadDevices)(deviceSettingsPath(env), false);
           const inputs = deviceChoices(devices, 'Audio/Source', local?.input);
           const outputs = deviceChoices(devices, 'Audio/Sink', local?.output);
-          if (!inputs.length || !outputs.length) throw new Error('Connect a supported microphone and headphones first');
+          if (!inputs.length || !outputs.length) throw new Error('Connect a supported microphone and playback device first');
           const inputLabel = await current.ui.select('Voice microphone', inputs.map(item => item.label));
           if (!inputLabel || !isCurrent()) return;
-          const outputLabel = await current.ui.select('Voice headphones / playback', outputs.map(item => item.label));
+          const outputLabel = await current.ui.select('Voice playback (headphones or speakers)', outputs.map(item => item.label));
           if (!outputLabel || !isCurrent()) return;
           const input = inputs.find(item => item.label === inputLabel), output = outputs.find(item => item.label === outputLabel);
           if (!input || !output) throw new Error('Invalid device selection');
-          const confirmed = await current.ui.confirm(fallbackSetup ? `Save automatic fallback ${setupName}?` : 'Save voice devices?',
-            `${input.label}\n${output.label}\n${fallbackSetup
-              ? 'This microphone and output may activate automatically on preferred-device loss. The preferred route stays unchanged. Speaker mode pauses recognition during Voice readouts and until quiet; returning to the preferred route is manual.'
-              : 'Use headphones.'} Voice stays off; arming remains a separate confirmation.`);
+          const protection = 'Speakers / uncertain — protection ON (half-duplex)';
+          const headphones = 'I confirm headphones — protection OFF (full-duplex)';
+          const mode = fallbackSetup ? protection : await current.ui.select(
+            `Playback protection: ${output.outputHint === 'headphones'
+              ? 'metadata suggests headphones, not proof; confirm your actual output'
+              : 'speakers or unknown output; protection ON recommended'}`,
+            [protection, headphones]);
+          if (!mode || !isCurrent()) return;
+          if (mode !== protection && mode !== headphones) throw new Error('Invalid protection choice');
+          const speakerMode = mode === protection;
+          if (before?.fallback === setupName && !speakerMode) throw new Error('Automatic fallback requires speaker protection');
+          let activate = false;
+          if (!fallbackSetup && before && before.active !== setupName) {
+            const keep = `Keep ${before.active} preferred (recommended)`;
+            const change = `Make ${setupName} preferred`;
+            const preferred = await current.ui.select('Preferred route after saving', [keep, change]);
+            if (!preferred || !isCurrent()) return;
+            if (preferred !== keep && preferred !== change) throw new Error('Invalid preferred route choice');
+            activate = preferred === change;
+          }
+          const confirmed = await current.ui.confirm(fallbackSetup ? `Save automatic fallback ${setupName}?`
+            : `${before?.routes[setupName!] ? 'Replace' : 'Save'} voice route ${setupName}?`,
+            `${input.label}\n${output.label}\n${speakerMode
+              ? 'Protection ON: half-duplex, not acoustic echo cancellation. Recognition pauses for ALL Voice output plus its tail and until quiet. No voice barge-in during readouts; use typed /paj-voice stop, also shown in the panel.'
+              : 'Protection OFF: confirmed headphones, full-duplex voice interruption. Speakers may transcribe Voice output as new commands.'}\n${fallbackSetup
+              ? 'This microphone and output may activate automatically on preferred-device loss. The preferred route stays unchanged; returning to it is manual.'
+              : !before ? 'This becomes the initial preferred route.'
+                : activate ? `${setupName} becomes preferred.` : `Preferred route ${before.active} is unchanged.`}
+Voice stays off; arming remains a separate confirmation.`);
           if (!confirmed || !isCurrent()) return;
-          const selection = { input: input.name, output: output.name,
+          const selection = { input: input.name, output: output.name, speakerMode,
             ...(input.device ? { inputDevice: input.device } : {}),
             ...(output.device ? { outputDevice: output.device } : {}) };
-          if (fallbackSetup) (options.saveFallback ?? saveFallback)(deviceSettingsPath(env), routeName(setupName!), selection);
-          else if (options.saveDevices && setupName === 'default') options.saveDevices(deviceSettingsPath(env), selection);
-          else selectRoute(routeName(setupName!), selection);
+          if (fallbackSetup) (options.saveFallback ?? saveFallback)(deviceSettingsPath(env), routeName(setupName!), selection, before);
+          else (options.saveRouteBinding ?? saveRouteBinding)(deviceSettingsPath(env), routeName(setupName!), selection, before, activate);
           notify(fallbackSetup ? 'Fallback devices saved. Preferred route unchanged. Voice remains off.'
-            : 'Voice devices saved. Voice remains off.');
+            : `Voice route saved. ${!before || activate ? `${setupName} is preferred.` : 'Preferred route unchanged.'} Voice remains off.`);
           return;
         }
         const selectedPreferences = validateConfig((options.loadConfig ?? loadConfig)(configPath(env)));

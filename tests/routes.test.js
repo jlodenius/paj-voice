@@ -18,6 +18,10 @@ function routes() {
       if (expected) assert.deepEqual(saved.routes[name], expected);
       if (selection) saved.routes[name] = selection;
       saved.active = name;
+    }, saveRouteBinding: (_file, name, selection, expected, activate) => {
+      assert.deepEqual(saved, expected);
+      saved.routes[name] = selection;
+      if (activate) saved.active = name;
     } });
   f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify(devices) });
   return { ...f, saved };
@@ -36,7 +40,8 @@ test('named setup and off/muted route selection never open or unmute capture', a
   const f = routes();
   f.ctx.ui.select = async (_title, labels) => labels[0];
   await f.command('setup travel');
-  assert.equal(f.saved.active, 'travel');
+  assert.equal(f.saved.active, 'desk');
+  assert.deepEqual(f.saved.routes.travel, { ...desk, speakerMode: true });
   await f.command('route headset');
   assert.equal(f.saved.active, 'headset');
   assert.equal(f.workers.length, 0);

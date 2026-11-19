@@ -48,11 +48,11 @@ function appearance(state: VoiceDisplayState): {
       detail: 'Waiting for verified endpoints. No unconfigured microphone or speech replay.',
       controls: 'Pause: /paj-voice pause   Off: /paj-voice off' };
   }
-  if (state.speakerMode) return { badge: 'SPEAKER MODE', tone: 'warning',
+  if (state.speakerMode) return { badge: 'SPEAKER MODE | HALF-DUPLEX', tone: 'warning',
     activity: state.speaking ? 'SPEAKING - recognition paused' : state.listening === false
       ? 'WAITING FOR QUIET - recognition paused' : 'LISTENING - speaker-safe microphone',
-    detail: 'Wait for LISTENING before speaking. Use /paj-voice stop to interrupt readouts.',
-    controls: 'Pause: /paj-voice pause   Off: /paj-voice off' };
+    detail: 'No voice barge-in during readouts. Wait for LISTENING before speaking.',
+    controls: 'Stop speech: /paj-voice stop   Pause: /paj-voice pause   Off: /paj-voice off' };
   return { badge: 'OPEN MIC', tone: 'warning',
     activity: state.capturing ? 'RECEIVING SPEECH - agent work may continue'
       : state.speaking ? 'SPEAKING - interrupt with your voice'

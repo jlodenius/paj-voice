@@ -3,7 +3,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works
 import { registerVoice } from '../../src/extension.ts';
 
 const Type = Object.fromEntries(['Object', 'String', 'Optional', 'Integer'].map(name => [name, value => ({ type: name, value })]));
-export function fixture(overrides = {}) {
+export function fixture(overrides = {}, register = registerVoice) {
   const events = new EventEmitter(), handlers = new Map(), tools = new Map(), commands = new Map();
   const notices = [], messages = [], frames = [], workers = [], widgets = [], transformers = [], statuses = [];
   let busy = false, id = 'session-one';
@@ -32,6 +32,7 @@ export function fixture(overrides = {}) {
     loadDevices: () => ({ version: 1, input: 'laptop', output: 'headphones' }),
     loadRoutes: () => undefined,
     saveDevices: forbidden, saveRoute: forbidden, saveFallback: forbidden,
+    saveRouteBinding: forbidden, updateRouteProtection: forbidden,
     startAudioFocus: forbidden, previewBackgroundAudio: forbidden,
     startCompanion(args) {
       const worker = { args, closed: false, send: frame => frames.push(frame), close() { this.closed = true; } };
@@ -47,7 +48,7 @@ export function fixture(overrides = {}) {
   for (const [key, value] of Object.entries(defaults)) {
     options[key] ??= value;
   }
-  const instance = registerVoice(pi, Type, options);
+  const instance = register(pi, Type, options);
   const event = async (name, data = {}) => {
     let result;
     for (const handler of handlers.get(name) ?? []) result = await handler(data, ctx) ?? result;

@@ -159,7 +159,7 @@ test('a final answer interrupted before queue admission is still provided to the
 
 test('setup selects friendly device names while off and saves without opening audio', async () => {
   const saved = [], menus = [];
-  const f = fixture({ saveDevices: (file, audio) => saved.push({ file, audio }) });
+  const f = fixture({ saveRouteBinding: (file, _name, audio) => saved.push({ file, audio }) });
   f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify([
     { name: 'alsa_input.laptop', description: 'Laptop microphone', class: 'Audio/Source' },
     { name: 'bluez_input.headset', description: 'Bluetooth microphone', class: 'Audio/Source' },
@@ -170,7 +170,7 @@ test('setup selects friendly device names while off and saves without opening au
   assert.match(menus[0].labels[0], /Laptop microphone/);
   assert.equal(menus[0].labels.length, 2);
   assert.match(menus[1].labels[0], /Sony headphones/);
-  assert.deepEqual(saved[0].audio, { input: 'alsa_input.laptop', output: 'bluez_output.sony' });
+  assert.deepEqual(saved[0].audio, { input: 'alsa_input.laptop', output: 'bluez_output.sony', speakerMode: true });
   assert.equal(f.workers.length, 0);
   assert.equal(f.controller.state().enabled, false);
   await f.command('on'); f.audio({ type: 'ready' });
@@ -183,7 +183,7 @@ test('setup selects friendly device names while off and saves without opening au
 test('cancelled or invalidated device selection never writes preferences or opens audio', async () => {
   for (const invalidate of [false, true]) {
     const saved = [];
-    const f = fixture({ saveDevices: (...args) => saved.push(args) });
+    const f = fixture({ saveRouteBinding: (...args) => saved.push(args) });
     f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify([
       { name: 'input', class: 'Audio/Source' }, { name: 'output', class: 'Audio/Sink' },
     ]) });

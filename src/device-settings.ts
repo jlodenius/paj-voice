@@ -7,7 +7,8 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { errorCode } from './types.ts';
 import type { DeviceSelection, Environment } from './types.ts';
 
-type AudioDevice = { name: string; class?: unknown; description?: unknown; device?: unknown; bluetooth?: unknown };
+type AudioDevice = { name: string; class?: unknown; description?: unknown; device?: unknown;
+  bluetooth?: unknown; outputHint?: unknown };
 export interface LocalRoutes { version: 2; active: string; fallback?: string; routes: Record<string, DeviceSelection> }
 export function routeName(name: string) {
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(name) || ['constructor', 'prototype', '__proto__'].includes(name)) {
@@ -32,6 +33,8 @@ export function deviceChoices(devices: unknown, kind: string, current?: string) 
     const description = typeof device.description === 'string'
       ? device.description.replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').slice(0, 160).trim() : '';
     return { name: device.name, bluetooth: device.bluetooth === true,
+      outputHint: device.bluetooth !== true && (device.outputHint === 'speakers' || device.outputHint === 'headphones')
+        ? device.outputHint : 'unknown' as const,
       ...(typeof device.device === 'string' ? { device: device.device } : {}),
       label: `${description || device.name}${device.name === current ? ' (current)' : ''} — ${device.name}` };
   }).sort((left, right) => Number(right.name === current) - Number(left.name === current));
@@ -170,11 +173,43 @@ export function saveRoute(file: string, name: string, selection?: DeviceSelectio
   });
 }
 
-export function saveFallback(file: string, name?: string, selection?: DeviceSelection) {
+export function updateRouteProtection(file: string, name: string, speakerMode: boolean, expected: DeviceSelection) {
+  routeName(name);
+  if (typeof speakerMode !== 'boolean') throw new Error('Invalid local speaker mode');
+  changeRoutes(file, before => {
+    if (!before || !sameDeviceSelection(before.routes[name], expected)) {
+      throw new Error('Saved route changed during confirmation; retry without overwriting it');
+    }
+    if (before.fallback === name && speakerMode !== true) {
+      throw new Error('Automatic fallback requires speaker protection; it cannot be disabled');
+    }
+    return { ...before, routes: { ...before.routes, [name]: { ...before.routes[name], speakerMode } } };
+  });
+}
+
+export function saveRouteBinding(file: string, name: string, selection: DeviceSelection,
+  expected: LocalRoutes | undefined, activate = false) {
+  routeName(name);
+  changeRoutes(file, before => {
+    if (JSON.stringify(before) !== JSON.stringify(expected)) {
+      throw new Error('Saved routes changed during setup; retry without overwriting them');
+    }
+    if (before?.fallback === name && selection.speakerMode !== true) {
+      throw new Error('Automatic fallback requires speaker protection');
+    }
+    return { ...before, version: 2, active: activate || !before ? name : before.active,
+      routes: { ...before?.routes, [name]: selection } };
+  });
+}
+
+export function saveFallback(file: string, name?: string, selection?: DeviceSelection, expected?: LocalRoutes) {
   if (name !== undefined) routeName(name);
   if (name === undefined && selection !== undefined) throw new Error('Fallback selection requires a route name');
   changeRoutes(file, before => {
     if (!before) throw new Error('Select a preferred route before configuring fallback');
+    if (expected && JSON.stringify(before) !== JSON.stringify(expected)) {
+      throw new Error('Saved routes changed during fallback confirmation; retry without overwriting them');
+    }
     const { fallback: _, ...preferred } = before;
     if (name === undefined) return preferred;
     if (selection !== undefined && name === before.active) {

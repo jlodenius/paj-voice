@@ -41,7 +41,8 @@ In your main Pi session:
 
 Setup saves your chosen microphone and output without opening audio. Turning Voice on requires
 confirmation; remain quiet until the ready beep. Repeat setup with another name, such as `headset`,
-to save another audio selection.
+to save another audio selection. Setup asks about speaker protection and keeps your preferred route
+unless you explicitly choose otherwise. See [speaker protection](docs/reference.md#speaker-protection).
 
 ## Usage
 
@@ -53,6 +54,7 @@ to save another audio selection.
 | `/paj-voice pause 10 seconds`   | Pause only the microphone for a bounded duration.   |
 | `/paj-voice stop`               | Stop the current spoken reply, not agent work.      |
 | `/paj-voice route [name]`       | List saved audio selections or switch to one.       |
+| `/paj-voice protection <name>`  | Edit speaker protection while Voice is off.         |
 | `/paj-voice status`             | Show current state and settings location.           |
 | `/paj-voice devices` / `voices` | List audio devices / installed speaking voices.     |
 | `/paj-voice recover`            | Put an overlong dictation in the editor for review. |

@@ -31,6 +31,39 @@ listening or be recognized as a request. Headphones are safer.
 
 Bluetooth microphones require WirePlumber's automatic headset-profile switching.
 
+## Speaker protection
+
+Ordinary `/paj-voice setup <name>` asks you to explicitly choose speakers/uncertain playback
+(protection ON) or confirm headphones (protection OFF). Protection ON is the conservative first
+choice. Device metadata is advisory, never proof: Bluetooth is always unknown, and a headphone hint
+never saves a choice automatically. No choice or canceled confirmation means no changes.
+
+Protection ON is **half-duplex**, not acoustic echo cancellation: recognition pauses during all
+Voice output (including receipts, answers, narration, status and fallback speech), through its tail
+and until quiet. Voice barge-in is unavailable during this interval. Use typed `/paj-voice stop`,
+also displayed in the panel; agent work continues. Protection OFF retains full-duplex headphone
+operation.
+Background speech or music outside Voice playback can still become requests; headphones are safer.
+
+To change only an existing route's protection, without selecting new devices:
+
+```text
+/paj-voice protection desk speakers
+/paj-voice protection headset headphones
+```
+
+Omit the last argument for a chooser. Both choices require confirmation in a main Pi TUI with Voice
+fully off. Nothing is hot-applied or automatically rearmed; the saved choice applies at the next
+manual arm. Existing routes without a `speakerMode` flag remain unchanged until you explicitly
+choose. The command changes only that private flag, preserving exact endpoints, route names, preferred
+selection and fallback. Protection cannot be disabled on the configured automatic fallback route.
+
+Setup saves new bindings without changing an existing preferred route unless you explicitly select
+“Make preferred.” The first route becomes the initial preferred route with confirmation. Replacing
+an existing binding is disclosed in the final confirmation. Setup and protection edits refuse stale
+consent or concurrent route changes rather than overwrite them. Choices use the existing private,
+user-owned atomic store; shared preferences are unchanged.
+
 ## Timed microphone pause
 
 While Voice is already armed, use `/paj-voice pause 10 seconds` or say “mute for 10 seconds”.
