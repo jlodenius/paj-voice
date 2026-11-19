@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from paj_voice_audio.cli import main
 from paj_voice_audio.devices import (
     Child,
+    ChildStartError,
     Graph,
     Node,
     PipeCapture,
@@ -377,6 +378,37 @@ class SinkTests(unittest.TestCase):
         self.assertFalse(sink.retired_children)
         self.assertIsNotNone(process.poll())
         thread.join.assert_not_called()
+
+    def test_failed_player_cleanup_blocks_new_launches_until_reaped(self):
+        child = Mock()
+        child.process.poll.return_value = None
+        child.stop.side_effect = OSError('Synthetic teardown failure')
+        launch = Mock(side_effect=ChildStartError(child, False))
+        sink = PipeSink('/synthetic/player', SINK, 22050, launch=launch)
+        def cleanup():
+            child.stop.side_effect = None
+            sink.close()
+        self.addCleanup(cleanup)
+        for _ in range(12):
+            with self.assertRaises(RuntimeError):
+                sink.write(b'\0\0', lambda: True)
+            with self.assertRaises(OSError):
+                sink.abort()
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(sink.retired_children, [child])
+        with self.assertRaises(RuntimeError):
+            sink.health()
+        child.process.poll.return_value = -9
+        child.stop.side_effect = None
+        sink.abort()
+        self.assertFalse(sink.retired_children)
+        healthy = Mock()
+        healthy.process.stdin.fileno.return_value = 123
+        launch.side_effect = None
+        launch.return_value = healthy
+        with patch('paj_voice_audio.devices.os.write', side_effect=lambda fd, data: len(data)):
+            self.assertTrue(sink.write(b'\0\0', lambda: True))
+        self.assertEqual(launch.call_count, 2)
 
     def test_abort_before_launch_and_during_backpressure_discards_stale_pcm(self):
         sink, child, launch = self.sink()

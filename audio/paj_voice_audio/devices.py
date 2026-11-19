@@ -431,6 +431,8 @@ class PipeSink:
                 with self.lock:
                     if self.closed or serial != self.serial:
                         return False
+                    if self.retired_children:
+                        raise RuntimeError('Audio child cleanup is unconfirmed')
                     if self.child is None:
                         try:
                             self.child = self.launch(
@@ -516,6 +518,8 @@ class PipeSink:
 
     def health(self):
         with self.lock:
+            if self.retired_children:
+                raise RuntimeError('Audio child cleanup is unconfirmed')
             if self.child:
                 self.child.health(allow_exit=self.draining)
 
