@@ -34,6 +34,7 @@ import { createPipeWireFocusGraph } from './pipewire-focus.ts';
 import type { BackgroundAudioSettings, FocusPreview } from './audio-focus-types.ts';
 import { createVoiceController } from './controller.ts';
 import { createAdmission } from './admission.ts';
+import { createAvailabilityDiagnosticLog } from './availability-diagnostics.ts';
 import { startCompanion } from './companion.ts';
 import { spokenAnswer } from './speech-text.ts';
 import { runtimePaths } from './runtime-paths.ts';
@@ -73,6 +74,23 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let activeFallback: (DeviceSelection & { name: string }) | undefined;
   let activeRoute: string | undefined;
   let switchingRoute: string | undefined;
+  const availabilityDiagnostics = createAvailabilityDiagnosticLog();
+  let availabilityConnection: object | undefined;
+  const availabilityScope = () => {
+    const state = controller.state();
+    return !closed && companion && state.generation && !state.muted &&
+      state.sessionId === ctx?.sessionManager.getSessionId() ? availabilityConnection : undefined;
+  };
+  const availabilityEvent = (frame: CompanionFrame, generation: string | null) => {
+    if (frame.type !== 'availability_diagnostic') return false;
+    const scope = availabilityScope();
+    if (scope && generation === controller.state().generation) availabilityDiagnostics.record(frame, scope);
+    return true;
+  };
+  const availabilitySummary = () => {
+    const { entries: _, ...summary } = availabilityDiagnostics.snapshot(availabilityScope());
+    return summary;
+  };
   const updateDisplay = (state = controller.state()) => {
     if (!ctx?.hasUI) return;
     let selected: string | undefined;
@@ -383,6 +401,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         config: runtimeConfig(preferences!, selection, activeFallback), generation,
         onEvent(frame) {
           if (activation !== lifetime || closed || companion !== launched) return;
+          if (availabilityEvent(frame, generation)) return;
           focusEvent(frame, generation, focusNamespace);
           if (frame.type === 'error') {
             if (settled) {
@@ -406,6 +425,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         },
       });
       companion = launched;
+      availabilityConnection = {};
     } catch { finish(new Error('Cannot start selected audio route')); }
   });
   const closeAudio = async () => {
@@ -572,6 +592,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     catch { stop(); notify('Voice stopped because its Paj target changed.', 'warning'); }
   });
   pi.on('session_start', (_event, current) => {
+    availabilityDiagnostics.clear();
     focusDiagnosticLifetime++;
     focusDiagnostics.clear();
     focusTrace = newFocusTrace();
@@ -588,6 +609,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.on('session_shutdown', () => {
     recoveries.length = 0;
     closed = true;
+    availabilityDiagnostics.clear();
     focusDiagnosticLifetime++;
     focusDiagnostics.clear();
     focusTrace = newFocusTrace();
@@ -599,7 +621,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     unsubscribeInbox?.();
     ctx = undefined;
   });
-  pi.on('session_tree', () => { recoveries.length = 0; stop(); });
+  pi.on('session_tree', () => { availabilityDiagnostics.clear(); recoveries.length = 0; stop(); });
   pi.on('model_select', () => stop());
   pi.on('before_agent_start', (event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
@@ -710,7 +732,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       state.inputAvailable === false || state.outputAvailable === false || (state.speakerMode && !state.listening)
         ? 'The Voice session remains armed, but audio or recognition is temporarily unavailable. Availability below is authoritative: do not claim full readiness or continuous listening. Agent work and normal tool permissions continue.'
         : 'Eyes-free voice is active for this session: explicitly armed continuous open mic. There is no wake word or classifier. Recognized voice messages are user requests with your normal tool permissions; existing confirmations still apply. Keep normal screen responses useful.',
-      `Selected audio availability: microphone=${state.inputAvailable !== false}, playback=${state.outputAvailable !== false}, recognitionListening=${state.listening}, speakerMode=${!!state.speakerMode}. If playback is unavailable, speech cannot be delivered; never replay old speech on reconnection. If the microphone is unavailable, listening is suspended until that same endpoint returns. Only the explicitly configured fallback route may be selected automatically; otherwise unavailable endpoints stay suspended. Session work continues.`,
+      `Selected audio availability: microphoneCapture=${state.inputAvailable !== false}, playback=${state.outputAvailable !== false}, recognitionListening=${state.listening}, speakerMode=${!!state.speakerMode}. If playback is unavailable, speech cannot be delivered; never replay old speech on recovery. Microphone capture may be unavailable even when the selected endpoint resolves; this does not prove physical removal. Listening is suspended until capture recovers. Only the explicitly configured fallback route may be selected automatically; otherwise unavailable capture/playback stay suspended. Session work continues.`,
       state.speakerMode ? 'Speaker mode is active: recognition pauses during Voice readouts and until quiet to reduce self-transcription. Voice interruption is unavailable during these readouts; use the normal stop command rather than claiming barge-in works. Do not replay discarded speech. Preferred route and active fallback are distinct in route metadata.' : '',
       'Assume the user cannot see the screen. Provide important answers, outcomes, blockers and questions aloud, including when a reporting integration owns narration. Do not replace a spoken answer with a screen referral. Keep screen responses useful as a supplement, not a prerequisite.',
       'Request screen access only when something genuinely requires manual interaction, such as a blocking confirmation or credential entry. Explain aloud what is needed and why; never bypass existing confirmations or treat spoken approval as terminal approval.',
@@ -755,8 +777,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     }
   });
   pi.registerCommand('paj-voice', {
-    description: 'Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, protection <name> [speakers|headphones], route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.',
-    getArgumentCompletions: prefix => ['on', 'off', 'pause', 'resume', 'stop', 'status', 'devices', 'setup', 'protection', 'voices', 'route', 'fallback', 'ducking preview', 'ducking diagnostics', 'recover', 'mute', 'unmute']
+    description: 'Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, protection <name> [speakers|headphones], route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, availability diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.',
+    getArgumentCompletions: prefix => ['on', 'off', 'pause', 'resume', 'stop', 'status', 'devices', 'setup', 'protection', 'voices', 'route', 'fallback', 'ducking preview', 'ducking diagnostics', 'availability diagnostics', 'recover', 'mute', 'unmute']
       .filter(value => value.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, current) {
       ctx = current;
@@ -776,6 +798,12 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           ? `Microphone pause requested for ${seconds} seconds; closure unconfirmed until the recorder acknowledges shutdown. Speech and agent work continue while waiting.`
           : 'Timed microphone pause is unavailable; check Voice status and privacy warnings before assuming capture has closed.',
         result.status === 'requested' ? 'info' : 'warning');
+        return;
+      }
+      if (parts[0] === 'availability') {
+        if (parts.length === 2 && parts[1] === 'diagnostics') {
+          notify(`Availability diagnostics (read-only): ${JSON.stringify(availabilityDiagnostics.snapshot(availabilityScope()))}`);
+        } else notify('Use /paj-voice availability diagnostics. This only reads bounded in-memory observations.', 'warning');
         return;
       }
       if (parts[0] === 'ducking') {
@@ -924,11 +952,11 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
       }
       if (command === 'on' && controller.state().muted) stop();
       if (command === 'status') {
-        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary(true))}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio focus status: ${JSON.stringify(focusStatus())}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}`);
+        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary(true))}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio focus status: ${JSON.stringify(focusStatus())}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}\nAvailability diagnostics: ${JSON.stringify(availabilitySummary())}`);
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
-        notify('Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|protection <name> [speakers|headphones]|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|voices|recover]. Compatibility aliases: mute, unmute.', 'warning');
+        notify('Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|protection <name> [speakers|headphones]|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|availability diagnostics|voices|recover]. Compatibility aliases: mute, unmute.', 'warning');
         return;
       }
       let ownsArming = false, ownsSetup = false;
@@ -1061,6 +1089,7 @@ Voice stays off; arming remains a separate confirmation.`);
         launched = (options.startCompanion ?? startCompanion)({ ...runtimePaths(env), config, generation: state.generation,
           onEvent(frame, generation) {
             if (companion !== launched) return;
+            if (availabilityEvent(frame, generation)) return;
             focusEvent(frame, generation, focusNamespace);
             if (controller.state().generation === generation && frame.type === 'cancelled' && frame.reason === 'utterance_limit') {
               notify('Speech exceeded the utterance limit and was discarded; no request submitted. Use shorter turns.', 'warning');
@@ -1082,6 +1111,7 @@ Voice stays off; arming remains a separate confirmation.`);
           },
         });
         companion = launched;
+        availabilityConnection = {};
         activeSelection = selectedDevices;
         updateDisplay();
         if (!current.isIdle()) controller.newRun({ summaryExpected: !backgroundTurn });

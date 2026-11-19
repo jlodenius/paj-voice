@@ -66,7 +66,7 @@ test('input loss cancels partial capture but preserves output and permits only f
   assert.equal(f.controller.state().epoch, before.epoch);
   f.audio({ type: 'utterance', id: 'partial', text: 'An incomplete command.' });
   assert.equal(f.messages.length, 0);
-  assert.ok(speeches(f).some(frame => /Listening is suspended/.test(frame.text)));
+  assert.ok(speeches(f).some(frame => /Microphone capture is temporarily unavailable/.test(frame.text)));
   availability(f, true, true);
   f.audio({ type: 'addressed', id: 'partial' });
   f.audio({ type: 'utterance', id: 'partial', text: 'A replayed old capture.' });

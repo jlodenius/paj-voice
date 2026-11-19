@@ -31,6 +31,23 @@ listening or be recognized as a request. Headphones are safer.
 
 Bluetooth microphones require WirePlumber's automatic headset-profile switching.
 
+## Availability diagnostics
+
+`/paj-voice availability diagnostics` reads at most 32 validated native availability observations
+from the last 15 minutes. Status includes a summary with reason counts, recording timestamp and age.
+These diagnostics stay only in memory, survive Voice off, and clear on session boundaries/shutdown.
+Reading them performs no device query, process start, IPC, configuration access or recovery action.
+They are separate from background audio focus diagnostics and do not control audio behavior.
+
+The closed reason codes distinguish graph/endpoint resolution failures, capture health failures and
+successful input/output recovery. `inputPresent` and `outputPresent` mean the same selected endpoint
+resolved, not proof of physical presence or working capture. Null means unknown; an unresolved source
+is not proof that the microphone was unplugged. PCM age is bounded or unknown; recovery count is
+native-runtime cumulative, not a count of physical reconnects. Historical entries are explicitly
+marked as not belonging to the current native connection. No valid current observations, including
+older runtimes without this protocol, means `not_observed`, never “healthy.” No endpoint identities,
+raw errors, transcripts or media are retained.
+
 ## Speaker protection
 
 Ordinary `/paj-voice setup <name>` asks you to explicitly choose speakers/uncertain playback

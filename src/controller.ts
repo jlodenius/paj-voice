@@ -554,7 +554,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
         if (usingFallback || !inputAvailable || !outputAvailable) {
           const text = inputAvailable && outputAvailable
             ? 'The preferred route is unavailable. The configured fallback microphone and speakers are active. Recognition pauses during Voice readouts.'
-            : `Voice is armed, but ${!inputAvailable ? 'listening' : 'playback'} is suspended while waiting for configured devices. Nothing was replayed.`;
+            : `Voice is armed, but ${!inputAvailable && !outputAvailable ? 'microphone capture and playback are' : !inputAvailable ? 'microphone capture is' : 'playback is'} temporarily unavailable. Nothing was replayed.`;
           inform(text, 'warning');
           statusAnnouncement = true;
           try { api.speak({ text, generation, epoch, key: 'availability' }); }
@@ -595,11 +595,11 @@ export function createVoiceController({ submit, send, recover, close, changed = 
           if (recoveryStopSpeech) return { fatal: true };
         }
         let text = !inputAvailable && !outputAvailable
-          ? 'Listening and playback are suspended. Waiting for the selected devices. Unfinished speech was not sent.'
+          ? 'Microphone capture and playback are temporarily unavailable. Unfinished speech was not sent.'
           : !inputAvailable
-            ? 'Listening is suspended until the selected microphone returns. Playback remains available. Unfinished speech was not sent.'
+            ? 'Microphone capture is temporarily unavailable. Playback remains available. Unfinished speech was not sent.'
             : !outputAvailable
-              ? `Playback is suspended. Microphone recognition is ${listening ? 'listening' : 'paused'}. Waiting for the same output; old speech will not replay.`
+              ? `Playback is temporarily unavailable. Microphone recognition is ${listening ? 'listening' : 'paused'}. Old speech will not replay.`
               : usingFallback
                 ? 'The configured fallback microphone and speakers are ready. Recognition pauses during Voice readouts. Old speech was not replayed.'
                 : 'The selected microphone and playback are ready again. Old speech was not replayed.';
