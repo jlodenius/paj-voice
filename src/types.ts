@@ -29,7 +29,7 @@ export interface VoiceState extends VoiceToken {
   sessionId: string | null;
   muted: boolean;
   listening: boolean;
-  inputPause?: 'paused' | 'warming' | 'held' | null;
+  inputPause?: 'pausing' | 'paused' | 'warming' | 'held' | 'unconfirmed' | null;
   inputPauseRemainingMs?: number;
   inputAvailable?: boolean;
   outputAvailable?: boolean;

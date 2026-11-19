@@ -165,6 +165,103 @@ class OpenMicTests(unittest.TestCase):
             runtime.segments.feed(b"\0\0" * 1600, True)
         return now
 
+    def test_pause_close_exception_never_acknowledges_privacy_and_retries_owned_recorder(self):
+        runtime, events, captures, *_ = self.fixture(capture_process=True)
+        capture = captures[0]
+        close = capture.close
+        self.addCleanup(close)
+        calls = []
+        def unreliable_close():
+            calls.append(True)
+            if len(calls) == 1:
+                raise OSError('Private recorder detail must not be exposed')
+            close()
+        capture.close = unreliable_close
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        self.assertTrue(runtime.failed)
+        self.assertTrue(runtime.closed)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertIsNotNone(capture.child.process.poll())
+        self.assertFalse(any(e['type'] == 'input_pause_state' for e in events))
+        error = next(e for e in events if e['type'] == 'error')
+        self.assertEqual(error['stage'], 'input-pause-closure')
+        self.assertIn('closure unconfirmed', error['message'])
+        self.assertNotIn('Private recorder detail', error['message'])
+        self.assertIsNone(runtime.input_pause)
+        runtime._health_tick(0)
+        self.assertEqual(len(captures), 1)
+
+    def test_pause_retains_failed_or_unconfirmed_recorder_until_cleanup_really_reaps_it(self):
+        for failure in ('exception', 'live-child'):
+            with self.subTest(failure=failure):
+                now = [0]
+                runtime, events, captures, *_ = self.fixture(capture_process=True, clock=lambda: now[0])
+                capture = captures[0]
+                close = capture.close
+                self.addCleanup(close)
+                def unconfirmed_close():
+                    if failure == 'exception':
+                        raise OSError('Fake permanent close failure')
+                    capture.closed = True
+                capture.close = unconfirmed_close
+                runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+                self.assertTrue(runtime.failed and runtime.closed)
+                self.assertFalse(runtime.shutdown_complete.is_set())
+                self.assertIsNone(capture.child.process.poll())
+                self.assertTrue(any(resources[1] is capture for resources in runtime.retired_inputs))
+                self.assertFalse(any(e['type'] == 'input_pause_state' for e in events))
+                now[0] = 100
+                runtime._health_tick(0)
+                runtime.command({'type': 'input_pause', 'id': 'new', 'seconds': 1})
+                self.assertEqual(len(captures), 1)
+                self.assertIsNone(runtime.input_pause)
+                capture.close = close
+                runtime.shutdown()
+                self.assertIsNotNone(capture.child.process.poll())
+                self.assertFalse(runtime.retired_inputs)
+                self.assertTrue(runtime.shutdown_complete.is_set())
+
+    def test_failed_recorder_cleanup_retries_on_long_lived_health_worker(self):
+        runtime, events, captures, *_ = self.fixture(capture_process=True)
+        capture = captures[0]
+        close = capture.close
+        self.addCleanup(close)
+        calls = []
+        def eventually_close():
+            calls.append(True)
+            if len(calls) < 4:
+                raise OSError('Fake transient recorder teardown failure')
+            close()
+        capture.close = eventually_close
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        wait_for(lambda: runtime.shutdown_complete.is_set())
+        self.assertGreaterEqual(len(calls), 4)
+        self.assertIsNotNone(capture.child.process.poll())
+        self.assertFalse(runtime.retired_inputs)
+        self.assertFalse(any(e['type'] == 'input_pause_state' for e in events))
+
+    def test_warming_recorder_close_failure_on_identity_loss_is_also_retained_and_fatal(self):
+        now = [0]
+        runtime, events, captures, _, _, graph, _ = self.fixture(clock=lambda: now[0])
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        now[0] = 1
+        runtime._health_tick(0)
+        capture = captures[-1]
+        close = capture.close
+        self.addCleanup(close)
+        capture.close = Mock(side_effect=OSError('Fake warmup recorder close failure'))
+        graph.recover.side_effect = lambda frozen: (None, frozen[1])
+        before = len(events)
+        runtime._health_tick(0)
+        self.assertTrue(runtime.failed)
+        self.assertFalse(capture.closed)
+        self.assertTrue(any(resources[1] is capture for resources in runtime.retired_inputs))
+        self.assertFalse(any(e['type'] == 'input_pause_state' for e in events[before:]))
+        capture.close = close
+        runtime.shutdown()
+        self.assertTrue(capture.closed)
+        self.assertFalse(runtime.retired_inputs)
+
     def test_timed_input_pause_closes_recorder_before_ack_and_preserves_output(self):
         runtime, events, captures, played, models, *_ = self.fixture(capture_process=True)
         speaker, sink, output_epoch, revision = runtime.speaker, runtime.sink, runtime.output_epoch, runtime.revision

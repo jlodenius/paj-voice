@@ -11,13 +11,15 @@ async function armed() {
 }
 
 test('typed timed pause aliases use strict bounded duration grammar and leave output armed', async () => {
-  for (const command of ['pause 10 seconds', 'mute for 10 seconds', 'pause 1 minute', 'mute 5s', 'pause for 2 min']) {
+  for (const command of ['pause 10 seconds', 'mute 10 seconds', 'mute for 10 seconds', 'pause 1 minute', 'mute 5s', 'pause for 2 min']) {
     const f = await armed();
     await f.command(command);
     assert.equal(f.frames.at(-1).type, 'input_pause', command);
     assert.equal(f.workers[0].closed, false);
-    assert.match(panel(f), /MIC PAUSED/);
-    assert.match(panel(f), /Speech and agent work continue/);
+    assert.match(panel(f), /MIC PAUSING/);
+    assert.match(panel(f), /closure unconfirmed/i);
+    assert.doesNotMatch(panel(f), /Microphone closed|remaining/);
+    assert.match(f.notices.at(-1)[0], /requested.*closure unconfirmed/i);
     await f.command('off');
   }
   for (const duration of ['0 seconds', '301s', '-1s', '+1s', '1.5 seconds', '1 second junk', '10', '1m 2s', '6m', '1e2s']) {
@@ -36,6 +38,7 @@ test('timed pause cancellation follows off, full pause, shutdown, session replac
     const f = await armed();
     await f.command('pause 1s');
     const request = f.frames.at(-1), worker = f.workers[0];
+    f.audio({ type: 'input_pause_state', id: request.id, phase: 'paused', remainingMs: 800 });
     if (action === 'shutdown') await f.event('session_shutdown');
     else if (action === 'session') { f.replace(); await f.event('session_start'); }
     else await f.command(action);
@@ -79,7 +82,7 @@ test('spoken input pause tool is hidden off and gated by tokens; countdown disti
   assert.equal(tool.exposure, 'direct');
   const token = f.controller.state();
   assert.equal((await tool.execute('stale', { ...token, seconds: 10, epoch: token.epoch - 1 })).details.status, 'stale');
-  assert.equal((await tool.execute('mute-ten', { ...token, seconds: 10 })).details.status, 'paused');
+  assert.equal((await tool.execute('mute-ten', { ...token, seconds: 10 })).details.status, 'requested');
   const request = f.frames.at(-1);
   assert.equal(request.type, 'input_pause');
   assert.equal((await tool.execute('mute-ten', { ...token, seconds: 10 })).details.status, 'duplicate');

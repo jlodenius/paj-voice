@@ -15,16 +15,83 @@ function fixture() {
   return { controller, sent, submitted, states, notifications, event, speak, generation: start.generation };
 }
 
+test('timed pause remains unconfirmed until native closure acknowledgement and times out safely', () => {
+  const timers = new Map(), sent = [], notices = [];
+  let serial = 0, closes = 0;
+  const c = createVoiceController({ submit() { assert.fail('Unconfirmed capture must not submit'); },
+    send: frame => { sent.push(frame); return true; }, close: () => closes++,
+    notify: (...args) => notices.push(args), setTimer(fn, delay) { const id = ++serial; timers.set(id, { fn, delay }); return id; },
+    clearTimer: id => timers.delete(id) });
+  const token = c.start('s');
+  const event = frame => c.event(frame, token.generation);
+  event({ type: 'ready' });
+  assert.equal(c.pauseInput(10, c.state(), 'pending').status, 'requested');
+  assert.equal(c.state().inputPause, 'pausing');
+  assert.equal(c.state().inputPauseRemainingMs, 0);
+  event({ type: 'addressed', id: 'late' });
+  event({ type: 'utterance', id: 'late', text: 'Must not submit' });
+  event({ type: 'input_pause_state', id: 'wrong', phase: 'paused', remainingMs: 9000 });
+  assert.equal(c.state().inputPause, 'pausing');
+  const deadline = [...timers.values()].find(timer => timer.delay === 3000).fn;
+  event({ type: 'input_pause_state', id: 'pending', phase: 'paused', remainingMs: 6500 });
+  assert.equal(c.state().inputPause, 'paused');
+  assert.equal(c.state().inputPauseRemainingMs, 6500);
+  deadline();
+  assert.equal(closes, 0);
+  c.pauseInput(5, c.state(), 'missing');
+  [...timers.values()].find(timer => timer.delay === 3000).fn();
+  assert.equal(closes, 1);
+  assert.equal(c.state().inputPause, 'unconfirmed');
+  assert.equal(c.state().listening, false);
+  assert.equal(sent.at(-1).type, 'shutdown');
+  assert.match(notices.at(-1)[0], /closure.*unconfirmed/i);
+  event({ type: 'input_pause_state', id: 'missing', phase: 'paused', remainingMs: 4000 });
+  event({ type: 'input_pause_state', id: 'missing', phase: 'resumed', remainingMs: 0, listening: true });
+  assert.equal(c.state().inputPause, 'unconfirmed');
+  assert.equal(c.state().listening, false);
+  c.dispose();
+});
+
+test('unconfirmed pause transport failure and stop intent cannot accept a late acknowledgement', () => {
+  for (const action of ['transport', 'throw', 'stop', 'off', 'session']) {
+    const timers = new Map(), notices = [];
+    let n = 0, closes = 0;
+    const c = createVoiceController({ submit() {},
+      send(frame) { if (frame.type === 'input_pause' && action === 'throw') throw new Error('Lost transport');
+        return action !== 'transport'; }, close: () => closes++, notify: (...args) => notices.push(args),
+      setTimer(fn, delay) { const id = ++n; timers.set(id, { fn, delay }); return id; }, clearTimer: id => timers.delete(id) });
+    const token = c.start('s');
+    c.event({ type: 'ready' }, token.generation);
+    const result = c.pauseInput(10, c.state(), 'pending');
+    if (action === 'transport' || action === 'throw') {
+      assert.equal(result.status, 'unavailable');
+      assert.equal(closes, 1);
+      assert.match(notices.at(-1)[0], /closure.*unconfirmed/i);
+    } else {
+      const staleTimer = [...timers.values()].find(timer => timer.delay === 3000).fn;
+      if (action === 'stop') c.silence();
+      else { c.stop(); if (action === 'session') c.start('other'); }
+      staleTimer();
+      assert.equal(closes, action === 'stop' ? 1 : 0);
+    }
+    c.event({ type: 'input_pause_state', id: 'pending', phase: 'paused', remainingMs: 9000 }, token.generation);
+    c.event({ type: 'input_pause_state', id: 'pending', phase: 'resumed', remainingMs: 0, listening: true }, token.generation);
+    assert.equal(c.state().listening, false, action);
+    assert.notEqual(c.state().inputPause, 'paused', action);
+    c.dispose();
+  }
+});
+
 test('timed microphone pause fences recognition immediately without stopping speech or work', () => {
   const f = fixture();
   f.event({ type: 'addressed', id: 'partial' });
   const token = f.controller.state();
   f.speak('An answer.', { id: 'answer' });
   const before = f.sent.length;
-  assert.equal(f.controller.pauseInput(10, token, 'pause-one').status, 'paused');
+  assert.equal(f.controller.pauseInput(10, token, 'pause-one').status, 'requested');
   assert.deepEqual(f.sent.slice(before), [{ type: 'input_pause', id: 'pause-one', seconds: 10 }]);
   assert.equal(f.controller.state().epoch, token.epoch);
-  assert.equal(f.controller.state().inputPause, 'paused');
+  assert.equal(f.controller.state().inputPause, 'pausing');
   assert.equal(f.controller.state().listening, false);
   f.event({ type: 'utterance', id: 'partial', text: 'Never submit this.' });
   f.event({ type: 'addressed', id: 'late' });
@@ -37,7 +104,7 @@ test('timed microphone pause fences recognition immediately without stopping spe
   assert.equal(f.controller.pauseInput(1.5, token).status, 'invalid');
   assert.equal(f.controller.pauseInput(10, { ...token, epoch: token.epoch - 1 }).status, 'stale');
   f.event({ type: 'input_pause_state', id: 'wrong', phase: 'resumed', remainingMs: 0 });
-  assert.equal(f.controller.state().inputPause, 'paused');
+  assert.equal(f.controller.state().inputPause, 'pausing');
   f.event({ type: 'input_pause_state', id: 'pause-one', phase: 'warming', remainingMs: 0 });
   assert.equal(f.controller.state().inputPause, 'warming');
   assert.equal(f.controller.state().listening, false);
@@ -52,7 +119,7 @@ test('timed request history never evicts an ID and accidentally extends a retrie
   const f = fixture();
   const token = f.controller.state();
   for (let index = 0; index < 512; index++) {
-    assert.equal(f.controller.pauseInput(10, token, `pause-${index}`).status, 'paused');
+    assert.equal(f.controller.pauseInput(10, token, `pause-${index}`).status, 'requested');
   }
   assert.equal(f.controller.pauseInput(10, token, 'over-limit').status, 'unavailable');
   assert.equal(f.controller.pauseInput(10, token, 'pause-0').status, 'duplicate');

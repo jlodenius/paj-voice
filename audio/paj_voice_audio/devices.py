@@ -313,6 +313,7 @@ class Child:
             start_new_session=True,
         )
         self.closed = False
+        self.stop_complete = False
         self.fault = None
         self.lock = threading.RLock()
         self.stderr_thread = threading.Thread(
@@ -357,18 +358,21 @@ class Child:
 
     def stop(self):
         with self.lock:
-            if self.closed:
+            if self.stop_complete:
                 return
             self.closed = True
             if self.process.poll() is None:
-                self.process.terminate()
                 try:
+                    self.process.terminate()
                     self.process.wait(timeout=0.3)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
+                except (OSError, subprocess.TimeoutExpired):
+                    if self.process.poll() is None:
+                        self.process.kill()
                     self.process.wait(timeout=1)
             else:
                 self.process.wait(timeout=1)
+            if self.process.poll() is None:
+                raise RuntimeError('Recorder/process exit is unconfirmed')
             for stream in (
                 self.process.stdin,
                 self.process.stdout,
@@ -379,6 +383,7 @@ class Child:
                         stream.close()
                     except OSError:
                         pass
+            self.stop_complete = True
         if threading.current_thread() is not self.stderr_thread:
             self.stderr_thread.join(timeout=0.2)
 
@@ -496,6 +501,8 @@ class PipeCapture:
         self.launch = launch
         self.frames = queue.Queue(maxsize=64)
         self.closed = threading.Event()
+        self.close_complete = False
+        self.close_lock = threading.Lock()
         self.first_pcm = threading.Event()
         self.fault = None
         self.child = None
@@ -590,19 +597,23 @@ class PipeCapture:
             self.child.health()
 
     def close(self):
-        if self.closed.is_set():
-            return
-        self.closed.set()
-        if self.child:
-            self.child.stop()
-        for thread in self.threads:
-            if thread is not threading.current_thread():
-                thread.join(timeout=0.3)
-        while True:
-            try:
-                self.frames.get_nowait()
-            except queue.Empty:
-                break
+        with self.close_lock:
+            if self.close_complete:
+                return
+            self.closed.set()
+            if self.child:
+                self.child.stop()
+                if self.child.process.poll() is None:
+                    raise RuntimeError('Recorder exit is unconfirmed')
+            for thread in self.threads:
+                if thread is not threading.current_thread():
+                    thread.join(timeout=0.3)
+            while True:
+                try:
+                    self.frames.get_nowait()
+                except queue.Empty:
+                    break
+            self.close_complete = True
 
 
 if __name__ == "__main__":

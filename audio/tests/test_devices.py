@@ -198,6 +198,10 @@ class ChildTests(unittest.TestCase):
         process.stdout = None
         process.stderr = io.BytesIO(diagnostic)
         process.poll.return_value = None
+        def wait(timeout):
+            process.poll.return_value = 0
+            return 0
+        process.wait.side_effect = wait
         return process
 
     def spawn(self, process, capture=False):
@@ -251,6 +255,7 @@ class ChildTests(unittest.TestCase):
     def test_kill_escalation_reaps_and_discontinuity_fails(self):
         process = self.process(b"audio XRUN detected")
         process.wait.side_effect = [subprocess.TimeoutExpired("pw-play", 0.3), -9]
+        process.kill.side_effect = lambda: setattr(process.poll, 'return_value', -9)
         child, _ = self.spawn(process)
         with self.assertRaisesRegex(RuntimeError, "discontinuity"):
             child.health()
@@ -259,6 +264,37 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(process.wait.call_count, 2)
         child.stop()
         process.kill.assert_called_once()
+
+    def test_stop_retries_a_live_child_after_timeout_and_kill_error(self):
+        process = self.process()
+        child, _ = self.spawn(process, capture=True)
+        process.wait.side_effect = subprocess.TimeoutExpired('fake-recorder', 0.3)
+        process.kill.side_effect = OSError('Fake kill failure')
+        with self.assertRaises(OSError):
+            child.stop()
+        self.assertIsNone(process.poll())
+        process.kill.side_effect = None
+        def wait(timeout):
+            process.poll.return_value = -9
+            return -9
+        process.wait.side_effect = wait
+        child.stop()
+        self.assertEqual(process.terminate.call_count, 2)
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(child.stop_complete)
+        child.stop()
+        self.assertEqual(process.terminate.call_count, 2)
+
+    def test_stop_rejects_unconfirmed_exit_even_if_wait_returns(self):
+        process = self.process()
+        child, _ = self.spawn(process, capture=True)
+        process.wait.side_effect = None
+        process.wait.return_value = 0
+        with self.assertRaisesRegex(RuntimeError, 'exit.*unconfirmed'):
+            child.stop()
+        process.poll.return_value = 0
+        child.stop()
+        self.assertTrue(child.stop_complete)
 
     def test_parent_death_guard_checks_before_and_after_prctl(self):
         libc = Mock()
@@ -350,6 +386,30 @@ class CaptureTests(unittest.TestCase):
         )
         self.addCleanup(capture.close)
         return capture, child, launch, turns, errors
+
+    def test_capture_close_retries_child_stop_after_a_failed_first_close(self):
+        capture, child, *_ = self.capture()
+        capture.child = child
+        child.stop.side_effect = [OSError('Fake stop failure'), None]
+        child.process.poll.return_value = None
+        with self.assertRaises(OSError):
+            capture.close()
+        self.assertTrue(capture.closed.is_set())
+        child.process.poll.return_value = 0
+        capture.close()
+        self.assertEqual(child.stop.call_count, 2)
+        capture.close()
+        self.assertEqual(child.stop.call_count, 2)
+
+    def test_capture_close_requires_child_exit_not_just_closed_flag(self):
+        capture, child, *_ = self.capture()
+        capture.child = child
+        child.process.poll.return_value = None
+        with self.assertRaisesRegex(RuntimeError, 'exit.*unconfirmed'):
+            capture.close()
+        child.process.poll.return_value = 0
+        capture.close()
+        self.assertEqual(child.stop.call_count, 2)
 
     def test_pcm_readiness_with_synthetic_pipe_and_close_reaps(self):
         capture, child, launch, turns, errors = self.capture()

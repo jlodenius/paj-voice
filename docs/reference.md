@@ -39,6 +39,13 @@ This closes only microphone capture and discards partial or in-flight recognitio
 agent work, and normal tool permissions continue. It never arms Voice from off, startup, or a full
 pause, and cannot approve terminal confirmations.
 
+A request initially shows **MIC PAUSING**: recorder closure is unconfirmed, so do not assume privacy.
+The tool returns `requested`, not proof of closure. Only a matching native shutdown acknowledgement
+confirms the paused state and starts displaying the native remaining time. The duration runs from
+the request, not from acknowledgement. Missing acknowledgement after three seconds or a transport
+failure stops Voice through its normal companion-close path and reports closure as unconfirmed.
+A late acknowledgement cannot restore listening after that failure or an explicit stop.
+
 Typed `pause` and `mute` accept an optional `for` and an exact integer duration: `seconds`, `sec`,
 `s`, `minutes`, `min`, or `m` (singular words also work). The total must be 1–300 seconds. Fractions,
 signs, mixed units, trailing words, and durations without units are rejected. For example,
@@ -57,6 +64,16 @@ cancels that intent. If either endpoint disappears or the pair would change, the
 held, even if the original pair later returns. No pair-changing fallback is selected while paused;
 existing fallback settings are unchanged. Output recovery remains independent. Use
 `/paj-voice resume` for normal fresh confirmation rather than silently opening another microphone.
+
+Closing capture can cause Bluetooth headset profile changes, such as HFP to A2DP, after a delay.
+Changed profile nodes or serials conservatively hold the microphone rather than broadening resume
+permission to another endpoint. This feature has fake-test coverage, not hardware qualification;
+automatic resume is not guaranteed across headset profile churn.
+
+Recorder teardown must confirm child-process exit before acknowledging a pause. On a close error or
+unconfirmed exit, Voice cancels timed resume, reports a sanitized privacy error, and retains the
+recorder for cleanup retries. Failure may stop speech output too. If cleanup still cannot confirm
+exit, the error is not a claim that the microphone is physically closed.
 
 Bare `/paj-voice pause` or `/paj-voice mute` still closes **all** audio. `/paj-voice resume` always
 uses the normal confirmation flow, including when ending a timed pause early.

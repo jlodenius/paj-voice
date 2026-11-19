@@ -121,6 +121,8 @@ class Runtime:
         self.clock = clock
         self.lock = threading.RLock()
         self.model_lock = threading.Lock()
+        self.input_cleanup_lock = threading.Lock()
+        self.retired_inputs = []
         self.closed = self.failed = self.configured = self.ready = self.muted = False
         self.stopped = threading.Event()
         self.shutdown_complete = threading.Event()
@@ -246,7 +248,12 @@ class Runtime:
             pause = {'id': ident, 'deadline': self.clock() + seconds, 'phase': 'paused',
                      'frozen': self.frozen, 'closing': True}
             self.input_pause = pause
-        self._suspend(input_lost=True)
+        try:
+            self._suspend(input_lost=True, strict_input=True)
+        except Exception:
+            self.fail(RuntimeError('Microphone closure unconfirmed; Voice stopped for privacy. Recorder cleanup will retry.'),
+                      stage='input-pause-closure')
+            return
         with self.lock:
             if self.input_pause is not pause:
                 return
@@ -811,8 +818,9 @@ class Runtime:
                    'listening': self.input_available and self.listening,
                    'speakerMode': self.speaker_mode})
 
-    def _suspend(self, input_lost=False, output_lost=False, epoch=None, output_epoch=None):
+    def _suspend(self, input_lost=False, output_lost=False, epoch=None, output_epoch=None, strict_input=False):
         resources = []
+        retired = None
         guard_epoch = None
         held_pause = None
         with self.lock:
@@ -820,6 +828,7 @@ class Runtime:
                 return
             before = self.input_available, self.output_available
             if input_lost and (epoch is None or epoch == self.epoch):
+                strict_input = strict_input or self.input_pause is not None
                 if self.input_pause and self.input_pause['phase'] == 'warming':
                     self.input_pause['phase'] = 'held'
                     held_pause = self.input_pause
@@ -827,7 +836,12 @@ class Runtime:
                 if self.capture is not None or self.input_available:
                     self.epoch += 1
                     self.input_available = self.input_active = False
-                    resources.extend((self.gate, self.capture, self.segments))
+                    detached = (self.gate, self.capture, self.segments)
+                    if strict_input:
+                        retired = detached
+                        self.retired_inputs.append(retired)
+                    else:
+                        resources.extend(detached)
                     self.gate = self.capture = self.segments = None
                     for ident in self.pending:
                         self.emit({'type': 'cancelled', 'id': ident, 'reason': 'input_disconnected'})
@@ -863,6 +877,10 @@ class Runtime:
             if before != (self.input_available, self.output_available):
                 self._availability()
         self._close(resources)
+        if retired is not None and not self._retry_input_cleanup():
+            self.fail(RuntimeError('Microphone closure unconfirmed; Voice stopped for privacy. Recorder cleanup will retry.'),
+                      stage='input-pause-closure')
+            return
         if held_pause is not None:
             with self.lock:
                 if self.input_pause is held_pause:
@@ -1031,7 +1049,9 @@ class Runtime:
             self.fail(error)
         finally:
             # Recovery recorders inherit this creating thread's Linux PDEATHSIG lifetime.
-            self.shutdown_complete.wait()
+            while not self.shutdown_complete.wait(0.1):
+                if self.closed and self._retry_input_cleanup():
+                    self.shutdown_complete.set()
 
     def _watchdog(self):
         while not self.stopped.wait(0.1):
@@ -1050,6 +1070,32 @@ class Runtime:
         finally:
             self.shutdown()
 
+    def _retry_input_cleanup(self):
+        with self.input_cleanup_lock:
+            with self.lock:
+                retired = list(self.retired_inputs)
+            for resources in retired:
+                confirmed = True
+                for resource in resources:
+                    if resource is not None:
+                        try:
+                            resource.close()
+                        except Exception:
+                            confirmed = False
+                capture = resources[1]
+                if capture is not None:
+                    try:
+                        child = getattr(capture, 'child', None)
+                        if child is not None and child.process.poll() is None:
+                            confirmed = False
+                    except Exception:
+                        confirmed = False
+                if confirmed:
+                    with self.lock:
+                        self.retired_inputs.remove(resources)
+            with self.lock:
+                return not self.retired_inputs
+
     @staticmethod
     def _close(resources):
         for resource in resources:
@@ -1060,28 +1106,32 @@ class Runtime:
                     pass
 
     def shutdown(self):
+        resources = ()
         with self.lock:
-            if self.closed:
-                return
-            self.closed = True
-            self.input_pause = None
-            self.pause_revision += 1
-            self.ready = False
-            self.input_available = self.output_available = False
-            self.output_epoch += 1
-            self.epoch += 1
-            self.revision += 1
-            self.stopped.set()
-            self.pending.clear()
-            if self.current_playback:
-                self.current_playback[1].set()
-            resources = self.gate, self.capture, self.speaker, self.sink
-            self.gate = self.capture = self.speaker = self.sink = None
+            if not self.closed:
+                self.closed = True
+                self.input_pause = None
+                self.pause_revision += 1
+                self.ready = False
+                self.input_available = self.output_available = False
+                self.output_epoch += 1
+                self.epoch += 1
+                self.revision += 1
+                self.stopped.set()
+                self.pending.clear()
+                if self.current_playback:
+                    self.current_playback[1].set()
+                if self.capture is not None or self.gate is not None or self.segments is not None:
+                    self.retired_inputs.append((self.gate, self.capture, self.segments))
+                resources = self.speaker, self.sink
+                self.gate = self.capture = self.segments = self.speaker = self.sink = None
         self._close(resources)
+        confirmed = self._retry_input_cleanup()
         for inbox in (self.jobs, self.speeches):
             while True:
                 try:
                     inbox.get_nowait().clear()
                 except queue.Empty:
                     break
-        self.shutdown_complete.set()
+        if confirmed:
+            self.shutdown_complete.set()

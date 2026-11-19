@@ -234,7 +234,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   const pauseInputTool = {
     name: 'voice_pause_input', label: 'Pause microphone',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-    description: 'Only when the user explicitly asks to pause or mute the microphone for a finite duration, suspend capture for 1–300 integer seconds. Speech output and agent work continue. Replaces the previous deadline from now; never arms Voice. Resume is conditional on the same session and exact endpoints, followed by fresh warmup. Use the current generation and epoch. Bare pause/mute means all audio, not this tool.',
+    description: 'Only when the user explicitly asks to pause or mute the microphone for a finite duration, suspend capture for 1–300 integer seconds. Speech output and agent work continue. Replaces the previous deadline from now; never arms Voice. Resume is conditional on the same session and exact endpoints, followed by fresh warmup. Use the current generation and epoch. A requested result means closure is still unconfirmed; never claim microphone privacy before native acknowledgement. Missing acknowledgement stops Voice for privacy. Bare pause/mute means all audio, not this tool.',
     parameters: Type.Object({ seconds: Type.Integer({ minimum: 1, maximum: 300 }),
       generation: Type.String(), epoch: Type.Integer({ minimum: 0 }) }),
     async execute(id: string, params: VoiceToken & { seconds: number }, signal?: AbortSignal) {
@@ -698,10 +698,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           return;
         }
         const result = inputControlAllowed() ? controller.pauseInput(seconds, controller.state()) : { status: 'unavailable' };
-        notify(result.status === 'paused'
-          ? `Microphone paused for ${seconds} seconds. Speech and agent work continue; resume requires unchanged devices and fresh warmup.`
-          : 'Timed microphone pause is unavailable; Voice must already be armed in this main TUI session.',
-        result.status === 'paused' ? 'info' : 'warning');
+        notify(result.status === 'requested'
+          ? `Microphone pause requested for ${seconds} seconds; closure unconfirmed until the recorder acknowledges shutdown. Speech and agent work continue while waiting.`
+          : 'Timed microphone pause is unavailable; check Voice status and privacy warnings before assuming capture has closed.',
+        result.status === 'requested' ? 'info' : 'warning');
         return;
       }
       if (parts[0] === 'ducking') {

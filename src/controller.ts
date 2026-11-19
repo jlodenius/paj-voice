@@ -27,11 +27,19 @@ export function createVoiceController({ submit, send, recover, close, changed = 
   let muted = false;
   let listening = false;
   let inputAvailable = false;
-  let inputPause: 'paused' | 'warming' | 'held' | null = null;
+  let inputPause: 'pausing' | 'paused' | 'warming' | 'held' | 'unconfirmed' | null = null;
+  let inputPauseAckTimer: Timer | null = null;
   let inputPauseRemainingMs = 0;
   let inputPauseId: string | null = null;
   const pauseRequests = new Map<string, number>();
-  const clearInputPause = () => { inputPause = null; inputPauseId = null; inputPauseRemainingMs = 0; };
+  const clearInputPauseAck = () => {
+    if (inputPauseAckTimer !== null) clearTimer(inputPauseAckTimer);
+    inputPauseAckTimer = null;
+  };
+  const clearInputPause = () => {
+    clearInputPauseAck();
+    inputPause = null; inputPauseId = null; inputPauseRemainingMs = 0;
+  };
   let outputAvailable = false;
   let usingFallback = false;
   let speakerMode = false;
@@ -147,6 +155,18 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     speechId = null;
     speaking = false;
   };
+  const failInputPause = () => {
+    clearInputPauseAck();
+    inputPauseId = null;
+    inputPause = 'unconfirmed';
+    inputPauseRemainingMs = 0;
+    listening = false;
+    lastError = 'Microphone closure is unconfirmed. Voice is being stopped for privacy; do not assume capture has closed.';
+    inform(lastError, 'error');
+    try { send({ type: 'shutdown' }); } catch {}
+    try { close?.(); } catch {}
+    emit();
+  };
   const unavailable = (): SpeechResult => ({ status: 'unavailable' });
   const api: VoiceApi = {
     version: 1,
@@ -253,26 +273,36 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     },
     pauseInput(seconds: number, token: VoiceToken, id = uuid()) {
       if (token.generation !== generation || token.epoch !== epoch) return { status: 'stale' as const };
-      if (!enabled || !ready || muted || disposed || inputPause === 'held') return { status: 'unavailable' as const };
+      if (!enabled || !ready || muted || disposed || inputPause === 'held' || inputPause === 'unconfirmed') return { status: 'unavailable' as const };
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300 || !/^[\w-]{1,128}$/.test(id)) {
         return { status: 'invalid' as const };
       }
       if (pauseRequests.has(id)) return { status: pauseRequests.get(id) === seconds ? 'duplicate' as const : 'invalid' as const };
       if (pauseRequests.size >= 512) return { status: 'unavailable' as const };
       pauseRequests.set(id, seconds);
+      clearInputPauseAck();
       inputPauseId = id;
-      inputPause = 'paused';
-      inputPauseRemainingMs = seconds * 1000;
+      inputPause = 'pausing';
+      inputPauseRemainingMs = 0;
       inputAvailable = listening = false;
       for (const capture of captures) submissions.set(capture, { status: 'cancelled' });
       captures.clear(); limitedCaptures.clear(); captureId = null;
       activity();
-      if (send({ type: 'input_pause', id, seconds }) === false) {
-        inputPause = 'held';
-        inputPauseRemainingMs = 0;
+      const target = generation;
+      const timer = setTimer(() => {
+        if (inputPauseAckTimer !== timer || generation !== target || inputPauseId !== id) return;
+        failInputPause();
+      }, 3000);
+      inputPauseAckTimer = timer;
+      timer?.unref?.();
+      let accepted = false;
+      try { accepted = send({ type: 'input_pause', id, seconds }) !== false; } catch {}
+      if (!accepted) {
+        failInputPause();
+        return { status: 'unavailable' as const };
       }
       emit();
-      return { status: inputPause === 'held' ? 'unavailable' as const : 'paused' as const };
+      return { status: 'requested' as const };
     },
     acknowledgeIdle(token: VoiceToken) {
       if (token.generation !== generation || token.epoch !== epoch) return { status: 'stale' as const };
@@ -410,6 +440,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       emit();
     },
     silence() {
+      if (inputPause === 'pausing' || inputPause === 'unconfirmed') { failInputPause(); return; }
       if (inputPause) { inputPause = 'held'; inputPauseRemainingMs = 0; listening = false; }
       activity();
       epoch++;
@@ -499,6 +530,8 @@ export function createVoiceController({ submit, send, recover, close, changed = 
             typeof frame.remainingMs !== 'number' || !Number.isInteger(frame.remainingMs) ||
             frame.remainingMs < 0 || frame.remainingMs > 300_000) return;
         if (inputPause === 'held' && frame.phase !== 'held') return;
+        if (inputPause === 'pausing' && frame.phase === 'resumed') return;
+        clearInputPauseAck();
         if (frame.phase === 'resumed') {
           clearInputPause();
           listening = inputAvailable && frame.listening === true;

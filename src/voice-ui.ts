@@ -27,6 +27,12 @@ function appearance(state: VoiceDisplayState): {
     activity: 'STARTING - preparing local speech', detail: 'Remain quiet until the ready beep.',
     controls: 'Cancel: /paj-voice off' };
   if (!state.enabled) return null;
+  if (state.inputPause === 'pausing' || state.inputPause === 'unconfirmed') return {
+    badge: state.inputPause === 'pausing' ? 'MIC PAUSING' : 'CLOSURE UNCONFIRMED', tone: 'warning',
+    activity: 'Microphone closure unconfirmed - do not assume privacy',
+    detail: state.inputPause === 'pausing' ? 'Pause requested; waiting for recorder shutdown acknowledgement.'
+      : 'Voice is being stopped for privacy. Recorder closure was not confirmed.',
+    controls: 'Stop all audio: /paj-voice off' };
   if (state.inputPause) return { badge: state.inputPause === 'paused' ? 'MIC PAUSED'
       : state.inputPause === 'warming' ? 'MIC WARMING' : 'MIC HELD', tone: 'warning',
     activity: state.inputPause === 'paused' ? `Microphone closed - ${Math.ceil((state.inputPauseRemainingMs ?? 0) / 1000)}s remaining`
