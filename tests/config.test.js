@@ -6,12 +6,42 @@ import { join } from 'node:path';
 import { configPath, loadConfig, validateConfig, runtimeConfig } from '../src/config.ts';
 
 export const valid = () => ({ voice: 'ljspeech', volume: 40, speed: 1,
-  pauseSeconds: 0.8, maxMessageSeconds: 120, feedback: { receipt: 'Got it.',
+  pauseSeconds: 0.8, maxMessageSeconds: 120, shortcuts: [], feedback: { receipt: 'Got it.',
     steeringReceipt: 'Steering received.', progressUpdates: true, idleReminders: true } });
 
 test('empty preferences provide only normal user choices with documented defaults', () => {
   assert.deepEqual(validateConfig({}), valid());
   assert.deepEqual(validateConfig(valid()), valid());
+});
+
+test('static shortcuts validate, copy, load and stay out of the audio runtime', t => {
+  const shortcuts = [{ phrase: 'status update', request: 'Ask every agent about their status and give me a brief update' }];
+  assert.deepEqual(validateConfig({}).shortcuts, []);
+  const settings = validateConfig({ shortcuts });
+  assert.deepEqual(settings.shortcuts, shortcuts);
+  assert.notEqual(settings.shortcuts[0], shortcuts[0]);
+  assert.deepEqual(loadConfig(configFile(t, { voice: { shortcuts } })).shortcuts, shortcuts);
+  assert.deepEqual(runtimeConfig({ shortcuts }, { input: 'mic', output: 'out' }),
+    runtimeConfig({}, { input: 'mic', output: 'out' }));
+});
+
+test('shortcut bounds, strict fields, normalization collisions and privacy conflicts fail closed', () => {
+  const entry = { phrase: 'status update', request: 'Brief update' };
+  for (const shortcuts of [null, {}, 'text', Array(33).fill(entry), Array(1), [{}],
+    [{ ...entry, extra: true }], [{ ...entry, phrase: 1 }], [{ ...entry, request: false }],
+    ...['', ' ', '!!!', 'a'.repeat(129), 'a\nb', 'a\u007fb'].map(phrase => [{ ...entry, phrase }]),
+    ...['', ' ', 'a'.repeat(4097), 'a\nb', 'a\u009fb'].map(request => [{ ...entry, request }]),
+    [entry, entry], [entry, { ...entry, phrase: ' STATUS\u00a0 UPDATE?! ' }],
+    [{ phrase: 'Café', request: 'a' }, { phrase: 'CAFE\u0301!', request: 'b' }],
+    ...['stop', 'voice off', 'pause 10 seconds', 'mute for 1 minute', 'resume', 'unmute',
+      'stop listening', 'stop, please', 'turn the microphone off', 'privacy', 'be quiet', 'silence', 'shut up']
+      .map(phrase => [{ ...entry, phrase }])]) {
+    assert.throws(() => validateConfig({ shortcuts }), /Invalid voice configuration/, JSON.stringify(shortcuts));
+  }
+  assert.equal(validateConfig({ shortcuts: [{ phrase: 'a'.repeat(128), request: 'b'.repeat(4096) }] })
+    .shortcuts[0].request.length, 4096);
+  assert.equal(validateConfig({ shortcuts: Array.from({ length: 32 }, (_, i) => ({ phrase: `task ${i}`, request: 'ok' })) })
+    .shortcuts.length, 32);
 });
 
 test('technical settings and unknown preferences are rejected rather than silently retained', () => {

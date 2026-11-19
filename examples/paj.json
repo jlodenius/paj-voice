@@ -5,6 +5,7 @@
     "speed": 1,
     "pauseSeconds": 0.8,
     "maxMessageSeconds": 120,
+    "shortcuts": [],
     "feedback": {
       "receipt": "Got it.",
       "steeringReceipt": "Steering received.",

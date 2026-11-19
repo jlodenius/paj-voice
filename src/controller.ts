@@ -724,7 +724,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
         submissions.set(frame.id, record);
         while (submissions.size > 512) submissions.delete(submissions.keys().next().value!);
         try {
-          const result = submit({ requestId: frame.id, text: frame.text.trim(), sessionId, generation });
+          const result = submit({ requestId: frame.id, text: frame.text.trim(), originalText: frame.text, sessionId, generation });
           record.status = 'submitted';
           running = true;
           turnSilent = false;

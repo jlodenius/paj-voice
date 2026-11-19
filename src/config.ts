@@ -87,8 +87,31 @@ export function validateFocusPolicy(value: unknown = {}): BackgroundAudioSetting
     apps: selected, excludeApps: apps('excludeApps') };
 }
 
+export function normalizeShortcutPhrase(text: string): string {
+  return text.normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim()
+    .replace(/[.!?。！？…]+$/u, '').trim();
+}
+
+function validateShortcuts(value: unknown = undefined): { phrase: string; request: string }[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) fail('shortcuts must be a list of at most 32 entries');
+  const phrases = new Set<string>();
+  return Array.from(value, entry => {
+    keys(entry, ['phrase', 'request'], 'shortcuts entry');
+    if (typeof entry.phrase !== 'string' || typeof entry.request !== 'string') fail('shortcuts phrase/request must be text');
+    if (!entry.phrase.trim() || entry.phrase.length > 128 || !entry.request.trim() || entry.request.length > 4096 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(entry.phrase + entry.request)) fail('shortcuts text bounds or control characters');
+    const phrase = normalizeShortcutPhrase(entry.phrase);
+    if (!phrase || phrases.has(phrase)) fail('shortcuts empty or duplicate normalized phrase');
+    if (/(?:^|[^\p{L}\p{N}_])(?:stop|off|pause|mute|unmute|resume|silence|quiet|privacy|microphone|mic|disable)(?:[^\p{L}\p{N}_]|$)/u.test(phrase) ||
+        phrase === 'shut up') fail('shortcuts phrase is reserved for audio/privacy control');
+    phrases.add(phrase);
+    return { phrase: entry.phrase, request: entry.request };
+  });
+}
+
 export function validateConfig(value: unknown) {
-  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback', 'backgroundAudio'],
+  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback', 'backgroundAudio', 'shortcuts'],
     'use only supported voice preferences; device IDs and runtime tuning are not preferences');
   const voice = value.voice === undefined ? 'ljspeech' : value.voice;
   if (typeof voice !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/u.test(voice)) fail('voice must name an installed voice');
@@ -96,6 +119,7 @@ export function validateConfig(value: unknown) {
   keys(feedback, ['receipt', 'steeringReceipt', 'progressUpdates', 'idleReminders'], 'feedback');
   return {
     voice,
+    shortcuts: validateShortcuts(value.shortcuts),
     ...(value.backgroundAudio !== undefined ? { backgroundAudio: validateBackgroundAudio(value.backgroundAudio) } : {}),
     volume: number(value.volume, 40, 0, 100, 'volume must be 0–100'),
     speed: number(value.speed, 1, 0.5, 2, 'speed must be 0.5–2'),

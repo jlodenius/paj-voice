@@ -75,6 +75,7 @@ Changes apply the next time you start or resume Voice, not while it is already l
 | `speed`                      | `1`                    | Number: `0.5`–`2`                       | Speaking speed; `1` is normal.          |
 | `pauseSeconds`               | `0.8`                  | Number: `0.3`–`5`                       | Silence before submitting, in seconds.  |
 | `maxMessageSeconds`          | `120`                  | Number: `5`–`120`                       | Dictation limit, in seconds.            |
+| `shortcuts`                  | `[]`                   | List: 0–32 phrase/request pairs        | [Static spoken expansion](docs/reference.md#spoken-shortcuts). |
 | `feedback.receipt`           | `"Got it."`            | Text: 1–8 words, at most 60 characters  | New request acknowledgement.            |
 | `feedback.steeringReceipt`   | `"Steering received."` | Text: 1–8 words, at most 60 characters  | Acknowledgement during active work.     |
 | `feedback.progressUpdates`   | `true`                 | `true` / `false`                        | Brief updates during long tasks.        |

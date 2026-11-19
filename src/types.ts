@@ -57,6 +57,7 @@ export interface VoicePreferences {
   maxMessageSeconds: number;
   feedback: Feedback;
   backgroundAudio?: BackgroundAudioPreferences;
+  shortcuts: { phrase: string; request: string }[];
 }
 
 export interface DeviceSelection {
@@ -68,6 +69,7 @@ export interface DeviceSelection {
 }
 
 export interface Submission {
+  originalText?: string;
   sessionId: string | null;
   generation: string | null;
   requestId: string;
