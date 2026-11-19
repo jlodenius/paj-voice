@@ -91,8 +91,6 @@ To lower other playback while Voice speaks, use:
 ```json
 {
   "voice": {
-    "voice": "ljspeech",
-    "pauseSeconds": 2,
     "backgroundAudio": {
       "enabled": true,
       "gain": 0.2,
