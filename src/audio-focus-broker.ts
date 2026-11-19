@@ -91,17 +91,20 @@ export async function focusSocketPath(runtimeDir: string,
   return path;
 }
 
-async function checkedFocusSocket(path: string, filesystem: FocusFileSystem): Promise<Stats> {
-  const stat = await filesystem.lstat(path);
+function checkedFocusSocketStat(stat: Stats): Stats {
   if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600) {
     throw new Error('Unsafe focus socket');
   }
   return stat;
 }
 
+async function checkedFocusSocket(path: string, filesystem: FocusFileSystem): Promise<Stats> {
+  return checkedFocusSocketStat(await filesystem.lstat(path));
+}
+
 export async function verifyFocusSocket(path: string,
   filesystem: FocusFileSystem = localFileSystem): Promise<void> {
-  await checkedFocusSocket(path, filesystem);
+  checkedFocusSocketStat(await filesystem.lstat(path));
 }
 
 function alive(path: string): Promise<boolean> {
