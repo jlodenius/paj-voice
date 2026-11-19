@@ -72,7 +72,7 @@ in
     installPhase = ''
       runHook preInstall
       mkdir -p "$out/share/paj-voice/audio" "$out/bin" "$out/libexec"
-      cp -r extensions dist examples package.json README.md LICENSE "$out/share/paj-voice/"
+      cp -r extensions dist examples docs package.json README.md LICENSE "$out/share/paj-voice/"
       cp -r audio/paj_voice_audio "$out/share/paj-voice/audio/"
       install -m755 paj-voice-focus-control "$out/bin/paj-voice-focus-control"
       ln -s ${pipewire}/bin/pw-dump "$out/libexec/paj-voice-pw-dump"

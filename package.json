@@ -7,7 +7,7 @@
   "license": "MIT",
   "engines": { "node": ">=24" },
   "keywords": ["pi-package", "voice"],
-  "files": ["extensions", "dist", "src", "scripts/build.ts", "tsconfig.json", "audio/paj_voice_audio/*.py", "README.md", "LICENSE", "examples"],
+  "files": ["extensions", "dist", "src", "scripts/build.ts", "tsconfig.json", "audio/paj_voice_audio/*.py", "README.md", "LICENSE", "examples", "docs"],
   "scripts": {
     "build": "node scripts/build.ts",
     "pretest": "npm run build",
