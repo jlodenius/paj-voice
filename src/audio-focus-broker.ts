@@ -1,6 +1,6 @@
 import { createServer, createConnection } from 'node:net';
 import type { Server, Socket } from 'node:net';
-import { lstat, mkdir, chmod, unlink, rmdir } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, chmod, link, unlink, rmdir } from 'node:fs/promises';
 import { join, isAbsolute, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -91,12 +91,17 @@ export async function focusSocketPath(runtimeDir: string,
   return path;
 }
 
-export async function verifyFocusSocket(path: string,
-  filesystem: FocusFileSystem = localFileSystem): Promise<void> {
+async function checkedFocusSocket(path: string, filesystem: FocusFileSystem): Promise<Stats> {
   const stat = await filesystem.lstat(path);
   if (!stat.isSocket() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600) {
     throw new Error('Unsafe focus socket');
   }
+  return stat;
+}
+
+export async function verifyFocusSocket(path: string,
+  filesystem: FocusFileSystem = localFileSystem): Promise<void> {
+  await checkedFocusSocket(path, filesystem);
 }
 
 function alive(path: string): Promise<boolean> {
@@ -164,6 +169,7 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
       elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
     throw error;
   }
+  let startupOwnsLock = true;
   const server = options.server ?? createServer();
   let engine: Engine;
   try {
@@ -177,6 +183,39 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     throw error;
   }
   const releases = new Map<Socket, () => Promise<void>>();
+  let stagingDirectory: string | undefined;
+  let stagingIdentity: Stats | undefined;
+  let stagingPath: string | undefined;
+  let socketIdentity: Stats | undefined;
+  let published = false;
+  const sameFile = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino;
+  const unlinkOwnedSocket = async (candidate: string) => {
+    try {
+      const stat = await filesystem.lstat(candidate);
+      if (socketIdentity && sameFile(stat, socketIdentity) && stat.isSocket() && !stat.isSymbolicLink()
+          && stat.uid === process.getuid?.()) await unlink(candidate);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  };
+  const cleanupPublication = async () => {
+    let cleanupOwnsLock = false;
+    if (published && !startupOwnsLock) {
+      // A publisher must not replace the pathname between the inode check and unlink.
+      try { await mkdir(lock, { mode: 0o700 }); cleanupOwnsLock = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
+    try {
+      if (published && (startupOwnsLock || cleanupOwnsLock)) await unlinkOwnedSocket(path);
+      if (stagingPath) await unlinkOwnedSocket(stagingPath);
+      if (stagingDirectory && stagingIdentity) {
+        try {
+          const stat = await filesystem.lstat(stagingDirectory);
+          if (sameFile(stat, stagingIdentity)) await rmdir(stagingDirectory);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+    } finally {
+      if (cleanupOwnsLock) await rmdir(lock);
+    }
+  };
   let idle: NodeJS.Timeout | undefined;
   let closing: Promise<void> | undefined;
   let stopping = false;
@@ -204,6 +243,7 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
         warn('Background audio restoration could not be confirmed');
       });
       await new Promise<void>(resolve => server.close(() => resolve()));
+      await cleanupPublication();
     })();
     return closing;
   };
@@ -319,25 +359,46 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
   let bound = false;
   try {
     try {
-      await verifyFocusSocket(path, filesystem);
+      const previous = await checkedFocusSocket(path, filesystem);
       if (await alive(path)) throw new Error('Audio focus broker already running');
+      if (!sameFile(previous, await filesystem.lstat(path))) throw new Error('Focus socket changed during startup');
       await unlink(path);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    stagingDirectory = await mkdtemp(join(runtimeDir, 's-'));
+    stagingIdentity = await filesystem.lstat(stagingDirectory);
+    await privateDirectory(stagingDirectory, false, filesystem);
+    stagingPath = join(stagingDirectory, 's');
+    if (Buffer.byteLength(stagingPath) > 100) throw new Error('Focus socket path too long');
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(path, () => { server.off('error', reject); resolve(); });
+      server.listen(stagingPath, () => { server.off('error', reject); resolve(); });
     });
     bound = true;
-    await chmod(path, 0o600);
+    socketIdentity = await filesystem.lstat(stagingPath);
+    if (!socketIdentity.isSocket() || socketIdentity.isSymbolicLink() || socketIdentity.uid !== process.getuid?.()) {
+      throw new Error('Unsafe staging socket');
+    }
+    await chmod(stagingPath, 0o600);
+    if (!sameFile(socketIdentity, await checkedFocusSocket(stagingPath, filesystem))) {
+      throw new Error('Focus socket changed during startup');
+    }
+    // Hard-link publication is atomic and refuses to replace an existing socket.
+    await link(stagingPath, path);
+    published = true;
+    if (!sameFile(socketIdentity, await filesystem.lstat(path))) throw new Error('Focus socket changed during publication');
   } catch (error) {
     diagnostic({ component: 'broker', operation: 'startup', reason: 'startup_failed',
       elapsedMs: focusElapsed(started), code: focusErrorCode(error) });
     if (bound) await close();
-    else await waitForCleanup(engine.close()).catch(() => {});
+    else {
+      await waitForCleanup(engine.close()).catch(() => {});
+      await cleanupPublication();
+    }
     throw error;
   } finally {
+    startupOwnsLock = false;
     await rmdir(lock);
   }
   server.on('error', error => {

@@ -376,6 +376,7 @@ test('idle shutdown follows completed owner release and closes the engine', asyn
   assert.equal(closed, false);
   unblock();
   await waitFor(() => closed);
+  await broker.close();
   await assert.rejects(lstat(broker.path), { code: 'ENOENT' });
 });
 
