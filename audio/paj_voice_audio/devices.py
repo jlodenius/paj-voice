@@ -121,8 +121,17 @@ def resolve_node(entries, name, kind, device=None):
 
 
 def output_hint(entries, props, node):
+    device_id = props.get('device.id')
+    if type(device_id) is int:
+        if not 0 <= device_id <= 0xffffffff:
+            return 'unknown'
+        device_id = str(device_id)
+    elif (type(device_id) is not str or not device_id.isascii() or not device_id.isdecimal()
+          or len(device_id) > 10 or str(int(device_id)) != device_id or int(device_id) > 0xffffffff):
+        return 'unknown'
     cards = [entry for entry in entries if entry.get('type') == 'PipeWire:Interface:Device'
-             and str(entry.get('id')) == str(props.get('device.id'))]
+             and type(entry.get('id')) is int and 0 <= entry['id'] <= 0xffffffff
+             and str(entry['id']) == device_id]
     if (node.bluetooth or props.get('device.api') == 'bluez5'
             or props.get('device.bus') == 'bluetooth'
             or any(key.startswith(('api.bluez5.', 'bluez5.')) for key in props)

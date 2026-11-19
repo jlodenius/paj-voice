@@ -107,6 +107,25 @@ class GraphTests(unittest.TestCase):
                     'device.name': 'synthetic.card', 'device.api': api}}}
                 self.assertEqual(self.graph([sink, card]).devices()[0]['outputHint'], 'unknown')
 
+    def test_output_hint_rejects_missing_null_and_malformed_global_ids(self):
+        malformed = [(None, None), (True, True), (7.0, 7.0), ('bad', 'bad'),
+                     ([], []), ({}, {}), (-1, -1), (2**32, 2**32), ('07', 7), (7, '7')]
+        for device_id, card_id in malformed:
+            with self.subTest(device_id=device_id, card_id=card_id):
+                sink = entry(SINK)
+                sink['info']['props'].update({'device.id': device_id, 'device.form-factor': 'headphone'})
+                card = {'id': card_id, 'type': 'PipeWire:Interface:Device', 'info': {'props': {
+                    'device.name': 'synthetic.card', 'device.api': 'alsa'}}}
+                self.assertEqual(self.graph([sink, card]).devices()[0]['outputHint'], 'unknown')
+        sink = entry(SINK)
+        sink['info']['props']['device.form-factor'] = 'headphone'
+        card = {'type': 'PipeWire:Interface:Device', 'info': {'props': {
+            'device.name': 'synthetic.card', 'device.api': 'alsa'}}}
+        self.assertEqual(self.graph([sink, card]).devices()[0]['outputHint'], 'unknown')
+        sink['info']['props']['device.id'] = '7'
+        card['id'] = 7
+        self.assertEqual(self.graph([sink, card]).devices()[0]['outputHint'], 'headphones')
+
     def test_configured_fallback_pair_rejects_absence_and_wrong_physical_identity(self):
         card = {'id': 7, 'type': 'PipeWire:Interface:Device',
                 'info': {'props': {'device.name': 'alsa.builtin', 'device.api': 'alsa'}}}
