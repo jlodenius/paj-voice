@@ -251,6 +251,15 @@ This visibility is prospective, not a sound-loss fix or a diagnosis. Loading a n
 objects; it cannot inspect an older loaded client's private closure or recover expired history. No
 broker/native wire operation or recovery behavior is added.
 
+The broker prepares its socket inside a unique private directory, verifies owner/type and mode
+`0600`, then publishes the public pathname atomically without replacing an existing entry. This
+prevents clients from seeing a partially permissioned startup socket. Shutdown retains the public
+socket until owner release and engine cleanup finish, then checks ownership under the startup lock
+before unlinking. Replacements are preserved; a busy publisher leaves stale-socket handling to the
+next verified startup. No process-global permission mask is changed. Unsafe sockets still fail closed; terminal clients
+are not automatically reset, and old gain writes or uncertain restoration are never replayed.
+This closes a reproducible startup race, not proof of the cause of a historical `other` diagnostic.
+
 ## Development
 
 Maintained Pi code is TypeScript; Python handles local audio. JavaScript in `dist` is generated.
