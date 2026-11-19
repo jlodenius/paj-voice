@@ -52,6 +52,18 @@ A confidently decoded noise sound can still look like speech, and legitimate spe
 be rejected. Potential speech can still interrupt a readout before recognition rejects it. Repeat the
 request if needed. No raw audio or rejected transcript is saved by these checks.
 
+## Incoming agent updates
+
+With compatible Paj, incoming updates request a concise summary from your current Pi model. The
+arrival notice is separate from the meaningful summary. Important results, blockers, and questions
+remain spoken even when routine progress updates are disabled.
+
+If an inbox-only response omits a usable summary, Voice requests one fresh summary automatically,
+once per pending batch. It never replays old audio or substitutes a stale user-request token.
+Stopping speech or starting a new request cancels an obsolete retry; explicit silence is respected.
+If the retry still cannot produce a summary, Voice reports that failure once rather than repeatedly
+asking you to request a summary. An inbox summary does not complete unrelated user work.
+
 ## Storage
 
 Shared preferences are read from `~/.pi/agent/paj.json`, or `paj.json` under `PI_CODING_AGENT_DIR`.

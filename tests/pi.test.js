@@ -56,7 +56,13 @@ async function fixture(t, fakeAudio = true) {
     }
     let delta = { role: 'assistant', content: verbose };
     let finish = 'stop';
-    if (responseMode === 'empty') {
+    if (responseMode === 'empty-then-inbox') {
+      responseMode = 'inbox-short';
+      delta = { role: 'assistant', content: '' };
+    } else if (responseMode === 'inbox-short') {
+      responseMode = 'text';
+      delta = { role: 'assistant', content: 'The worker finished the review with no blocking issues.' };
+    } else if (responseMode === 'empty') {
       responseMode = 'text';
       delta = { role: 'assistant', content: '' };
     } else if (responseMode === 'short') {
@@ -177,6 +183,8 @@ async function fixture(t, fakeAudio = true) {
   const inspect = async () => JSON.parse((await command('/voice-test-inspect')).at(-1).message);
   return { request, command, prompt, settled, inspect, requests, events,
     emptyNext: () => { responseMode = 'empty'; },
+    inboxNext: () => { responseMode = 'inbox-short'; },
+    emptyThenInbox: () => { responseMode = 'empty-then-inbox'; },
     speakNext: () => { responseMode = 'speak'; },
     shortNext: () => { responseMode = 'short'; },
     ordinaryToolNext: () => { responseMode = 'ordinary-tool'; },
@@ -188,6 +196,45 @@ async function fixture(t, fakeAudio = true) {
       return { ready, release };
     } };
 }
+
+test('real Pi narrates a fresh inbox result after cancelled noise without using the old user epoch', realPi, async t => {
+  const f = await fixture(t);
+  await f.command('/paj-voice on');
+  await f.command('/voice-test-ready');
+  f.shortNext();
+  const userDone = f.settled();
+  await f.command('/voice-test-utterance Finish the review.');
+  await userDone;
+  await f.command('/voice-test-noise');
+  const before = await f.inspect();
+  f.inboxNext();
+  const inboxDone = f.settled();
+  await f.command('/voice-test-inbox');
+  await inboxDone;
+  const after = await f.inspect();
+  const spoken = after.journal.slice(before.journal.length).filter(frame => frame.type === 'speak');
+  assert.ok(spoken.some(frame => frame.text === 'The worker finished the review with no blocking issues.'));
+  assert.equal(spoken.some(frame => frame.key === 'fallback'), false);
+});
+
+test('real Pi automatically generates one fresh summary when the first inbox response is empty', realPi, async t => {
+  const f = await fixture(t);
+  await f.command('/paj-voice on');
+  await f.command('/voice-test-ready');
+  const count = f.events.filter(event => event.type === 'agent_settled').length;
+  f.emptyThenInbox();
+  await f.command('/voice-test-inbox');
+  const deadline = Date.now() + 8000;
+  while (f.events.filter(event => event.type === 'agent_settled').length < count + 2) {
+    assert.ok(Date.now() < deadline, 'Automatic inbox retry did not settle');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const after = await f.inspect();
+  const spoken = after.journal.filter(frame => frame.type === 'speak');
+  assert.equal(spoken.filter(frame => frame.text === 'The worker finished the review with no blocking issues.').length, 1);
+  assert.equal(spoken.some(frame => frame.key === 'fallback'), false);
+  assert.equal(f.requests.length, 2);
+});
 
 test('real Pi silent background updates do not request another summary after a spoken result', realPi, async t => {
   const f = await fixture(t);

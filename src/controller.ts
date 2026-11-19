@@ -258,6 +258,13 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     instructions() { return reporters.values().next().value?.instructions ?? null; },
     turn() { return run; },
     inboxPending() { return inboxEpoch === epoch; },
+    inboxSummaryNeeded() { return inboxEpoch === epoch && inboxSummaryEpoch !== epoch; },
+    userOutcomePending() { return userOutcomeExpected; },
+    canRetryInboxSummary(token: VoiceToken) {
+      return token.generation === generation && token.epoch === epoch && inboxEpoch === epoch &&
+        inboxSummaryEpoch !== epoch && !userOutcomeExpected && !turnSilent && !captureId &&
+        enabled && ready && outputAvailable && !muted && !blocked && running;
+    },
     incoming() {
       if (!enabled || !ready || !outputAvailable || muted || disposed) return false;
       statusAnnouncement = true;
@@ -269,7 +276,6 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       if (token.generation !== generation || token.epoch !== epoch) return;
       inboxEpoch = epoch;
       inboxSummaryEpoch = null;
-      turnSilent = false;
       summaryExpected = true;
     },
     silenceTurn(token: VoiceToken & { turn: number }) {
@@ -378,12 +384,19 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       stopSpeech('manual_stop');
       emit();
     },
-    answer({ text, generation: target, epoch: turn }: VoiceToken & { text: string }): SpeechResult {
+    answer({ text, generation: target, epoch: turn, purpose }: VoiceToken & {
+      text: string; purpose?: 'inbox-summary';
+    }): SpeechResult {
       if (target === generation && (turn !== epoch || captureId)) {
         return api.speak({ text, generation: target, epoch: turn, key: 'answer' });
       }
+      if (purpose === 'inbox-summary') {
+        if (turnSilent || inboxEpoch !== epoch || inboxSummaryEpoch === epoch) return { status: 'silent' };
+        return api.speak({ text, generation: target, epoch: turn, key: 'answer', purpose });
+      }
       if (!turnSilent && !turnSpoken && !(inboxSummaryEpoch === epoch && !userOutcomeExpected) && (!reporters.size || idleAcknowledgementEpoch === epoch || inboxEpoch === epoch) && text) {
-        const result = api.speak({ text, generation: target, epoch: turn, key: 'answer' });
+        const result = api.speak({ text, generation: target, epoch: turn, key: 'answer',
+          ...(inboxEpoch === epoch && !userOutcomeExpected ? { purpose: 'inbox-summary' as const } : {}) });
         if (result.status === 'queued') {
           finalAnswerSpoken = true;
           idleAcknowledgementEpoch = null;
@@ -392,7 +405,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       }
       return { status: 'silent' };
     },
-    settled(aborted = false) {
+    settled(aborted = false, inboxRetryScheduled = false) {
       const wasRunning = running;
       idleAcknowledgementEpoch = null;
       pendingUserSummary = false;
@@ -400,12 +413,14 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       agentActive = false;
       activeTools.clear();
       const inboxSatisfied = inboxEpoch === epoch && inboxSummaryEpoch === epoch && !userOutcomeExpected;
-      if (wasRunning && !turnSilent && !inboxSatisfied && summaryExpected && enabled && ready && outputAvailable && !muted && !blocked && !captureId && !fallbackSent &&
-          (!turnSpoken || !finalAnswerSpoken || aborted)) {
+      const inboxMissing = inboxEpoch === epoch && inboxSummaryEpoch !== epoch && !userOutcomeExpected;
+      if (wasRunning && !turnSilent && !inboxSatisfied && !inboxRetryScheduled && summaryExpected && enabled && ready && outputAvailable && !muted && !blocked && !captureId && !fallbackSent &&
+          (!turnSpoken || !finalAnswerSpoken || aborted || inboxMissing)) {
         fallbackSent = true;
-        const text = aborted ? 'The agent stopped.' : turnSpoken ? 'I’m finished for now.'
-          : 'I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.';
-        api.speak({ text, generation, epoch, key: turnSpoken ? 'completion' : 'fallback' });
+        const text = aborted ? 'The agent stopped.' : inboxMissing ? 'An agent update could not be summarized automatically.'
+          : turnSpoken ? 'I’m finished for now.'
+            : 'I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.';
+        api.speak({ text, generation, epoch, key: turnSpoken && !inboxMissing ? 'completion' : 'fallback' });
       }
       inboxEpoch = null;
       inboxSummaryEpoch = null;

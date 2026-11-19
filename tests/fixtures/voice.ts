@@ -35,6 +35,25 @@ export default function (pi) {
       content: 'A completed worker report was already handled. No new user request.', display: true },
     { triggerTurn: true }),
   });
+  pi.registerCommand('voice-test-noise', {
+    description: 'Cancel a fake VAD capture without submitting a user prompt',
+    handler: async () => {
+      const id = `fake-capture-${++serial}`;
+      worker.onEvent({ type: 'addressed', id }, worker.generation);
+      worker.onEvent({ type: 'cancelled', id, reason: 'empty' }, worker.generation);
+    },
+  });
+  pi.registerCommand('voice-test-inbox', {
+    description: 'Deliver isolated fake Paj updates through the real Pi custom-message queue',
+    handler: async (_args, ctx) => {
+      const messageIds = [`fake-inbox-${++serial}`];
+      pi.events.emit('paj:messages:delivering:v1', {
+        sessionId: ctx.sessionManager.getSessionId(), messageIds, requestTurn() {},
+      });
+      pi.sendMessage({ customType: 'paj-messages', content: 'A worker completed its review.',
+        display: true, details: { messageIds } }, { triggerTurn: true, deliverAs: 'followUp' });
+    },
+  });
   pi.registerCommand('voice-test-ready', {
     description: 'Signal fake audio worker readiness',
     handler: async () => worker.onEvent({ type: 'ready' }, worker.generation),

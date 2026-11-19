@@ -84,7 +84,8 @@ test('never-consumed inbox work rebinds to the epoch of its first actual model c
   assert.match(context.messages.at(-1).content, /Summarize the newly arrived Paj messages aloud/);
   await f.event('message_end', { message: reply('The worker discarded the capture; nothing was sent.') });
   await f.event('agent_settled');
-  assert.match(speech(f).at(-1).text, /discarded the capture/);
+  assert.ok(speech(f).some(frame => /discarded the capture/.test(frame.text)));
+  assert.match(speech(f).at(-1).text, /did not produce a spoken summary/);
 });
 
 test('an explicit inbox summary tool call is the only completion for an inbox-only run', async t => {
@@ -143,7 +144,7 @@ test('arrival notice is not an outcome; an empty inbox turn retains fallback pro
   await run(f);
   await f.event('message_end', { message: reply('') });
   await f.event('agent_settled');
-  assert.match(speech(f).at(-1).text, /did not produce a spoken summary/);
+  assert.match(speech(f).at(-1).text, /could not be summarized automatically/);
 });
 
 test('explicit model silence is scoped to a run and does not disable later inbox or request guards', async t => {
@@ -160,7 +161,7 @@ test('explicit model silence is scoped to a run and does not disable later inbox
   assert.equal(deliver(f), true);
   await run(f);
   await f.event('agent_settled');
-  assert.match(speech(f).at(-1).text, /did not produce a spoken summary/);
+  assert.match(speech(f).at(-1).text, /could not be summarized automatically/);
   await f.event('input', { source: 'extension', text: 'A real request.' });
   await f.event('before_agent_start', { messageType: 'user' });
   await f.event('agent_start');

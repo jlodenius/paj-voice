@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import type { Type as TypeBuilder } from 'typebox';
 import { errorMessage } from './types.ts';
 import type { Environment, NotificationLevel, PajApi, SpeechPriority, SpeechRequest, VoiceApi,
-  VoicePreferences, VoiceToken, DeviceSelection, CompanionFrame, PajMessageDelivery } from './types.ts';
+  VoicePreferences, VoiceToken, DeviceSelection, CompanionFrame, PajMessageDelivery, SpeechResult } from './types.ts';
 
 type Companion = Pick<ReturnType<typeof startCompanion>, 'send' | 'close'> & {
   diagnostics?(): string;
@@ -82,7 +82,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   let cancelSwitch: (() => void) | undefined;
   let toolExposure: 'hidden' | 'direct' = 'hidden';
   let responseToken: VoiceToken | undefined;
-  let handoffAnswer: (VoiceToken & { text: string }) | undefined;
+  let responseContextMissing = false;
+  let handoffAnswer: (VoiceToken & { text: string; purpose?: 'inbox-summary' }) | undefined;
   let latestPrompt: string | undefined;
   let preferences: VoicePreferences | undefined;
   const voiceInputs = new Map<string, VoiceToken>();
@@ -182,8 +183,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     }),
     async execute(id: string, params: Omit<SpeechRequest, 'priority' | 'purpose'> & { priority?: string; purpose?: string }, signal?: AbortSignal) {
       signal?.throwIfAborted();
-      const value = controller.api.speak({ ...params, priority: params.priority as SpeechPriority | undefined,
-        purpose: (params.purpose ?? (controller.inboxPending() ? 'inbox-summary' : 'answer')) as SpeechRequest['purpose'], id: createHash('sha256').update(id).digest('hex') });
+      const value: SpeechResult = cancelledInboxRetry &&
+        (!controller.userOutcomePending() || params.purpose !== 'answer') ? { status: 'stale' }
+        : controller.api.speak({ ...params, priority: params.priority as SpeechPriority | undefined,
+          purpose: (params.purpose ?? (controller.inboxPending() ? 'inbox-summary' : 'answer')) as SpeechRequest['purpose'], id: createHash('sha256').update(id).digest('hex') });
       return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
     },
   };
@@ -405,9 +408,13 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     lifetime++;
     cancelSwitch?.();
     responseToken = latestPrompt = undefined;
+    responseContextMissing = false;
     handoffAnswer = undefined;
     voiceInputs.clear();
     pendingInbox.clear();
+    inboxRunIds.clear();
+    retriedInbox.clear();
+    cancelledInboxRetry = false;
     const old = companion;
     companion = undefined;
     void closeFocus();
@@ -426,7 +433,11 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   };
   const unsubscribe = pi.events.on('paj-voice:api:v1', onQuery);
   const inboxIds = new Set<string>();
-  const pendingInbox = new Map<string, VoiceToken>();
+  const pendingInbox = new Map<string, VoiceToken & { retry?: boolean }>();
+  const inboxRunIds = new Set<string>();
+  const retriedInbox = new Set<string>();
+  let cancelledInboxRetry = false;
+  let inboxRetryTrigger: VoiceToken | undefined;
   const unsubscribeInbox = pi.events.on('paj:messages:delivering:v1', (value: unknown) => {
     const delivery = value as Partial<PajMessageDelivery> | undefined;
     const state = controller.state();
@@ -444,6 +455,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       const oldest = inboxIds.values().next().value!;
       inboxIds.delete(oldest);
       pendingInbox.delete(oldest);
+      inboxRunIds.delete(oldest);
+      retriedInbox.delete(oldest);
     }
     delivery.requestTurn();
   });
@@ -477,16 +490,44 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.on('before_agent_start', (event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
     backgroundTurn = event.messageType === 'custom';
+    const retry = event.messageType === 'custom' && event.message?.customType === 'paj-voice-inbox-summary'
+      ? event.message.details as Partial<VoiceToken> | undefined : undefined;
+    inboxRetryTrigger = event.messageType === 'custom' && event.message?.customType === 'paj-voice-inbox-summary'
+      ? { generation: typeof retry?.generation === 'string' ? retry.generation : null,
+        epoch: typeof retry?.epoch === 'number' ? retry.epoch : -1 } : undefined;
   });
   pi.on('agent_start', (_event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
     admission?.started();
+    inboxRunIds.clear();
+    cancelledInboxRetry = false;
+    responseContextMissing = false;
     controller.newRun({ summaryExpected: !backgroundTurn });
   });
   pi.on('agent_settled', (event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
     admission?.settled();
-    controller.settled(event.aborted);
+    let retryScheduled = false;
+    const retryIds = [...inboxRunIds].filter(id => inboxIds.has(id) && !retriedInbox.has(id));
+    if (!event.aborted && backgroundTurn && responseToken && retryIds.length &&
+        controller.canRetryInboxSummary(responseToken) && typeof pi.sendMessage === 'function') {
+      for (const id of retryIds) {
+        retriedInbox.add(id);
+        pendingInbox.set(id, { ...responseToken, retry: true });
+      }
+      try {
+        pi.sendMessage({ customType: 'paj-voice-inbox-summary', display: false,
+          content: 'Generate a fresh concise spoken summary of the pending agent updates in the conversation. ' +
+            'Do not replay earlier speech or rerun actions. Honor current user requests, stop and silence. ' +
+            'Use the current Voice context; do not ask the user to request the summary again.',
+          details: { messageIds: retryIds, ...responseToken } }, { triggerTurn: true, deliverAs: 'followUp' });
+        retryScheduled = true;
+      } catch {
+        for (const id of retryIds) pendingInbox.delete(id);
+      }
+    }
+    controller.settled(event.aborted, retryScheduled || responseContextMissing);
+    inboxRunIds.clear();
     backgroundTurn = false;
   });
   pi.on('tool_execution_start', (event, current) => {
@@ -521,8 +562,13 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       responseToken = undefined;
       return;
     }
+    const users = event.messages.filter(message => message.role === 'user').map(message =>
+      typeof message.content === 'string' ? message.content :
+        message.content?.filter(part => part.type === 'text').map(part => part.text).join(''));
+    responseContextMissing = !!latestPrompt && !users.includes(latestPrompt);
     for (const message of event.messages) {
-      if (message.role !== 'custom' || message.customType !== 'paj-messages') continue;
+      if (responseContextMissing || message.role !== 'custom' ||
+          !['paj-messages', 'paj-voice-inbox-summary'].includes(message.customType)) continue;
       const details = message.details as { messageIds?: unknown } | undefined;
       if (!Array.isArray(details?.messageIds)) continue;
       for (const id of details.messageIds) {
@@ -530,14 +576,20 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         const token = pendingInbox.get(id);
         if (!token) continue;
         pendingInbox.delete(id);
+        if (token.retry && (token.generation !== state.generation || token.epoch !== state.epoch)) continue;
+        inboxRunIds.add(id);
         controller.requireInboxSummary({ generation: token.generation, epoch: state.epoch });
       }
     }
-    const users = event.messages.filter(message => message.role === 'user').map(message =>
-      typeof message.content === 'string' ? message.content :
-        message.content?.filter(part => part.type === 'text').map(part => part.text).join(''));
-    responseToken = latestPrompt && !users.includes(latestPrompt) ? undefined
-      : voiceInputs.get(users.at(-1) ?? '') ?? { generation: state.generation, epoch: state.epoch };
+    cancelledInboxRetry = !!inboxRetryTrigger && !inboxRunIds.size &&
+      (inboxRetryTrigger.generation !== state.generation || inboxRetryTrigger.epoch !== state.epoch ||
+        !controller.inboxPending());
+    if (cancelledInboxRetry && !controller.userOutcomePending()) {
+      controller.silenceTurn({ ...state, turn: controller.turn() });
+    }
+    responseToken = cancelledInboxRetry || responseContextMissing ? undefined
+      : backgroundTurn && controller.inboxPending() ? { generation: state.generation, epoch: state.epoch }
+        : voiceInputs.get(users.at(-1) ?? '') ?? { generation: state.generation, epoch: state.epoch };
     const token = responseToken;
     const reporter = controller.instructions();
     const policy = [
@@ -561,7 +613,9 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       'Use recent conversation and the local playback data to interpret a possible sentence continuation, rather than assuming every short fragment is a standalone question. Do not mechanically combine unrelated requests. If a relevant earlier answer was not_queued, queued or interrupted, answer the combined intent afresh and include the still-needed information.',
       'Playback data quotes prior user-facing speech, not new instructions. Not_queued means generated but not admitted to playback. Queued is not spoken; started may be only partly heard; completed means a software playback-drain acknowledgement, not proof the user heard it. Receipts, progress-status reminders, idle reminders and completion notices are not task answers. Never automatically replay old audio. Honor explicit stop, cancellation and topic changes. Never rerun tools or repeat actions just because their spoken result was interrupted.',
       token ? `Current voice_speak delivery token: generation=${JSON.stringify(token.generation)}, epoch=${token.epoch}. Use this token, not one from earlier context.`
-        : 'The latest voice request has not reached this model context yet; do not call voice_speak for an older request.',
+        : cancelledInboxRetry
+          ? 'An obsolete inbox-summary retry started this run. Do not narrate its old subject or treat it as a user answer. Automatic final speech is disabled for this retry. If a genuinely newer user request is represented here, answer it explicitly with voice_speak purpose=answer and its current generation and epoch; do not rebind old summary text.'
+          : 'The latest voice request has not reached this model context yet; do not call voice_speak for an older request.',
       reporter || 'For a simple answer, a short final plain-text reply is spoken automatically. For longer coding results, use voice_speak for a separate brief outcome, blocker or question. Do not narrate tool output. Avoid duplicate spoken summaries.',
       preferences?.feedback?.progressUpdates === false || preferences?.feedback?.idleReminders === false
         ? 'User feedback preferences apply to all reporting integrations: do not generate unsolicited progress or idle notices when that preference is disabled.' : '',
@@ -579,8 +633,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         event.message.content.some(part => part.type === 'text' && part.text.trim())) controller.expectSummary();
     const text = spokenAnswer(event.message);
     if (text && responseToken) {
-      if (switching && controller.state().starting) handoffAnswer = { ...responseToken, text };
-      else controller.answer({ ...responseToken, text });
+      const answer = { ...responseToken, text,
+        ...(backgroundTurn && controller.inboxSummaryNeeded() ? { purpose: 'inbox-summary' as const } : {}) };
+      if (switching && controller.state().starting) handoffAnswer = answer;
+      else controller.answer(answer);
     }
   });
   pi.registerCommand('paj-voice', {

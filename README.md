@@ -58,6 +58,7 @@ to save another audio selection.
 
 `mute` and `unmute` remain aliases for `pause` and `resume`. The panel's `Audio:` row shows the
 current selection. You can also ask to switch to a saved selection while Voice is listening.
+With Paj, incoming agent updates get concise spoken summaries automatically; you do not need to ask.
 For automatic laptop fallback on headset loss, see [audio recovery](docs/reference.md#audio-recovery).
 
 ## Options
