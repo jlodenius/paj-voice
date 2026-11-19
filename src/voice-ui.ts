@@ -27,6 +27,13 @@ function appearance(state: VoiceDisplayState): {
     activity: 'STARTING - preparing local speech', detail: 'Remain quiet until the ready beep.',
     controls: 'Cancel: /paj-voice off' };
   if (!state.enabled) return null;
+  if (state.inputPause) return { badge: state.inputPause === 'paused' ? 'MIC PAUSED'
+      : state.inputPause === 'warming' ? 'MIC WARMING' : 'MIC HELD', tone: 'warning',
+    activity: state.inputPause === 'paused' ? `Microphone closed - ${Math.ceil((state.inputPauseRemainingMs ?? 0) / 1000)}s remaining`
+      : state.inputPause === 'warming' ? 'Fresh microphone warmup - remain quiet' : 'Automatic microphone resume cancelled',
+    detail: state.outputAvailable === false ? 'Playback unavailable; agent work continues. Fresh consent required.'
+      : 'Speech and agent work continue. Wait for readiness before speaking.',
+    controls: 'Fresh consent: /paj-voice resume   All audio: /paj-voice pause   Off: /paj-voice off' };
   if (state.inputAvailable === false || state.outputAvailable === false) {
     const input = state.inputAvailable !== false, output = state.outputAvailable !== false;
     return { badge: input ? 'PLAYBACK SUSPENDED' : output ? 'MIC SUSPENDED' : 'AUDIO SUSPENDED', tone: 'warning',

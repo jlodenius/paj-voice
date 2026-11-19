@@ -29,6 +29,8 @@ export interface VoiceState extends VoiceToken {
   sessionId: string | null;
   muted: boolean;
   listening: boolean;
+  inputPause?: 'paused' | 'warming' | 'held' | null;
+  inputPauseRemainingMs?: number;
   inputAvailable?: boolean;
   outputAvailable?: boolean;
   usingFallback?: boolean;
@@ -121,6 +123,8 @@ export interface CompanionFrame {
   fallback?: unknown;
   speakerMode?: unknown;
   listening?: unknown;
+  phase?: unknown;
+  remainingMs?: unknown;
   playing?: unknown;
   playbackGeneration?: unknown;
   outputEpoch?: unknown;
@@ -133,6 +137,7 @@ export interface CompanionFrame {
 export type CompanionCommand =
   | { type: 'stop' | 'shutdown' }
   | { type: 'mute'; muted: boolean }
+  | { type: 'input_pause'; id: string; seconds: number }
   | { type: 'speak'; id: string; text: string; priority: SpeechPriority; key?: string }
   | { type: 'configure'; generation: string | null; config: Record<string, unknown> };
 

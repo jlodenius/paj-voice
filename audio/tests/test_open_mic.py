@@ -41,7 +41,8 @@ def wait_for(predicate):
 
 
 class OpenMicTests(unittest.TestCase):
-    def fixture(self, hold_load=False, capture_process=False, bluetooth=False, transition=False, prepare=None):
+    def fixture(self, hold_load=False, capture_process=False, bluetooth=False, transition=False, prepare=None,
+                clock=None):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
@@ -138,6 +139,8 @@ class OpenMicTests(unittest.TestCase):
                             types.SimpleNamespace(SileroVoiceActivityDetector=object)}))
         if prepare:
             prepare(config, graph, models)
+        if clock:
+            stack.enter_context(patch.object(open_mic.Runtime, '_health', lambda runtime: runtime.shutdown_complete.wait()))
         runtime = open_mic.Runtime(events.append)
         self.addCleanup(runtime.shutdown)
         self.addCleanup(release_load.set)
@@ -145,6 +148,8 @@ class OpenMicTests(unittest.TestCase):
         self.assertTrue(load_entered.wait(1))
         if not hold_load:
             wait_for(lambda: runtime.ready and ("ready" in played or runtime.target is None))
+        if clock:
+            runtime.clock = clock
         return runtime, events, captures, played, models, graph, release_load
 
     def utterance(self, runtime, ident, pcm=b"\0\0" * 512):
@@ -159,6 +164,263 @@ class OpenMicTests(unittest.TestCase):
             now[0] += 0.1
             runtime.segments.feed(b"\0\0" * 1600, True)
         return now
+
+    def test_timed_input_pause_closes_recorder_before_ack_and_preserves_output(self):
+        runtime, events, captures, played, models, *_ = self.fixture(capture_process=True)
+        speaker, sink, output_epoch, revision = runtime.speaker, runtime.sink, runtime.output_epoch, runtime.revision
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def transcribe(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return Transcription('stale request', 1)
+        models.transcribe.side_effect = transcribe
+        self.utterance(runtime, 'old')
+        self.assertTrue(entered.wait(1))
+        revision = runtime.revision
+        observed = []
+        runtime.emit = lambda event: (observed.append(captures[0].closed) if event['type'] == 'input_pause_state' else None,
+                                      events.append(event))
+        runtime.command({'type': 'input_pause', 'id': 'pause-one', 'seconds': 10})
+        self.assertEqual(observed, [True])
+        self.assertIsNotNone(captures[0].child.process.poll())
+        self.assertIs(runtime.speaker, speaker)
+        self.assertIs(runtime.sink, sink)
+        self.assertEqual((runtime.output_epoch, runtime.revision), (output_epoch, revision))
+        self.assertFalse(speaker.closed or sink.closed)
+        self.assertFalse(runtime.input_available)
+        release.set()
+        wait_for(lambda: runtime.busy['recognition'] is None)
+        self.assertFalse(any(event.get('text') == 'stale request' for event in events))
+        runtime.command({'type': 'speak', 'id': 'during-pause', 'text': 'Still working.'})
+        wait_for(lambda: 'during-pause' in played)
+
+    def test_pause_preserves_inflight_synthesis_current_playback_and_queued_speech(self):
+        runtime, events, captures, played, models, *_ = self.fixture()
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def synthesize(text):
+            if text == 'First answer.':
+                entered.set()
+                release.wait(2)
+            return b'\0\0' * 1600
+        models.synthesize.side_effect = synthesize
+        runtime.command({'type': 'speak', 'id': 'first', 'text': 'First answer.'})
+        self.assertTrue(entered.wait(1))
+        runtime.command({'type': 'speak', 'id': 'second', 'text': 'Second answer.'})
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 10})
+        release.set()
+        wait_for(lambda: 'first' in played)
+        current = runtime.current_playback
+        runtime.command({'type': 'input_pause', 'id': 'replacement', 'seconds': 5})
+        self.assertIs(runtime.current_playback, current)
+        self.assertFalse(current[1].is_set())
+        self.assertFalse(runtime.speaker.paused)
+        runtime.speaker.activity({'type': 'played', 'id': 'first'})
+        wait_for(lambda: 'second' in played)
+        self.assertFalse(any(e['type'] == 'speech_end' and not e.get('completed') for e in events))
+
+    def test_native_pause_request_history_does_not_evict_ids_or_accept_more_than_its_bound(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+        for index in range(512):
+            runtime.command({'type': 'input_pause', 'id': f'pause-{index}', 'seconds': 10})
+        now[0] = 7
+        runtime.command({'type': 'input_pause', 'id': 'pause-0', 'seconds': 10})
+        runtime.command({'type': 'input_pause', 'id': 'over-limit', 'seconds': 300})
+        state = next(e for e in reversed(events) if e['type'] == 'input_pause_state')
+        self.assertEqual((state['id'], state['remainingMs']), ('pause-511', 3000))
+        now[0] = 10
+        runtime._health_tick(0)
+        self.assertEqual(len(captures), 2)
+
+    def test_native_input_pause_rejects_noninteger_or_unbounded_durations_without_touching_audio(self):
+        runtime, events, captures, *_ = self.fixture()
+        for seconds in (0, 301, -1, 1.5, True, '10', None):
+            with self.subTest(seconds=seconds):
+                with self.assertRaises(ValueError):
+                    runtime.command({'type': 'input_pause', 'id': 'invalid', 'seconds': seconds})
+                self.assertFalse(captures[0].closed)
+                self.assertTrue(runtime.input_available and runtime.output_available)
+        runtime.command({'type': 'input_pause', 'id': 'valid', 'seconds': 1})
+        with self.assertRaises(ValueError):
+            runtime.command({'type': 'input_pause', 'id': 'valid', 'seconds': 2})
+
+    def test_cancelled_inflight_recognition_error_cannot_close_preserved_output(self):
+        now = [0]
+        runtime, events, captures, _, models, *_ = self.fixture(clock=lambda: now[0])
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def transcribe(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            finished.set()
+            raise RuntimeError('Obsolete recognition failed')
+        models.transcribe.side_effect = transcribe
+        self.utterance(runtime, 'old')
+        self.assertTrue(entered.wait(1))
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        release.set()
+        self.assertTrue(finished.wait(1))
+        wait_for(lambda: runtime.busy['recognition'] is None)
+        self.assertFalse(runtime.failed)
+        self.assertTrue(runtime.output_available)
+        self.assertFalse(any(e['type'] == 'error' for e in events))
+
+    def test_health_cannot_acknowledge_or_expire_pause_while_recorder_is_still_closing(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+        close = captures[0].close
+        observed = []
+        def slow_close():
+            now[0] = 2
+            runtime._health_tick(0)
+            observed.append((any(e['type'] == 'input_pause_state' for e in events), len(captures)))
+            close()
+        captures[0].close = slow_close
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        self.assertEqual(observed, [(False, 1)])
+        self.assertTrue(captures[0].closed)
+        self.assertEqual(next(e['phase'] for e in reversed(events) if e['type'] == 'input_pause_state'), 'warming')
+        runtime._health_tick(0)
+        self.assertEqual(len(captures), 2)
+
+    def test_input_pause_deadline_replacement_duplicate_and_fresh_warmup(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+        runtime.command({'type': 'input_pause', 'id': 'first', 'seconds': 10})
+        now[0] = 7
+        runtime.command({'type': 'input_pause', 'id': 'second', 'seconds': 5})
+        now[0] = 10
+        runtime.command({'type': 'input_pause', 'id': 'second', 'seconds': 5})
+        runtime._health_tick(0)
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(events[-1]['remainingMs'], 2000)
+        now[0] = 12
+        runtime._health_tick(0)
+        self.assertEqual(len(captures), 2)
+        self.assertFalse(runtime.input_available)
+        self.assertEqual(next(e['phase'] for e in reversed(events) if e['type'] == 'input_pause_state'), 'warming')
+        runtime._health_tick(0)
+        self.assertTrue(runtime.input_available)
+        self.assertEqual(next(e['phase'] for e in reversed(events) if e['type'] == 'input_pause_state'), 'resumed')
+        runtime.command({'type': 'input_pause', 'id': 'first', 'seconds': 10})
+        self.assertEqual(len(captures), 2)
+        self.assertTrue(runtime.input_available)
+
+    def test_pause_identity_loss_permanently_holds_input_without_pair_changing_fallback(self):
+        for lost in ('input', 'output', 'replacement'):
+            with self.subTest(lost=lost):
+                now = [0]
+                runtime, events, captures, _, _, graph, _ = self.fixture(clock=lambda: now[0])
+                original = runtime.frozen
+                runtime.config['audio']['fallback'] = {'name': 'fallback', 'input': 'other', 'output': 'speaker'}
+                runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+                graph.bind = Mock(side_effect=AssertionError('Must not select fallback while input is paused'))
+                returned = {'input': (None, original[1]), 'output': (original[0], None),
+                            'replacement': (Node('laptop', 'new-serial', 'Audio/Source'), original[1])}[lost]
+                graph.recover.side_effect = lambda frozen: returned
+                now[0] = 1
+                runtime._health_tick(0)
+                self.assertEqual(next(e['phase'] for e in reversed(events) if e['type'] == 'input_pause_state'), 'held')
+                graph.recover.side_effect = lambda frozen: original
+                now[0] = 20
+                runtime._health_tick(0)
+                self.assertEqual(len(captures), 1)
+                self.assertFalse(runtime.input_available)
+                self.assertTrue(runtime.output_available)
+                self.assertEqual(runtime.frozen, original)
+                graph.bind.assert_not_called()
+                runtime.shutdown()
+
+    def test_pause_cancellation_matrix_and_stale_input_callbacks_never_reopen_capture(self):
+        for action in ('stop', 'mute', 'shutdown'):
+            with self.subTest(action=action):
+                now = [0]
+                runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+                old_epoch, old_gate, old_capture, old_segments = runtime.epoch, runtime.gate, runtime.capture, runtime.segments
+                runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+                runtime.command({'type': action, **({'muted': True} if action == 'mute' else {})})
+                revision = runtime.revision
+                runtime._interrupt(old_epoch)
+                runtime._segment({'type': 'onset', 'id': 'late'}, old_epoch)
+                runtime._warmup(old_capture, old_gate, old_epoch, deadline=runtime.clock() + 1)
+                runtime._resume_input(runtime.source)
+                runtime._arm_recovered_input(runtime.source)
+                now[0] = 10
+                runtime._health_tick(0)
+                self.assertEqual(len(captures), 1)
+                self.assertTrue(old_segments.closed)
+                self.assertFalse(runtime.input_available)
+                self.assertEqual(runtime.revision, revision)
+                self.assertFalse(any(e.get('id') == f'e{old_epoch}-tlate' for e in events))
+                runtime.shutdown()
+
+    def test_pause_racing_capture_construction_closes_stale_candidate_before_start(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+        runtime._suspend(input_lost=True)
+        capture_factory = open_mic.Capture
+        def construct(*args):
+            candidate = capture_factory(*args)
+            candidate.start = Mock(side_effect=AssertionError('Obsolete recorder must not start'))
+            runtime.command({'type': 'input_pause', 'id': 'race', 'seconds': 1})
+            return candidate
+        with patch.object(open_mic, 'Capture', construct):
+            runtime._resume_input(runtime.source)
+        self.assertTrue(captures[-1].closed)
+        captures[-1].start.assert_not_called()
+        self.assertIsNone(runtime.capture)
+        self.assertFalse(runtime.input_available)
+
+    def test_speaker_pause_expiry_does_not_advertise_listening_during_owned_playback(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0],
+            prepare=lambda config, *_: config['audio'].update(speakerMode=True))
+        runtime.owned_playback = True
+        runtime._set_listening(False)
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        now[0] = 1
+        runtime._health_tick(0)
+        runtime._health_tick(0)
+        self.assertTrue(runtime.input_available)
+        self.assertFalse(runtime.listening)
+        state = next(e for e in reversed(events) if e['type'] == 'input_pause_state')
+        self.assertEqual(state['phase'], 'resumed')
+        self.assertFalse(state['listening'])
+        self.assertFalse(runtime._capture_allowed(b'\0\0' * 160, True, None))
+
+    def test_expiry_capture_candidate_requires_the_exact_saved_pair_before_install(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        capture_factory = open_mic.Capture
+        def construct(*args):
+            candidate = capture_factory(*args)
+            candidate.start = Mock()
+            runtime.frozen = (runtime.source, Node('replacement', 'new', 'Audio/Sink'))
+            return candidate
+        now[0] = 1
+        with patch.object(open_mic, 'Capture', construct):
+            runtime._health_tick(0)
+        self.assertTrue(captures[-1].closed)
+        captures[-1].start.assert_not_called()
+        self.assertIsNone(runtime.capture)
+        self.assertFalse(runtime.input_available)
+
+    def test_failed_post_pause_warmup_holds_input_instead_of_retrying_capture(self):
+        now = [0]
+        runtime, events, captures, *_ = self.fixture(clock=lambda: now[0])
+        runtime.command({'type': 'input_pause', 'id': 'pause', 'seconds': 1})
+        now[0] = 1
+        runtime._health_tick(0)
+        captures[-1].health = Mock(side_effect=RuntimeError('Fake recorder failed during fresh warmup'))
+        runtime._health_tick(0)
+        now[0] = 5
+        runtime._health_tick(0)
+        self.assertEqual(len(captures), 2)
+        self.assertFalse(runtime.input_available)
+        self.assertEqual(next(e['phase'] for e in reversed(events) if e['type'] == 'input_pause_state'), 'held')
 
     def test_unreliable_throat_clearing_transcript_is_cancelled_without_an_utterance(self):
         runtime, events, _, _, models, *_ = self.fixture()

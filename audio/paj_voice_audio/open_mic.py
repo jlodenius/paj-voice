@@ -141,6 +141,9 @@ class Runtime:
         self.input_available = self.output_available = False
         self.output_epoch = 0
         self.input_deadline = 0
+        self.input_pause = None
+        self.pause_revision = 0
+        self.pause_requests = {}
         self.frozen = ()
         self.current_playback = None
         self.active_speech = None
@@ -153,6 +156,9 @@ class Runtime:
         kind = frame["type"]
         if kind == "shutdown":
             self.shutdown()
+            return
+        if kind == 'input_pause':
+            self._pause_input(frame)
             return
         with self.lock:
             if self.closed:
@@ -195,11 +201,65 @@ class Runtime:
                 self.speeches.put_nowait({"id": ident, "text": text, "revision": self.revision, "key": key})
                 return
         if kind == "stop":
+            with self.lock:
+                paused = self.input_pause is not None
+                if paused:
+                    self.input_pause['phase'] = 'held'
+                    self.pause_revision += 1
+            if paused:
+                self._suspend(input_lost=True)
+                with self.lock:
+                    self._pause_state()
             self._silence()
         elif kind == "mute" and frame.get("muted") is True:
             self._mute()
         else:
             raise ValueError("Unknown command; resume requires a fresh companion")
+
+    def _pause_state(self):
+        pause = self.input_pause
+        if pause and not pause['closing']:
+            self.emit({'type': 'input_pause_state', 'id': pause['id'], 'phase': pause['phase'],
+                       'remainingMs': max(0, min(300000, math.ceil((pause['deadline'] - self.clock()) * 1000)))
+                       if pause['phase'] == 'paused' else 0,
+                       'listening': self.input_available and self.listening})
+
+    def _pause_input(self, frame):
+        seconds, ident = frame.get('seconds'), frame.get('id')
+        if (type(seconds) is not int or not 1 <= seconds <= 300
+                or not isinstance(ident, str) or not re.fullmatch(r'[\w-]{1,128}', ident)):
+            raise ValueError('Input pause requires an ID and integer seconds from 1 to 300')
+        with self.lock:
+            if not self.configured:
+                raise ValueError('Configure must be first')
+            if ident in self.pause_requests:
+                if self.pause_requests[ident] != seconds:
+                    raise ValueError('Input pause ID conflict')
+                self._pause_state()
+                return
+            if self.closed or self.muted or not self.ready or (self.input_pause and self.input_pause['phase'] == 'held'):
+                return
+            if len(self.pause_requests) >= 512:
+                return
+            self.pause_requests[ident] = seconds
+            self.pause_revision += 1
+            pause = {'id': ident, 'deadline': self.clock() + seconds, 'phase': 'paused',
+                     'frozen': self.frozen, 'closing': True}
+            self.input_pause = pause
+        self._suspend(input_lost=True)
+        with self.lock:
+            if self.input_pause is not pause:
+                return
+            pause['closing'] = False
+            if pause['phase'] == 'paused' and self.clock() >= pause['deadline']:
+                pause['phase'] = 'warming'
+            self._set_listening(False)
+            self._pause_state()
+
+    def _input_blocked(self):
+        pause = self.input_pause
+        return pause is not None and (pause['phase'] != 'warming' or pause['frozen'] != self.frozen
+                                      or (self.source, self.target) != pause['frozen'])
 
     def _load(self, value):
         try:
@@ -366,7 +426,7 @@ class Runtime:
 
     def _try_fallback(self):
         with self.lock:
-            if self.closed or self.muted or not self.ready or self.using_fallback:
+            if self.closed or self.muted or not self.ready or self.using_fallback or self.input_pause:
                 return False
             route = self.config['audio'].get('fallback')
             if route is None:
@@ -377,13 +437,13 @@ class Runtime:
         except Exception:
             return False
         with self.lock:
-            if (self.closed or self.muted or self.using_fallback or self.epoch != epoch
+            if (self.closed or self.muted or self.using_fallback or self.input_pause or self.epoch != epoch
                     or self.output_epoch != output_epoch):
                 return False
             changed_input = source != self.source or not self.input_available
         self._suspend(input_lost=changed_input, output_lost=True, epoch=epoch, output_epoch=output_epoch)
         with self.lock:
-            if self.closed or self.muted:
+            if self.closed or self.muted or self.input_pause:
                 return False
             self.using_fallback = True
             self.frozen = (source, target)
@@ -412,7 +472,7 @@ class Runtime:
 
     def _capture_allowed(self, pcm, voiced, captured_at):
         with self.lock:
-            if self.closed or self.muted:
+            if self.closed or self.muted or self._input_blocked():
                 return False
             if not self.speaker_mode:
                 return True
@@ -474,7 +534,7 @@ class Runtime:
             capture.wait_ready(timeout=min(3, self._remaining(deadline)))
             while self.clock() < deadline:
                 with self.lock:
-                    if self.closed or self.muted or self.epoch != epoch:
+                    if self.closed or self.muted or self._input_blocked() or self.epoch != epoch:
                         return
                 capture.health()
                 if recover and self.clock() >= next_graph:
@@ -486,7 +546,7 @@ class Runtime:
                 if recover:
                     self.graph.check(deadline=deadline)
                 with self.lock:
-                    if self.closed or self.muted or self.epoch != epoch:
+                    if self.closed or self.muted or self._input_blocked() or self.epoch != epoch:
                         return
                     self._remaining(deadline)
                     summary = gate.arm()
@@ -520,7 +580,7 @@ class Runtime:
 
     def _interrupt(self, epoch):
         with self.lock:
-            if self.closed or self.muted or self.epoch != epoch:
+            if self.closed or self.muted or self._input_blocked() or self.epoch != epoch:
                 return
             self.input_active = True
             self.revision += 1
@@ -539,7 +599,7 @@ class Runtime:
         try:
             ident = f"e{epoch}-t{event['id']}"
             with self.lock:
-                if self.closed or self.muted or not self.ready or not self.input_available or self.epoch != epoch:
+                if self.closed or self.muted or self._input_blocked() or not self.ready or not self.input_available or self.epoch != epoch:
                     return
                 if event["type"] == "onset":
                     if len(self.pending) >= 4:
@@ -596,7 +656,10 @@ class Runtime:
                                    "id": job["id"], "text": text} if text.strip()
                                   else {"type": "cancelled", "id": job["id"], "reason": "empty"})
             except Exception as error:
-                self.fail(error)
+                with self.lock:
+                    obsolete = self.closed or self.muted or job.get('epoch') != self.epoch
+                if not obsolete:
+                    self.fail(error)
             finally:
                 self.busy["recognition"] = None
                 job.clear()
@@ -731,6 +794,8 @@ class Runtime:
     def _mute(self):
         with self.lock:
             self.muted = True
+            self.input_pause = None
+            self.pause_revision += 1
             self.ready = False
             self.input_available = self.output_available = False
             self.epoch += 1
@@ -749,11 +814,16 @@ class Runtime:
     def _suspend(self, input_lost=False, output_lost=False, epoch=None, output_epoch=None):
         resources = []
         guard_epoch = None
+        held_pause = None
         with self.lock:
             if self.closed or self.muted or not self.ready:
                 return
             before = self.input_available, self.output_available
             if input_lost and (epoch is None or epoch == self.epoch):
+                if self.input_pause and self.input_pause['phase'] == 'warming':
+                    self.input_pause['phase'] = 'held'
+                    held_pause = self.input_pause
+                    self.pause_revision += 1
                 if self.capture is not None or self.input_available:
                     self.epoch += 1
                     self.input_available = self.input_active = False
@@ -793,6 +863,10 @@ class Runtime:
             if before != (self.input_available, self.output_available):
                 self._availability()
         self._close(resources)
+        if held_pause is not None:
+            with self.lock:
+                if self.input_pause is held_pause:
+                    self._pause_state()
         if guard_epoch is not None:
             with self.lock:
                 if self.output_epoch == guard_epoch:
@@ -820,10 +894,10 @@ class Runtime:
 
     def _resume_input(self, source):
         with self.lock:
-            if self.closed or self.muted or self.input_available or self.capture is not None:
+            if self.closed or self.muted or self._input_blocked() or self.input_available or self.capture is not None:
                 return
             self.epoch += 1
-            epoch = self.epoch
+            epoch, pause_revision = self.epoch, self.pause_revision
             self.guard_voiced = False
             self.guard_quiet = None
             if not self.owned_playback and self.clock() > self.acoustic_until:
@@ -837,7 +911,8 @@ class Runtime:
                           self.config['turn']['speechThreshold'], gate,
                           lambda error: self._capture_fault(error, epoch))
         with self.lock:
-            obsolete = self.closed or self.muted or self.epoch != epoch
+            obsolete = (self.closed or self.muted or self._input_blocked() or self.epoch != epoch
+                        or self.pause_revision != pause_revision)
             if not obsolete:
                 self.source = source
                 self.segments, self.gate, self.capture = segments, gate, capture
@@ -846,7 +921,8 @@ class Runtime:
             return
         try:
             with self.lock:
-                if self.closed or self.muted or self.epoch != epoch:
+                if (self.closed or self.muted or self._input_blocked() or self.epoch != epoch
+                        or self.pause_revision != pause_revision):
                     return
                 self.input_deadline = self.clock() + 5
                 capture.start()
@@ -865,7 +941,7 @@ class Runtime:
             self._suspend(input_lost=True, epoch=epoch)
             return
         with self.lock:
-            if (self.closed or self.muted or self.input_available or self.capture is not capture
+            if (self.closed or self.muted or self._input_blocked() or self.input_available or self.capture is not capture
                     or self.epoch != epoch or self.source != source or self.clock() >= self.input_deadline
                     or not self.gate.ready.is_set()):
                 return
@@ -874,60 +950,83 @@ class Runtime:
             self.input_available = True
             self.stage = 'listening'
             self._availability()
+            if self.input_pause:
+                self.input_pause['phase'] = 'resumed'
+                self._pause_state()
+                self.input_pause = None
+
+    def _health_tick(self, next_graph=0):
+        with self.lock:
+            if self.closed or self.muted:
+                return next_graph
+            epoch, pause_revision = self.epoch, self.pause_revision
+            frozen = self.frozen
+        if self.clock() >= next_graph:
+            try:
+                source, target = self.graph.recover(frozen)
+            except Exception:
+                source = target = None
+            with self.lock:
+                if self.closed or self.muted or self.epoch != epoch or self.pause_revision != pause_revision:
+                    return next_graph
+                input_lost = source is None or source != self.source
+                output_lost = target is None or target != self.target
+                pause = self.input_pause
+                hold = False
+                if pause:
+                    if (source, target) != pause['frozen']:
+                        pause['phase'] = 'held'
+                        hold = True
+                    elif pause['phase'] == 'paused' and not pause['closing'] and self.clock() >= pause['deadline']:
+                        pause['phase'] = 'warming'
+                else:
+                    self.frozen = tuple(actual if not expected.serial and actual is not None else expected
+                                        for expected, actual in zip(frozen, (source, target)))
+            self._suspend(input_lost=input_lost or hold, output_lost=output_lost)
+            with self.lock:
+                if pause is not None and self.input_pause is pause:
+                    self._pause_state()
+            if input_lost or output_lost or not self.input_available or not self.output_available:
+                if self._try_fallback():
+                    return self.clock() + 1
+            if target is not None and not self.output_available:
+                try:
+                    self._resume_output(target)
+                except Exception:
+                    self._suspend(output_lost=True)
+            if source is not None and not self.input_available:
+                try:
+                    had_capture = self.capture is not None
+                    self._resume_input(source)
+                    if had_capture or not self.input_pause:
+                        self._arm_recovered_input(source)
+                except Exception:
+                    self._suspend(input_lost=True)
+            next_graph = self.clock() + 1
+        with self.lock:
+            capture, epoch = self.capture, self.epoch
+            sink, output_epoch = self.sink, self.output_epoch
+        if sink:
+            try:
+                sink.health()
+            except Exception:
+                self._suspend(output_lost=True, output_epoch=output_epoch)
+        if capture:
+            try:
+                capture.health()
+                with self.lock:
+                    expired = not self.input_available and self.clock() >= self.input_deadline
+                if expired:
+                    self._suspend(input_lost=True, epoch=epoch)
+            except Exception:
+                self._suspend(input_lost=True, epoch=epoch)
+        return next_graph
 
     def _health(self):
         next_graph = 0
         try:
             while not self.stopped.wait(0.1):
-                with self.lock:
-                    if self.closed or self.muted:
-                        continue
-                if self.clock() >= next_graph:
-                    try:
-                        source, target = self.graph.recover(self.frozen)
-                    except Exception:
-                        source = target = None
-                    with self.lock:
-                        if self.closed or self.muted:
-                            continue
-                        input_lost = source is None or source != self.source
-                        output_lost = target is None or target != self.target
-                        self.frozen = tuple(actual if not expected.serial and actual is not None else expected
-                                            for expected, actual in zip(self.frozen, (source, target)))
-                    self._suspend(input_lost=input_lost, output_lost=output_lost)
-                    if input_lost or output_lost or not self.input_available or not self.output_available:
-                        if self._try_fallback():
-                            next_graph = self.clock() + 1
-                            continue
-                    if target is not None and not self.output_available:
-                        try:
-                            self._resume_output(target)
-                        except Exception:
-                            self._suspend(output_lost=True)
-                    if source is not None and not self.input_available:
-                        try:
-                            self._resume_input(source)
-                            self._arm_recovered_input(source)
-                        except Exception:
-                            self._suspend(input_lost=True)
-                    next_graph = self.clock() + 1
-                with self.lock:
-                    capture, epoch = self.capture, self.epoch
-                    sink, output_epoch = self.sink, self.output_epoch
-                if sink:
-                    try:
-                        sink.health()
-                    except Exception:
-                        self._suspend(output_lost=True, output_epoch=output_epoch)
-                if capture:
-                    try:
-                        capture.health()
-                        with self.lock:
-                            expired = not self.input_available and self.clock() >= self.input_deadline
-                        if expired:
-                            self._suspend(input_lost=True, epoch=epoch)
-                    except Exception:
-                        self._suspend(input_lost=True, epoch=epoch)
+                next_graph = self._health_tick(next_graph)
         except Exception as error:
             self.fail(error)
         finally:
@@ -965,6 +1064,8 @@ class Runtime:
             if self.closed:
                 return
             self.closed = True
+            self.input_pause = None
+            self.pause_revision += 1
             self.ready = False
             self.input_available = self.output_available = False
             self.output_epoch += 1

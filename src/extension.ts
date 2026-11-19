@@ -179,6 +179,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (toolExposure !== exposure) {
         pi.registerTool({ ...speakTool, exposure });
         pi.registerTool({ ...routeTool, exposure });
+        pi.registerTool({ ...pauseInputTool, exposure });
         pi.registerTool({ ...idleAcknowledgementTool, exposure });
         pi.registerTool({ ...silenceTurnTool, exposure });
         toolExposure = exposure;
@@ -226,6 +227,24 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
     },
   };
+  const inputControlAllowed = () => !closed && ctx?.mode === 'tui' && ctx.hasUI &&
+    ctx.sessionManager.getSessionId() === controller.state().sessionId &&
+    !env.PAJ_PARENT_PI_SESSION_ID && !env.PAJ_SPAWN_ID && !env.PAJ_TASK_ID && !env.PAJ_PARENT_TASK_ID &&
+    (!env.PAJ_ROLE || env.PAJ_ROLE === 'primary');
+  const pauseInputTool = {
+    name: 'voice_pause_input', label: 'Pause microphone',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    description: 'Only when the user explicitly asks to pause or mute the microphone for a finite duration, suspend capture for 1–300 integer seconds. Speech output and agent work continue. Replaces the previous deadline from now; never arms Voice. Resume is conditional on the same session and exact endpoints, followed by fresh warmup. Use the current generation and epoch. Bare pause/mute means all audio, not this tool.',
+    parameters: Type.Object({ seconds: Type.Integer({ minimum: 1, maximum: 300 }),
+      generation: Type.String(), epoch: Type.Integer({ minimum: 0 }) }),
+    async execute(id: string, params: VoiceToken & { seconds: number }, signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      const value = inputControlAllowed()
+        ? controller.pauseInput(params.seconds, params, createHash('sha256').update(id).digest('hex'))
+        : { status: 'unavailable' };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value };
+    },
+  };
   const idleAcknowledgementTool = {
     name: 'voice_acknowledge_idle', label: 'Acknowledge availability',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -253,6 +272,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
   pi.registerTool({ ...idleAcknowledgementTool, exposure: 'hidden' });
   pi.registerTool({ ...speakTool, exposure: 'hidden' });
   pi.registerTool({ ...routeTool, exposure: 'hidden' });
+  pi.registerTool({ ...pauseInputTool, exposure: 'hidden' });
   const routeSummary = () => {
     try {
       const saved = readRoutes();
@@ -621,6 +641,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       'Assume the user cannot see the screen. Provide important answers, outcomes, blockers and questions aloud, including when a reporting integration owns narration. Do not replace a spoken answer with a screen referral. Keep screen responses useful as a supplement, not a prerequisite.',
       'Request screen access only when something genuinely requires manual interaction, such as a blocking confirmation or credential entry. Explain aloud what is needed and why; never bypass existing confirmations or treat spoken approval as terminal approval.',
       `Saved audio routes: ${JSON.stringify(routeSummary())}. Use voice_route with a saved name only when the user requests a route switch; omit name to list. Switching has a listening gap and does not cancel or repeat your work. Current voice_route control token: generation=${JSON.stringify(state.generation)}, epoch=${state.epoch}.`,
+      `For an explicit finite microphone pause such as “mute for 10 seconds”, call voice_pause_input with integer seconds (1–300), generation=${JSON.stringify(state.generation)}, epoch=${state.epoch}. This closes capture only; continue speech and work. Never infer duration or use it for bare pause/mute. Auto-resume requires unchanged endpoint identity and fresh warmup. Current microphone pause: ${state.inputPause ?? 'none'}.`,
       'Use voice_speak with purpose=answer for a separate spoken answer: normally one sentence under 30 words. Include important uncertainty, blockers and needed decisions. Be silent for routine tool activity.',
       'When a task finishes, explicitly announce completion and briefly give its outcome aloud. If work failed, was cancelled, is blocked or still continues elsewhere, say so instead of claiming success. A progress update alone is not a completion report.',
       preferences?.feedback?.progressUpdates === false ? 'Spoken progress updates are disabled. Speak outcomes, blockers and questions, but do not narrate progress.' : 'During long tasks, use voice_speak with purpose=progress for a useful spoken stage update about once a minute when possible: normally 3–8 words, at most 12. Say what you are checking or changing, not a generic reassurance or a narration of every step. Do not expose commands, arguments, secrets or raw tool output. The addon provides brief tool-status reminders if no speech has occurred for a minute.',
@@ -669,6 +690,20 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (command === 'mute') command = 'pause';
       if (command === 'unmute') command = 'resume';
       const parts = command.split(/\s+/u);
+      if (['pause', 'mute'].includes(parts[0]!) && parts.length > 1) {
+        const duration = /^(?:pause|mute)\s+(?:for\s+)?([0-9]+)\s*(seconds?|sec|s|minutes?|min|m)$/u.exec(command);
+        const seconds = duration ? Number(duration[1]) * (duration[2]!.startsWith('m') ? 60 : 1) : 0;
+        if (!duration || !Number.isSafeInteger(seconds) || seconds < 1 || seconds > 300) {
+          notify('Use an exact integer duration from 1 to 300 seconds, for example /paj-voice pause 10 seconds.', 'warning');
+          return;
+        }
+        const result = inputControlAllowed() ? controller.pauseInput(seconds, controller.state()) : { status: 'unavailable' };
+        notify(result.status === 'paused'
+          ? `Microphone paused for ${seconds} seconds. Speech and agent work continue; resume requires unchanged devices and fresh warmup.`
+          : 'Timed microphone pause is unavailable; Voice must already be armed in this main TUI session.',
+        result.status === 'paused' ? 'info' : 'warning');
+        return;
+      }
       if (parts[0] === 'ducking') {
         if (parts.length === 2 && parts[1] === 'diagnostics') {
           notify(`Background audio diagnostics (read-only): ${JSON.stringify(focusDiagnostics.snapshot())}`);
@@ -766,7 +801,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         return;
       }
       if (command === 'resume') {
-        if (!controller.state().muted) { notify('Voice is not paused; use on to arm it.'); return; }
+        if (!controller.state().muted && !controller.state().inputPause) { notify('Voice is not paused; use on to arm it.'); return; }
         stop();
         command = 'on';
       }

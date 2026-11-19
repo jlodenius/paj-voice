@@ -50,6 +50,7 @@ to save another audio selection.
 | `/paj-voice on`                 | Start Voice, with confirmation.                     |
 | `/paj-voice off`                | Close audio; agent work continues.                  |
 | `/paj-voice pause` / `resume`   | Pause audio / resume with fresh confirmation.       |
+| `/paj-voice pause 10 seconds`   | Pause only the microphone for a bounded duration.   |
 | `/paj-voice stop`               | Stop the current spoken reply, not agent work.      |
 | `/paj-voice route [name]`       | List saved audio selections or switch to one.       |
 | `/paj-voice status`             | Show current state and settings location.           |
@@ -60,6 +61,7 @@ to save another audio selection.
 current selection. You can also ask to switch to a saved selection while Voice is listening.
 With Paj, incoming agent updates get concise spoken summaries automatically; you do not need to ask.
 For automatic laptop fallback on headset loss, see [audio recovery](docs/reference.md#audio-recovery).
+See [timed microphone pause](docs/reference.md#timed-microphone-pause) for duration and resume rules.
 
 ## Options
 

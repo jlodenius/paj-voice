@@ -27,6 +27,11 @@ export function createVoiceController({ submit, send, recover, close, changed = 
   let muted = false;
   let listening = false;
   let inputAvailable = false;
+  let inputPause: 'paused' | 'warming' | 'held' | null = null;
+  let inputPauseRemainingMs = 0;
+  let inputPauseId: string | null = null;
+  const pauseRequests = new Map<string, number>();
+  const clearInputPause = () => { inputPause = null; inputPauseId = null; inputPauseRemainingMs = 0; };
   let outputAvailable = false;
   let usingFallback = false;
   let speakerMode = false;
@@ -75,7 +80,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
   const submissions = new Map<string, { status: 'uncertain' | 'submitted' | 'rejected' | 'recovered' | 'cancelled' }>();
   const announcements = new Map<string, string>();
   const state = (): VoiceState => ({ enabled: enabled && ready, starting: enabled && !ready, eyesFree: enabled && ready && outputAvailable,
-    sessionId, generation, epoch, muted, listening, inputAvailable, outputAvailable, usingFallback, speakerMode, speaking, capturing: !!captureId, processing: running,
+    sessionId, generation, epoch, muted, listening, inputPause, inputPauseRemainingMs, inputAvailable, outputAvailable, usingFallback, speakerMode, speaking, capturing: !!captureId, processing: running,
     reportingOwner: reporters.keys().next().value ?? null, lastError });
   const idle = () => enabled && ready && inputAvailable && outputAvailable && !muted && !disposed && !running && !blocked && !deliveryUncertain &&
     !captureId && !speaking && pendingSpeech.size === 0;
@@ -227,6 +232,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     },
     routeChanging() {
       if (!enabled || muted || disposed) throw new Error('Voice must be armed to switch live audio');
+      clearInputPause();
       ready = false;
       listening = false;
       inputAvailable = outputAvailable = false;
@@ -244,6 +250,29 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       statusAnnouncement = true;
       try { return api.speak({ text, generation, epoch, key: 'route-notice' }); }
       finally { statusAnnouncement = previous; }
+    },
+    pauseInput(seconds: number, token: VoiceToken, id = uuid()) {
+      if (token.generation !== generation || token.epoch !== epoch) return { status: 'stale' as const };
+      if (!enabled || !ready || muted || disposed || inputPause === 'held') return { status: 'unavailable' as const };
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300 || !/^[\w-]{1,128}$/.test(id)) {
+        return { status: 'invalid' as const };
+      }
+      if (pauseRequests.has(id)) return { status: pauseRequests.get(id) === seconds ? 'duplicate' as const : 'invalid' as const };
+      if (pauseRequests.size >= 512) return { status: 'unavailable' as const };
+      pauseRequests.set(id, seconds);
+      inputPauseId = id;
+      inputPause = 'paused';
+      inputPauseRemainingMs = seconds * 1000;
+      inputAvailable = listening = false;
+      for (const capture of captures) submissions.set(capture, { status: 'cancelled' });
+      captures.clear(); limitedCaptures.clear(); captureId = null;
+      activity();
+      if (send({ type: 'input_pause', id, seconds }) === false) {
+        inputPause = 'held';
+        inputPauseRemainingMs = 0;
+      }
+      emit();
+      return { status: inputPause === 'held' ? 'unavailable' as const : 'paused' as const };
     },
     acknowledgeIdle(token: VoiceToken) {
       if (token.generation !== generation || token.epoch !== epoch) return { status: 'stale' as const };
@@ -291,6 +320,8 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       if (disposed) throw new Error('Voice interface was closed');
       if (enabled) return state();
       sessionId = id;
+      clearInputPause();
+      pauseRequests.clear();
       lastError = null;
       lastStopReason = null;
       generation = uuid();
@@ -329,6 +360,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     stop() {
       if (!enabled && !generation) return;
       enabled = false;
+      clearInputPause();
       pendingUserSummary = false;
       ready = false;
       listening = false;
@@ -354,6 +386,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     mute(value: boolean) {
       if (!enabled) return;
       muted = value;
+      clearInputPause();
       if (value) usingFallback = speakerMode = false;
       captureId = null;
       captures.clear();
@@ -377,6 +410,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       emit();
     },
     silence() {
+      if (inputPause) { inputPause = 'held'; inputPauseRemainingMs = 0; listening = false; }
       activity();
       epoch++;
       turnSpoken = true;
@@ -459,6 +493,23 @@ export function createVoiceController({ submit, send, recover, close, changed = 
     },
     event(frame: CompanionFrame, target: string | null) {
       if (!enabled || target !== generation || !frame || typeof frame.type !== 'string') return;
+      if (frame.type === 'input_pause_state') {
+        if (muted || frame.id !== inputPauseId || typeof frame.phase !== 'string' ||
+            !['paused', 'warming', 'held', 'resumed'].includes(frame.phase) ||
+            typeof frame.remainingMs !== 'number' || !Number.isInteger(frame.remainingMs) ||
+            frame.remainingMs < 0 || frame.remainingMs > 300_000) return;
+        if (inputPause === 'held' && frame.phase !== 'held') return;
+        if (frame.phase === 'resumed') {
+          clearInputPause();
+          listening = inputAvailable && frame.listening === true;
+        } else {
+          inputPause = frame.phase as 'paused' | 'warming' | 'held';
+          inputPauseRemainingMs = frame.phase === 'paused' ? frame.remainingMs : 0;
+          listening = false;
+        }
+        emit();
+        return;
+      }
       if (frame.type === 'ready') {
         if (muted) return;
         ready = true;
@@ -466,7 +517,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
         outputAvailable = frame.output !== false;
         usingFallback = frame.fallback === true;
         speakerMode = frame.speakerMode === true || usingFallback;
-        listening = inputAvailable && frame.listening !== false;
+        listening = !inputPause && inputAvailable && frame.listening !== false;
         if (usingFallback || !inputAvailable || !outputAvailable) {
           const text = inputAvailable && outputAvailable
             ? 'The preferred route is unavailable. The configured fallback microphone and speakers are active. Recognition pauses during Voice readouts.'
@@ -490,7 +541,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
         if (!ready || muted || typeof frame.input !== 'boolean' || typeof frame.output !== 'boolean') return;
         const fallback = typeof frame.fallback === 'boolean' ? frame.fallback : usingFallback;
         const speakers = typeof frame.speakerMode === 'boolean' ? frame.speakerMode : speakerMode;
-        const nextListening = frame.input && (typeof frame.listening === 'boolean' ? frame.listening : listening || !speakerMode);
+        const nextListening = !inputPause && frame.input && (typeof frame.listening === 'boolean' ? frame.listening : listening || !speakerMode);
         if (frame.input === inputAvailable && frame.output === outputAvailable && fallback === usingFallback &&
             speakers === speakerMode && nextListening === listening) return;
         const enteredFallback = fallback && !usingFallback;
@@ -520,8 +571,8 @@ export function createVoiceController({ submit, send, recover, close, changed = 
                 ? 'The configured fallback microphone and speakers are ready. Recognition pauses during Voice readouts. Old speech was not replayed.'
                 : 'The selected microphone and playback are ready again. Old speech was not replayed.';
         if (enteredFallback && (!inputAvailable || !outputAvailable)) text = `Configured fallback selected. ${text}`;
-        inform(text, inputAvailable && outputAvailable ? 'info' : 'warning');
-        if (outputAvailable) {
+        if (!inputPause) inform(text, inputAvailable && outputAvailable ? 'info' : 'warning');
+        if (outputAvailable && !inputPause) {
           statusAnnouncement = true;
           try { api.speak({ text, generation, epoch, key: 'availability' }); }
           finally { statusAnnouncement = false; }
@@ -531,7 +582,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
       }
       if (frame.type === 'capture_state') {
         if (!ready || muted || !speakerMode || typeof frame.listening !== 'boolean') return;
-        listening = inputAvailable && frame.listening;
+        listening = !inputPause && inputAvailable && frame.listening;
         if (!listening) {
           for (const id of captures) submissions.set(id, { status: 'cancelled' });
           while (submissions.size > 512) submissions.delete(submissions.keys().next().value!);
@@ -541,6 +592,7 @@ export function createVoiceController({ submit, send, recover, close, changed = 
         return;
       }
       if (!ready || typeof frame.id !== 'string') return;
+      if (inputPause && ['addressed', 'utterance', 'review', 'limit'].includes(frame.type)) return;
       if (frame.type === 'speech_start') {
         if (!pendingSpeech.has(frame.id)) return;
         if (muted || captureId) { stopSpeech(); return; }

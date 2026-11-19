@@ -15,6 +15,63 @@ function fixture() {
   return { controller, sent, submitted, states, notifications, event, speak, generation: start.generation };
 }
 
+test('timed microphone pause fences recognition immediately without stopping speech or work', () => {
+  const f = fixture();
+  f.event({ type: 'addressed', id: 'partial' });
+  const token = f.controller.state();
+  f.speak('An answer.', { id: 'answer' });
+  const before = f.sent.length;
+  assert.equal(f.controller.pauseInput(10, token, 'pause-one').status, 'paused');
+  assert.deepEqual(f.sent.slice(before), [{ type: 'input_pause', id: 'pause-one', seconds: 10 }]);
+  assert.equal(f.controller.state().epoch, token.epoch);
+  assert.equal(f.controller.state().inputPause, 'paused');
+  assert.equal(f.controller.state().listening, false);
+  f.event({ type: 'utterance', id: 'partial', text: 'Never submit this.' });
+  f.event({ type: 'addressed', id: 'late' });
+  f.event({ type: 'review', id: 'late', text: 'Never recover this.' });
+  assert.equal(f.submitted.length, 0);
+  assert.equal(f.speak('Work continues.').status, 'queued');
+  assert.equal(f.controller.pauseInput(10, token, 'pause-one').status, 'duplicate');
+  assert.equal(f.controller.pauseInput(0, token).status, 'invalid');
+  assert.equal(f.controller.pauseInput(301, token).status, 'invalid');
+  assert.equal(f.controller.pauseInput(1.5, token).status, 'invalid');
+  assert.equal(f.controller.pauseInput(10, { ...token, epoch: token.epoch - 1 }).status, 'stale');
+  f.event({ type: 'input_pause_state', id: 'wrong', phase: 'resumed', remainingMs: 0 });
+  assert.equal(f.controller.state().inputPause, 'paused');
+  f.event({ type: 'input_pause_state', id: 'pause-one', phase: 'warming', remainingMs: 0 });
+  assert.equal(f.controller.state().inputPause, 'warming');
+  assert.equal(f.controller.state().listening, false);
+  f.event({ type: 'availability', input: true, output: true, listening: true });
+  f.event({ type: 'input_pause_state', id: 'pause-one', phase: 'resumed', remainingMs: 0, listening: true });
+  assert.equal(f.controller.state().inputPause, null);
+  assert.equal(f.controller.state().listening, true);
+  f.controller.dispose();
+});
+
+test('timed request history never evicts an ID and accidentally extends a retried pause', () => {
+  const f = fixture();
+  const token = f.controller.state();
+  for (let index = 0; index < 512; index++) {
+    assert.equal(f.controller.pauseInput(10, token, `pause-${index}`).status, 'paused');
+  }
+  assert.equal(f.controller.pauseInput(10, token, 'over-limit').status, 'unavailable');
+  assert.equal(f.controller.pauseInput(10, token, 'pause-0').status, 'duplicate');
+  assert.equal(f.sent.filter(frame => frame.type === 'input_pause').length, 512);
+  f.controller.dispose();
+});
+
+test('timed input pause never arms off, starting, fully paused or stale generations', () => {
+  const c = createVoiceController({ submit() {}, send() {} });
+  assert.equal(c.pauseInput(10, c.state()).status, 'unavailable');
+  const token = c.start('s');
+  assert.equal(c.pauseInput(10, token).status, 'unavailable');
+  c.event({ type: 'ready' }, token.generation);
+  c.mute(true);
+  assert.equal(c.pauseInput(10, c.state()).status, 'unavailable');
+  c.stop();
+  assert.equal(c.pauseInput(10, token).status, 'stale');
+});
+
 test('microphone starts only explicitly, never after stop, and readiness gates speech', () => {
   const controller = createVoiceController({ submit() {}, send() {} });
   assert.equal(controller.state().enabled, false);

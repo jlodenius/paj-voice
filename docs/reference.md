@@ -31,6 +31,36 @@ listening or be recognized as a request. Headphones are safer.
 
 Bluetooth microphones require WirePlumber's automatic headset-profile switching.
 
+## Timed microphone pause
+
+While Voice is already armed, use `/paj-voice pause 10 seconds` or say “mute for 10 seconds”.
+The spoken request uses `voice_pause_input` with integer `seconds` and the current generation/epoch.
+This closes only microphone capture and discards partial or in-flight recognition. Speech output,
+agent work, and normal tool permissions continue. It never arms Voice from off, startup, or a full
+pause, and cannot approve terminal confirmations.
+
+Typed `pause` and `mute` accept an optional `for` and an exact integer duration: `seconds`, `sec`,
+`s`, `minutes`, `min`, or `m` (singular words also work). The total must be 1–300 seconds. Fractions,
+signs, mixed units, trailing words, and durations without units are rejected. For example,
+`/paj-voice mute for 1 minute` pauses capture for 60 seconds.
+
+A new request replaces the deadline from now; retrying the same tool-call ID does not extend it.
+Up to 512 distinct requests are accepted per armed session; rearm with normal confirmation if this
+limit is reached, rather than forgetting old IDs and extending a retried request.
+The native runtime owns the monotonic deadline. The panel countdown is status only: zero means
+fresh warmup, not listening. Wait for readiness; speaker-safe routes still wait for playback and
+quiet before recognizing speech. Expiry does not replay discarded recognition or old speech.
+
+Automatic resume requires the same armed session and the exact saved input/output endpoint
+identities. Off, full pause, shutdown, session replacement, route switching, or an explicit stop
+cancels that intent. If either endpoint disappears or the pair would change, the microphone stays
+held, even if the original pair later returns. No pair-changing fallback is selected while paused;
+existing fallback settings are unchanged. Output recovery remains independent. Use
+`/paj-voice resume` for normal fresh confirmation rather than silently opening another microphone.
+
+Bare `/paj-voice pause` or `/paj-voice mute` still closes **all** audio. `/paj-voice resume` always
+uses the normal confirmation flow, including when ending a timed pause early.
+
 ## Recovering long dictation
 
 At `maxMessageSeconds`, stop speaking. Voice keeps the captured transcript in memory rather than
