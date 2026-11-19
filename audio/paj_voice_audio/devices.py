@@ -15,6 +15,21 @@ import threading
 import time
 
 
+CAPTURE_FAULT_REASONS = frozenset({
+    'capture_eof', 'capture_stall', 'capture_stale_queue', 'capture_overflow',
+    'capture_discontinuity', 'capture_process_exit', 'capture_dc_corruption',
+    'capture_processing_failed', 'capture_health_failed', 'input_warmup_timeout',
+})
+
+
+class CaptureFault(RuntimeError):
+    def __init__(self, reason, message):
+        if reason not in CAPTURE_FAULT_REASONS:
+            raise ValueError('Invalid capture fault reason')
+        super().__init__(message)
+        self.reason = reason
+
+
 @dataclasses.dataclass(frozen=True)
 class Node:
     name: str
@@ -333,6 +348,7 @@ class Child:
         self.closed = False
         self.stop_complete = False
         self.fault = None
+        self.fault_reason = 'capture_health_failed'
         self.lock = threading.RLock()
         self.stderr_thread = None
         self.stderr_started = False
@@ -385,19 +401,21 @@ class Child:
                     marker in pending.lower()
                     for marker in (b"xrun", b"overrun", b"underrun", b"discontinu")
                 ):
+                    self.fault_reason = 'capture_discontinuity'
                     self.fault = (
                         "PipeWire reported audio discontinuity; request discarded"
                     )
         except (OSError, ValueError):
             if not self.closed:
+                self.fault_reason = 'capture_health_failed'
                 self.fault = "PipeWire diagnostic pipe failed"
 
     def health(self, allow_exit=False):
         if self.fault:
-            raise RuntimeError(self.fault)
+            raise CaptureFault(self.fault_reason, self.fault)
         code = self.process.poll()
         if not self.closed and code is not None and not (allow_exit and code == 0):
-            raise RuntimeError("PipeWire audio process exited unexpectedly")
+            raise CaptureFault('capture_process_exit', "PipeWire audio process exited unexpectedly")
 
     def stop(self):
         with self.lock:
@@ -570,6 +588,7 @@ class PipeCapture:
         self.close_lock = threading.Lock()
         self.first_pcm = threading.Event()
         self.fault = None
+        self.fault_reason = 'capture_health_failed'
         self.child = None
         self.threads = []
         self.last_pcm = time.monotonic()
@@ -590,7 +609,7 @@ class PipeCapture:
         try:
             self.frames.put_nowait((time.monotonic(), frame))
         except queue.Full:
-            raise RuntimeError("Capture queue overflow; request discarded") from None
+            raise CaptureFault('capture_overflow', "Capture queue overflow; request discarded") from None
 
     def _read(self):
         pending = bytearray()
@@ -600,7 +619,7 @@ class PipeCapture:
                 data = os.read(self.child.process.stdout.fileno(), 4096)
                 if not data:
                     if not self.closed.is_set():
-                        raise RuntimeError(
+                        raise CaptureFault('capture_eof',
                             "PipeWire capture EOF/discontinuity; request discarded"
                         )
                     return
@@ -612,6 +631,7 @@ class PipeCapture:
                     self._enqueue(frame)
         except (OSError, ValueError, RuntimeError) as error:
             if not self.closed.is_set():
+                self.fault_reason = error.reason if isinstance(error, CaptureFault) else 'capture_health_failed'
                 self.fault = str(error)
         finally:
             pending.clear()
@@ -625,7 +645,7 @@ class PipeCapture:
                 except queue.Empty:
                     continue
                 if time.monotonic() - captured > 2:
-                    raise RuntimeError("Capture queue is stale; request discarded")
+                    raise CaptureFault('capture_stale_queue', "Capture queue is stale; request discarded")
                 samples = array.array("h", frame)
                 rms = (
                     math.sqrt(sum(sample * sample for sample in samples) / len(samples))
@@ -639,7 +659,8 @@ class PipeCapture:
                 del frame, samples
         except Exception as error:
             if not self.closed.is_set():
-                self.fail(error)
+                self.fail(error if isinstance(error, CaptureFault)
+                          else CaptureFault('capture_processing_failed', str(error)))
 
     def wait_ready(self, timeout=3):
         deadline = time.monotonic() + timeout
@@ -648,7 +669,7 @@ class PipeCapture:
                 raise RuntimeError("Capture was cancelled before receiving PCM")
             self.health()
             if time.monotonic() > deadline:
-                raise RuntimeError(
+                raise CaptureFault('input_warmup_timeout',
                     "PipeWire capture produced no PCM; check the selected microphone and PipeWire routing"
                 )
         self.health()
@@ -657,7 +678,7 @@ class PipeCapture:
         if self.closed.is_set():
             return
         if self.fault or time.monotonic() - self.last_pcm > 2:
-            raise RuntimeError(
+            raise CaptureFault(self.fault_reason if self.fault else 'capture_stall',
                 self.fault or "PipeWire capture stalled; request discarded"
             )
         if self.child:

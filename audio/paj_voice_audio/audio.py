@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 
-from .devices import PipeCapture
+from .devices import CaptureFault, PipeCapture
 
 
 class Capture(PipeCapture):
@@ -18,7 +18,7 @@ class Capture(PipeCapture):
                 except queue.Empty:
                     continue
                 if time.monotonic() - captured > 2:
-                    raise RuntimeError("Stale capture; trial stopped")
+                    raise CaptureFault('capture_stale_queue', "Stale capture; trial stopped")
                 samples = array.array("h", frame)
                 rms = math.sqrt(sum(value * value for value in samples) / len(samples)) / 32768
                 voiced = self.vad(frame) >= 0.5 and rms >= self.threshold
@@ -27,7 +27,8 @@ class Capture(PipeCapture):
                     self.turns.feed(frame, voiced, captured_at=captured)
         except Exception as error:
             if not self.closed.is_set():
-                self.fail(error)
+                self.fail(error if isinstance(error, CaptureFault)
+                          else CaptureFault('capture_processing_failed', str(error)))
 
 
 class Segments:

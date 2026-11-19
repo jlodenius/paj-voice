@@ -10,7 +10,7 @@ import time
 
 from .input_ready import InputReady
 from .audio import Capture, Segments, Speaker
-from .devices import Graph, Node, PipeSink, exact_name
+from .devices import CaptureFault, Graph, Node, PipeSink, exact_name
 from .speech import SpeechInference
 
 
@@ -107,7 +107,7 @@ class HealthyInput:
         # The observed startup fault was flat saturation/DC, not ordinary clipped speech peaks.
         if (abs(sum(samples) / len(samples) / 32768) > 0.5
                 and sum(abs(value) >= 32760 for value in samples) >= len(samples) / 2):
-            raise RuntimeError("Input returned to flat clipping/DC corruption; audio stopped")
+            raise CaptureFault('capture_dc_corruption', "Input returned to flat clipping/DC corruption; audio stopped")
         if self.allowed is None or self.allowed(pcm, voiced, captured_at):
             self.receiver.feed(pcm, voiced, captured_at=captured_at)
 
@@ -129,6 +129,9 @@ class Runtime:
         self.capture = self.gate = self.segments = self.speaker = self.sink = None
         self.graph = self.models = None
         self.pending = set()
+        self.recovery_count = 0
+        self.availability_observation = dict.fromkeys(
+            ('inputPresent', 'outputPresent', 'inputChanged', 'outputChanged'))
         self.keys = {}
         self.revision = 0
         self.epoch = 0
@@ -312,6 +315,10 @@ class Runtime:
                 if self.closed or self.muted:
                     return
                 self.config, self.graph, self.source, self.models = config, graph, source, models
+                self.availability_observation = {
+                    'inputPresent': source is not None, 'outputPresent': target is not None,
+                    'inputChanged': False if source is not None else None,
+                    'outputChanged': False if target is not None else None}
                 self.vad_factory = SileroVoiceActivityDetector
                 samples = models.np.arange(int(models.rate * 0.1))
                 self.cue = (models.np.sin(2 * models.np.pi * 800 * samples / models.rate)
@@ -460,6 +467,9 @@ class Runtime:
                 return False
             self.using_fallback = True
             self.frozen = (source, target)
+            self.availability_observation = {
+                'inputPresent': True, 'outputPresent': True,
+                'inputChanged': False, 'outputChanged': False}
             self._availability()
         try:
             self._resume_output(target)
@@ -526,12 +536,21 @@ class Runtime:
             except queue.Empty:
                 break
 
+    def _capture_diagnostic(self, error, capture, epoch):
+        with self.lock:
+            if self.closed or self.muted or self.epoch != epoch or self.capture is not capture:
+                return
+            reason = error.reason if isinstance(error, CaptureFault) else 'capture_health_failed'
+            self._availability_diagnostic(reason, capture)
+
     def _capture_fault(self, error, epoch):
         with self.lock:
             if self.closed or self.muted or self.epoch != epoch:
                 return
+            self._capture_diagnostic(error, self.capture, epoch)
             if not self.ready:
                 if self.capture:
+                    self.capture.fault_reason = error.reason if isinstance(error, CaptureFault) else 'capture_health_failed'
                     self.capture.fault = str(error)
                 return
         self._suspend(input_lost=True, epoch=epoch)
@@ -586,11 +605,13 @@ class Runtime:
                         self._suspend(output_lost=True, output_epoch=output_epoch)
                     return
             self.emit({"type": "diagnostic", "stage": "warmup", "details": gate.snapshot()})
-            raise RuntimeError("Input did not settle within five seconds")
+            raise CaptureFault('input_warmup_timeout', "Input did not settle within five seconds")
         except Exception as error:
             with self.lock:
                 obsolete = self.closed or self.muted or self.epoch != epoch
             if not obsolete:
+                diagnostic_error = CaptureFault('input_warmup_timeout', '') if isinstance(error, TimeoutError) else error
+                self._capture_diagnostic(diagnostic_error, capture, epoch)
                 if recover:
                     raise
                 self.fail(error)
@@ -832,6 +853,26 @@ class Runtime:
         self._silence()
         self._close((gate, capture))
 
+    def _availability_diagnostic(self, reason, capture=None, recovered=False):
+        with self.lock:
+            if recovered:
+                self.recovery_count = min(2147483647, self.recovery_count + 1)
+            age = None
+            try:
+                last_pcm = getattr(capture, 'last_pcm', None)
+                if type(last_pcm) in (int, float) and math.isfinite(last_pcm):
+                    elapsed = self.clock() - last_pcm
+                    if math.isfinite(elapsed):
+                        age = int(min(60, max(0, elapsed)) * 1000)
+            except Exception:
+                pass
+            try:
+                self.emit({'type': 'availability_diagnostic', 'v': 1, 'reason': reason,
+                           **self.availability_observation, 'pcmAgeMs': age,
+                           'recoveryCount': self.recovery_count})
+            except Exception:
+                pass
+
     def _availability(self):
         self.emit({'type': 'availability', 'input': self.input_available,
                    'output': self.output_available, 'fallback': self.using_fallback,
@@ -927,6 +968,7 @@ class Runtime:
                 self.target = target
                 self.output_available = True
                 self._availability()
+                self._availability_diagnostic('output_recovered', recovered=True)
         if obsolete:
             self._close((sink,))
 
@@ -965,7 +1007,8 @@ class Runtime:
                 self.input_deadline = self.clock() + 5
                 capture.start()
             self.emit({'type': 'warming'})
-        except Exception:
+        except Exception as error:
+            self._capture_diagnostic(error, capture, epoch)
             self._suspend(input_lost=True, epoch=epoch, strict_input=True)
 
     def _arm_recovered_input(self, source):
@@ -975,7 +1018,8 @@ class Runtime:
             return
         try:
             capture.health()
-        except Exception:
+        except Exception as error:
+            self._capture_diagnostic(error, capture, epoch)
             self._suspend(input_lost=True, epoch=epoch)
             return
         with self.lock:
@@ -988,6 +1032,7 @@ class Runtime:
             self.input_available = True
             self.stage = 'listening'
             self._availability()
+            self._availability_diagnostic('input_recovered', capture, recovered=True)
             if self.input_pause:
                 self.input_pause['phase'] = 'resumed'
                 self._pause_state()
@@ -1000,15 +1045,33 @@ class Runtime:
             epoch, pause_revision = self.epoch, self.pause_revision
             frozen = self.frozen
         if self.clock() >= next_graph:
+            graph_failed = False
             try:
                 source, target = self.graph.recover(frozen)
             except Exception:
                 source = target = None
+                graph_failed = True
             with self.lock:
                 if self.closed or self.muted or self.epoch != epoch or self.pause_revision != pause_revision:
                     return next_graph
                 input_lost = source is None or source != self.source
                 output_lost = target is None or target != self.target
+                if graph_failed:
+                    self.availability_observation = dict.fromkeys(self.availability_observation)
+                    self._availability_diagnostic('graph_query_failed', self.capture)
+                else:
+                    self.availability_observation = {
+                        'inputPresent': source is not None, 'outputPresent': target is not None,
+                        'inputChanged': source != self.source if source is not None and self.source is not None else None,
+                        'outputChanged': target != self.target if target is not None and self.target is not None else None}
+                    if source is None:
+                        self._availability_diagnostic('source_unresolved', self.capture)
+                    elif self.availability_observation['inputChanged']:
+                        self._availability_diagnostic('source_changed', self.capture)
+                    if target is None:
+                        self._availability_diagnostic('target_unresolved', self.capture)
+                    elif self.availability_observation['outputChanged']:
+                        self._availability_diagnostic('target_changed', self.capture)
                 pause = self.input_pause
                 hold = False
                 if pause:
@@ -1048,6 +1111,10 @@ class Runtime:
             try:
                 sink.health()
             except Exception:
+                with self.lock:
+                    if (not self.closed and not self.muted and self.sink is sink
+                            and self.output_epoch == output_epoch):
+                        self._availability_diagnostic('output_health_failed', self.capture)
                 self._suspend(output_lost=True, output_epoch=output_epoch)
         if capture:
             try:
@@ -1055,8 +1122,10 @@ class Runtime:
                 with self.lock:
                     expired = not self.input_available and self.clock() >= self.input_deadline
                 if expired:
+                    self._capture_diagnostic(CaptureFault('input_warmup_timeout', ''), capture, epoch)
                     self._suspend(input_lost=True, epoch=epoch)
-            except Exception:
+            except Exception as error:
+                self._capture_diagnostic(error, capture, epoch)
                 self._suspend(input_lost=True, epoch=epoch)
         return next_graph
 
