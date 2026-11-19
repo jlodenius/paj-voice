@@ -40,6 +40,18 @@ complete it before sending. Up to four drafts are retained, after which Voice st
 Drafts survive off/pause but are cleared when switching sessions or quitting Pi. They are not audio
 recordings. Audio is processed locally; recognized text goes to Pi's provider and session history.
 
+## Recognition safeguards
+
+Voice discards punctuation-only output, output whose decoder evidence indicates unreliable
+non-speech, and repeated decoder loops that are implausibly long for the VAD-positive capture time.
+Rejected captures show a warning and submit nothing; they are never shortened into an actionable
+acknowledgement. Short answers and plausible intentional repetition are still allowed.
+
+These are conservative admission checks, not a cough classifier or a guarantee against hallucinations.
+A confidently decoded noise sound can still look like speech, and legitimate speech can occasionally
+be rejected. Potential speech can still interrupt a readout before recognition rejects it. Repeat the
+request if needed. No raw audio or rejected transcript is saved by these checks.
+
 ## Storage
 
 Shared preferences are read from `~/.pi/agent/paj.json`, or `paj.json` under `PI_CODING_AGENT_DIR`.

@@ -603,13 +603,14 @@ export function createVoiceController({ submit, send, recover, close, changed = 
         return;
       }
       if (frame.type === 'cancelled' && captures.delete(frame.id)) {
-        if (frame.reason === 'input_disconnected') {
+        if (frame.reason === 'input_disconnected' || frame.reason === 'unreliable_speech') {
           submissions.set(frame.id, { status: 'cancelled' });
           while (submissions.size > 512) submissions.delete(submissions.keys().next().value!);
         }
         limitedCaptures.delete(frame.id);
         captureId = [...captures].at(-1) ?? null;
-        if (frame.reason === 'empty') inform('No speech could be transcribed from that capture. Nothing was submitted.', 'warning');
+        if (frame.reason === 'unreliable_speech') inform('Unreliable speech was discarded. Nothing was submitted; please repeat if you intended to speak.', 'warning');
+        else if (frame.reason === 'empty') inform('No speech could be transcribed from that capture. Nothing was submitted.', 'warning');
         else if (frame.reason === 'utterance_limit') inform('Voice message exceeded the duration limit and was not submitted.', 'warning');
         emit();
       }

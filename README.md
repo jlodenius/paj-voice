@@ -115,6 +115,8 @@ restoration is best effort: if a warning says audio may remain quiet, adjust the
   recognition pauses during replies; wait for LISTENING or use `/paj-voice stop`.
 - Bluetooth microphones use headset call mode, which reduces playback quality.
 - Dictation over the time limit is held for manual recovery, never submitted as an incomplete command.
+- Unreliable recognition is discarded with a warning, not submitted. Repeat your request if needed;
+  this is not a guarantee against noise being recognized as speech.
 
 ## Reference
 

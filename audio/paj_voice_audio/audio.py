@@ -67,7 +67,7 @@ class Segments:
                 self.current = {
                     "id": self.serial, "epoch": self.epoch(), "start": now,
                     "last": now, "pcm": bytearray(b"".join(self.preroll)),
-                    "discard": False,
+                    "speech_bytes": len(pcm), "discard": False,
                 }
                 self.clear_preroll()
                 self.pause()
@@ -78,7 +78,10 @@ class Segments:
                 limit = int((self.maximum + 1) * 16000) * 2
                 overflow = len(turn["pcm"]) + len(pcm) > limit
                 if not turn["discard"]:
-                    turn["pcm"].extend(pcm[:max(0, limit - len(turn["pcm"]))])
+                    retained = pcm[:max(0, limit - len(turn["pcm"]))]
+                    turn["pcm"].extend(retained)
+                    if voiced:
+                        turn["speech_bytes"] += len(retained)
                 if voiced:
                     turn["last"] = now
                 # Endpoint silence must not turn an otherwise complete utterance into a partial one.
@@ -88,7 +91,8 @@ class Segments:
                 if not voiced and now - turn["last"] >= self.silence:
                     self.current = None
                     self.emit({"type": "endpoint", "id": turn["id"],
-                               "pcm": bytes(turn["pcm"]), "truncated": turn["discard"]})
+                               "pcm": bytes(turn["pcm"]), "truncated": turn["discard"],
+                               "speech_seconds": turn["speech_bytes"] / 32000})
                     turn["pcm"].clear()
 
     def discard(self):

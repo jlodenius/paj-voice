@@ -555,7 +555,8 @@ class Runtime:
                         self.emit({"type": "cancelled", "id": ident, "reason": "empty"})
                     else:
                         self.jobs.put_nowait({"id": ident, "epoch": epoch, "pcm": event["pcm"],
-                                             "truncated": event["truncated"]})
+                                             "truncated": event["truncated"],
+                                             "speech_seconds": event.get("speech_seconds", len(event["pcm"]) / 32000)})
         except Exception as error:
             self.fail(error)
 
@@ -576,7 +577,9 @@ class Runtime:
                         seconds = min(120, len(job["pcm"]) / 32000)
                         self.busy["recognition"] = (self.clock(), max(10, 2 * seconds))
                     try:
-                        text, _ = self.models.transcribe(job.pop("pcm"))
+                        transcription = self.models.transcribe(job.pop("pcm"),
+                                                               speech_seconds=job["speech_seconds"])
+                        text = transcription.text
                     finally:
                         self.busy["recognition"] = None
                 if not isinstance(text, str) or len(text) > 16384:
@@ -586,9 +589,12 @@ class Runtime:
                             or job['id'] not in self.pending):
                         continue
                     self.pending.discard(job["id"])
-                    self.emit({"type": "review" if job["truncated"] else "utterance",
-                               "id": job["id"], "text": text} if text.strip()
-                              else {"type": "cancelled", "id": job["id"], "reason": "empty"})
+                    if transcription.rejected_reason:
+                        self.emit({"type": "cancelled", "id": job["id"], "reason": "unreliable_speech"})
+                    else:
+                        self.emit({"type": "review" if job["truncated"] else "utterance",
+                                   "id": job["id"], "text": text} if text.strip()
+                                  else {"type": "cancelled", "id": job["id"], "reason": "empty"})
             except Exception as error:
                 self.fail(error)
             finally:

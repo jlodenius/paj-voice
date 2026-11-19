@@ -1,6 +1,28 @@
+from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import time
+
+
+@dataclass(frozen=True)
+class Transcription:
+    text: str
+    elapsed_ms: float
+    rejected_reason: str | None = None
+
+
+def implausible_repetition(text, speech_seconds):
+    words = re.findall(r"[^\W_]+", text.casefold())
+    for period in range(1, min(6, len(words) // 8) + 1):
+        matched = 0
+        for index in range(period, len(words)):
+            matched = matched + 1 if words[index] == words[index - period] else 0
+            span = matched + period
+            if (span >= period * 8 and span >= len(words) * 0.6
+                    and span > 8 * (speech_seconds + 0.25)):
+                return True
+    return False
 
 
 class SpeechInference:
@@ -31,14 +53,23 @@ class SpeechInference:
         if type(self.rate) is not int or not 8000 <= self.rate <= 48000:
             raise ValueError("Unsupported packaged voice rate")
 
-    def transcribe(self, pcm):
+    def transcribe(self, pcm, *, speech_seconds=None):
         started = time.monotonic()
         samples = self.np.frombuffer(pcm, dtype="<i2").astype(self.np.float32) / 32768
         segments, _ = self.whisper.transcribe(samples, language="en", beam_size=1,
                                              temperature=0, condition_on_previous_text=False,
                                              vad_filter=False)
-        text = "".join(segment.text for segment in segments).strip()
-        return text, (time.monotonic() - started) * 1000
+        decoded = [segment for segment in segments if segment.text.strip()]
+        text = "".join(segment.text for segment in decoded).strip()
+        duration = len(pcm) / 32000 if speech_seconds is None else speech_seconds
+        reason = None
+        if text and (not any(character.isalnum() for character in text)
+                     or all(segment.no_speech_prob >= 0.6 and segment.avg_logprob <= -1.0
+                            for segment in decoded)):
+            reason = "non_speech"
+        elif implausible_repetition(text, duration):
+            reason = "implausible_repetition"
+        return Transcription("" if reason else text, (time.monotonic() - started) * 1000, reason)
 
     def synthesize(self, text):
         from piper import SynthesisConfig

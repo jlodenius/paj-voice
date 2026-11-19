@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from paj_voice_audio import open_mic
 from paj_voice_audio.devices import Child, Node
+from paj_voice_audio.speech import SpeechInference, Transcription
 
 
 class Vector:
@@ -67,7 +68,7 @@ class OpenMicTests(unittest.TestCase):
                 if next(checks, False):
                     raise RuntimeError('Expected same-device profile replacement')
             graph.check.side_effect = check
-        models = types.SimpleNamespace(rate=16000, transcribe=Mock(return_value=("a request", 1)),
+        models = types.SimpleNamespace(rate=16000, transcribe=Mock(return_value=Transcription("a request", 1)),
                                        synthesize=Mock(return_value=b"\0\0" * 1600),
                                        np=types.SimpleNamespace(arange=lambda size: Vector(), sin=lambda value: Vector(),
                                                                 hanning=lambda size: Vector(), pi=3.14))
@@ -159,6 +160,23 @@ class OpenMicTests(unittest.TestCase):
             runtime.segments.feed(b"\0\0" * 1600, True)
         return now
 
+    def test_unreliable_throat_clearing_transcript_is_cancelled_without_an_utterance(self):
+        runtime, events, _, _, models, *_ = self.fixture()
+        inference = SpeechInference.__new__(SpeechInference)
+        inference.np = types.SimpleNamespace(frombuffer=lambda *args, **kwargs: Vector(), float32=object())
+        segment = types.SimpleNamespace(text=' Okay.' * 25, no_speech_prob=0.01, avg_logprob=-0.1)
+        inference.whisper = types.SimpleNamespace(transcribe=Mock(return_value=(iter([segment]), None)))
+        models.transcribe.side_effect = inference.transcribe
+        now = self.feed_speech(runtime, 1)
+        now[0] += 2.1
+        runtime.segments.feed(b'\0\0' * (16000 * 2), False)
+        wait_for(lambda: any(event['type'] == 'cancelled' for event in events))
+        self.assertFalse(any(event['type'] in ('utterance', 'review', 'error') for event in events))
+        self.assertEqual(next(event['reason'] for event in events if event['type'] == 'cancelled'),
+                         'unreliable_speech')
+        self.assertAlmostEqual(models.transcribe.call_args.kwargs['speech_seconds'], 1)
+        self.assertTrue(runtime.ready)
+
     def test_long_normal_speech_is_one_complete_actionable_utterance(self):
         for seconds in (25, 45, 120):
             with self.subTest(seconds=seconds):
@@ -186,7 +204,9 @@ class OpenMicTests(unittest.TestCase):
         now[0] += 0.9
         runtime.segments.feed(b"\0\0" * 1600, False)
         wait_for(lambda: any(event["type"] == "review" for event in events))
-        models.transcribe.assert_called_once_with(retained)
+        models.transcribe.assert_called_once()
+        self.assertTrue(models.transcribe.call_args.args[0] == retained)
+        self.assertAlmostEqual(models.transcribe.call_args.kwargs['speech_seconds'], 120.2)
         self.assertFalse(any(event["type"] == "utterance" for event in events))
         self.assertEqual(next(event for event in events if event["type"] == "review"),
                          {"type": "review", "id": limits[0]["id"], "text": "a request"})
@@ -194,7 +214,7 @@ class OpenMicTests(unittest.TestCase):
 
     def test_truncated_empty_transcript_is_cancelled_empty(self):
         runtime, events, _, _, models, *_ = self.fixture()
-        models.transcribe.return_value = ("  ", 1)
+        models.transcribe.return_value = Transcription("  ", 1)
         runtime._segment({"type": "onset", "id": 1}, runtime.epoch)
         runtime._segment({"type": "truncated", "id": 1}, runtime.epoch)
         runtime._segment({"type": "endpoint", "id": 1, "pcm": b"\0\0", "truncated": True}, runtime.epoch)
@@ -208,10 +228,10 @@ class OpenMicTests(unittest.TestCase):
                 runtime, events, _, _, models, *_ = self.fixture()
                 entered, release = threading.Event(), threading.Event()
                 self.addCleanup(release.set)
-                def transcribe(pcm):
+                def transcribe(pcm, **_kwargs):
                     entered.set()
                     release.wait(2)
-                    return "do not submit", 1
+                    return Transcription("do not submit", 1)
                 models.transcribe.side_effect = transcribe
                 epoch = runtime.epoch
                 runtime._segment({"type": "onset", "id": 1}, epoch)
@@ -232,10 +252,10 @@ class OpenMicTests(unittest.TestCase):
                 runtime.clock = lambda: now[0]
                 entered, release = threading.Event(), threading.Event()
                 self.addCleanup(release.set)
-                def compute(value):
+                def compute(value, **_kwargs):
                     entered.set()
                     release.wait(2)
-                    return ("result", 1) if kind == "recognition" else b"\0\0"
+                    return Transcription("result", 1) if kind == "recognition" else b"\0\0"
                 model = models.transcribe if kind == "recognition" else models.synthesize
                 model.side_effect = compute
                 with runtime.model_lock:
@@ -266,10 +286,10 @@ class OpenMicTests(unittest.TestCase):
                 runtime.clock = lambda: now[0]
                 entered, release = threading.Event(), threading.Event()
                 self.addCleanup(release.set)
-                def transcribe(pcm):
+                def transcribe(pcm, **_kwargs):
                     entered.set()
                     release.wait(2)
-                    return "too late", 1
+                    return Transcription("too late", 1)
                 models.transcribe.side_effect = transcribe
                 self.utterance(runtime, 1, b"\0\0" * (16000 * seconds))
                 self.assertTrue(entered.wait(1))
@@ -314,10 +334,10 @@ class OpenMicTests(unittest.TestCase):
         self.addCleanup(model_release.set)
         now = [time.monotonic()]
         runtime.clock = lambda: now[0]
-        def transcribe(pcm):
+        def transcribe(pcm, **_kwargs):
             model_entered.set()
             model_release.wait(4)
-            return 'Too late', 1
+            return Transcription('Too late', 1)
         def recover(frozen):
             graph_entered.set()
             graph_release.wait(4)
@@ -586,13 +606,13 @@ class OpenMicTests(unittest.TestCase):
         self.addCleanup(release.set)
         count = [0]
 
-        def transcribe(pcm):
+        def transcribe(pcm, **_kwargs):
             count[0] += 1
             if count[0] == 1:
                 started.set()
                 release.wait(1)
-                return "inspect the tests", 1
-            return "focus on the failing ones", 1
+                return Transcription("inspect the tests", 1)
+            return Transcription("focus on the failing ones", 1)
 
         models.transcribe.side_effect = transcribe
         self.utterance(runtime, 1)
