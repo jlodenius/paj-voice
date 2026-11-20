@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startCompanion } from '../src/companion.ts';
 
 function run(script, callbacks = {}) {
@@ -49,12 +52,15 @@ test('startup timeout terminates an unready worker', { timeout: 5000 }, async ()
   worker.close();
 });
 
-test('missing executable produces an actionable local runtime failure', { timeout: 5000 }, async () => {
-  const message = await new Promise(resolve => {
-    startCompanion({ config: {}, executable: '/no/such/local/voice-runtime', generation: 'g',
-      onEvent() {}, onExit: resolve, startupMs: 500 });
-  });
-  assert.match(message, /Cannot start local voice runtime/);
+test('missing executable reports ENOENT and acknowledges closure', { timeout: 1000 }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'paj-voice-missing-'));
+  t.after(() => rmdirSync(dir));
+  let report;
+  const failure = new Promise(resolve => { report = resolve; });
+  const worker = startCompanion({ config: {}, executable: join(dir, 'missing'), generation: 'g',
+    onEvent() {}, onExit: report, startupMs: 500 });
+  assert.match(await failure, /Cannot start local voice runtime: ENOENT/);
+  await worker.waitClosed();
 });
 
 function fakeChild() {

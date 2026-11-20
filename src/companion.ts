@@ -92,12 +92,17 @@ export function startCompanion({ config, generation, onEvent, onExit, spawnProce
     if (Buffer.byteLength(buffer) > 65536) fail('Invalid local voice runtime frame.');
   });
   child.on('error', error => fail(`Cannot start local voice runtime: ${errorCode(error) ?? 'process error'}`));
-  child.on('exit', () => {
+  const acknowledgeTermination = () => {
     exited = true;
     resolveClosed();
     clearTimeout(killTimer);
+  };
+  child.on('exit', () => {
+    acknowledgeTermination();
     finish(closed ? null : 'Local voice runtime exited. Check model/device configuration.');
   });
+  // Failed spawns emit close after error, but never emit exit.
+  child.on('close', acknowledgeTermination);
   startupTimer = setTimeout(() => fail('Local voice runtime did not become ready in time.'), startupMs);
   startupTimer.unref?.();
   send({ type: 'configure', generation, config: { ...config, cacheDir } });

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './fixtures/extension.js';
+import { startCompanion } from '../src/companion.ts';
+import { mkdtempSync, rmdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const desk = { input: 'private-desk-input', output: 'private-headphones' };
 const headset = { input: 'old-bluez-node', output: 'old-bluez-sink',
@@ -11,7 +15,7 @@ const devices = [
   { name: 'new-bluez-output', class: 'Audio/Sink', device: headset.outputDevice, bluetooth: true },
 ];
 const tick = () => new Promise(resolve => setImmediate(resolve));
-function routes() {
+function routes(overrides = {}) {
   const saved = { version: 2, active: 'desk', routes: { desk, headset } };
   const f = fixture({ loadDevices: () => ({ version: 1, ...saved.routes[saved.active] }),
     loadRoutes: () => structuredClone(saved), saveRoute: (_file, name, selection, expected) => {
@@ -22,7 +26,7 @@ function routes() {
       assert.deepEqual(saved, expected);
       saved.routes[name] = selection;
       if (activate) saved.active = name;
-    } });
+    }, ...overrides });
   f.pi.exec = async () => ({ code: 0, stdout: JSON.stringify(devices) });
   return { ...f, saved };
 }
@@ -81,6 +85,35 @@ test('public command/tool list only names and switch announces only after exact 
   const stale = await invoke(f, 'desk', before);
   assert.equal(stale.details.status, 'stale');
   await f.command('off');
+});
+
+test('route launch ENOENT after successful preflight rolls back to the prior route', { timeout: 2000 }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'paj-voice-route-missing-'));
+  const launches = [];
+  let initial, restored;
+  const rollback = new Promise(resolve => { restored = resolve; });
+  const f = routes({ startCompanion(args) {
+    launches.push(args.config.audio.input);
+    if (launches.length === 1) initial = args;
+    if (launches.length === 2) return startCompanion({ ...args, executable: join(dir, 'missing') });
+    assert.ok(launches.length <= 3);
+    if (launches.length === 3) restored(args);
+    return { send: () => true, close() {}, waitClosed: () => Promise.resolve() };
+  } });
+  t.after(async () => { await f.command('off'); rmdirSync(dir); });
+  await f.command('on');
+  // Only the attempted new route uses a real spawn, with a guaranteed missing executable.
+  initial.onEvent({ type: 'ready' }, initial.generation);
+  const switched = invoke(f, 'headset');
+  const args = await Promise.race([rollback, switched.then(result => {
+    assert.fail(`Switch ended before rollback: ${JSON.stringify(result.details)}`);
+  })]);
+  args.onEvent({ type: 'ready' }, args.generation);
+  assert.deepEqual(launches, [desk.input, headset.input, desk.input]);
+  const { status, recovered, current } = (await switched).details;
+  assert.deepEqual({ status, recovered, current }, { status: 'failed', recovered: true, current: 'desk' });
+  assert.equal(f.saved.active, 'desk');
+  assert.equal(f.controller.state().enabled, true);
 });
 
 test('unknown, unavailable and ambiguous routes preserve the original active route', async () => {
