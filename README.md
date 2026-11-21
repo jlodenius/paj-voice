@@ -44,6 +44,7 @@ listen for the reply. If audio is unavailable, check `/paj-voice status`.
 
 ## Reference
 
-- [Commands, options, recovery, diagnostics, and development](docs/reference.md)
-- [Settings paths and overrides](docs/reference.md#storage)
-- [Optional spoken Paj updates](docs/reference.md#incoming-agent-updates)
+- [Commands and voice behavior](docs/usage.md)
+- [Settings and storage](docs/settings.md)
+- [Audio recovery and diagnostics](docs/troubleshooting.md)
+- [Development](docs/development.md)
