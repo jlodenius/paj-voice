@@ -893,11 +893,17 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
         const activation = lifetime, session = current.sessionManager.getSessionId();
         try {
           const name = parts[1] === 'off' ? undefined : routeName(parts[1]);
-          if (name && !readRoutes()?.routes[name]) throw new Error('Set up that named route first');
-          if (name && !await current.ui.confirm(`Use ${name} as automatic fallback?`,
-            'If either preferred endpoint fails, this route may automatically open its microphone and speakers. It stays active until you switch or rearm. Speaker mode pauses recognition during Voice readouts and until quiet; use /paj-voice stop rather than voice interruption. The preferred route is unchanged.')) return;
-          if (closed || lifetime !== activation || session !== ctx?.sessionManager.getSessionId() || controller.state().generation) return;
-          (options.saveFallback ?? saveFallback)(deviceSettingsPath(env), name);
+          const before = name ? readRoutes() : undefined;
+          if (name) {
+            const pair = before?.routes[name];
+            if (!pair) throw new Error('Set up that named route first');
+            const endpoint = (node: string, device?: string) => device ? `${node} (device: ${device})` : node;
+            if (!await current.ui.confirm(`Use ${name} as automatic fallback?`,
+              `Microphone: ${endpoint(pair.input, pair.inputDevice)}\nPlayback: ${endpoint(pair.output, pair.outputDevice)}\n\nIf either preferred endpoint fails, this pair may open automatically and stays active until you switch or rearm. Speaker mode pauses recognition during Voice readouts and until quiet; use /paj-voice stop rather than voice interruption. The preferred route is unchanged.`)) return;
+          }
+          if (closed || lifetime !== activation || ctx !== current || current.mode !== 'tui' || !current.hasUI ||
+              session !== ctx?.sessionManager.getSessionId() || controller.state().generation) return;
+          (options.saveFallback ?? saveFallback)(deviceSettingsPath(env), name, undefined, before);
           notify(name ? `Fallback ${name} configured. Preferred route unchanged; applies on the next arming.`
             : 'Automatic fallback disabled. Saved route speaker-safety flags are unchanged.');
           updateDisplay();

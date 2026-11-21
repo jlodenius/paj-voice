@@ -234,6 +234,31 @@ test('output hints are advisory metadata only; Bluetooth, absent and invalid hin
     ['speakers', 'headphones', 'unknown', 'unknown', 'unknown']);
 });
 
+test('fallback approval shows the saved pair and requires fresh approval after a route edit', async t => {
+  const f = configured(t);
+  store.saveRoute(f.file, 'desk', desk);
+  store.saveRouteBinding(f.file, 'travel', travel, store.loadRoutes(f.file));
+  const replacement = { ...travel, input: 'synthetic-replacement-mic' };
+  let confirmed = 0;
+  f.ctx.ui.confirm = async (title, text) => {
+    assert.match(title, /automatic fallback/);
+    assert.ok(text.includes(`Playback: ${travel.output} (device: ${travel.outputDevice})`));
+    const pair = confirmed++ === 0 ? travel : replacement;
+    assert.ok(text.includes(`Microphone: ${pair.input} (device: ${pair.inputDevice})`));
+    if (pair === travel) store.saveRouteBinding(f.file, 'travel', replacement, store.loadRoutes(f.file));
+    return true;
+  };
+  await f.command('fallback travel');
+  assert.match(f.notices.at(-1)[0], /changed during fallback confirmation/);
+  assert.deepEqual(store.loadRoutes(f.file).routes.travel, replacement);
+  assert.equal(store.loadRoutes(f.file).fallback, undefined);
+  await f.command('fallback travel');
+  assert.equal(store.loadRoutes(f.file).fallback, 'travel');
+  assert.equal(store.loadRoutes(f.file).active, 'desk');
+  assert.equal(confirmed, 2);
+  assert.equal(f.workers.length, 0);
+});
+
 const desk = { input: 'synthetic-mic', output: 'synthetic-output' };
 const travel = { input: 'synthetic-other-mic', output: 'synthetic-other-output',
   inputDevice: 'synthetic-input-card', outputDevice: 'synthetic-output-card', speakerMode: true };
@@ -243,6 +268,7 @@ function configured(t, output = {}, register) {
     loadRoutes: () => store.loadRoutes(file),
     loadDevices: (_file, required = true) => store.loadDevices(file, required),
     saveRouteBinding: (_file, ...args) => store.saveRouteBinding(file, ...args),
+    saveFallback: (_file, ...args) => store.saveFallback(file, ...args),
     updateRouteProtection: (_file, ...args) => store.updateRouteProtection(file, ...args) }, register);
   f.pi.exec = async (_executable, args) => {
     assert.deepEqual(args, ['--devices'], 'only synthetic enumeration is allowed');
