@@ -112,8 +112,8 @@ successful input/output recovery. `inputPresent` and `outputPresent` mean the sa
 resolved, not proof of physical presence or working capture. Null means unknown; an unresolved source
 is not proof that the microphone was unplugged. PCM age is bounded or unknown; recovery count is
 native-runtime cumulative, not a count of physical reconnects. Historical entries are explicitly
-marked as not belonging to the current native connection. No valid current observations, including
-older runtimes without this protocol, means `not_observed`, never “healthy.” No endpoint identities,
+marked as not belonging to the current native connection. No valid current observations means
+`not_observed`, never “healthy.” No endpoint identities,
 raw errors, transcripts or media are retained.
 
 ## Speaker protection
@@ -247,23 +247,6 @@ Private device selections live in `~/.config/paj-voice/devices.json`; cache uses
 `~/.cache/paj-voice`. `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` override these locations. Device IDs do not
 belong in shared preferences. Models and executable paths are package-managed, not user options.
 
-## Upgrading older settings
-
-Upgrade the Voice package and reload affected Pi sessions before saving new options. A source
-checkout or Nix pin update alone does not change an already installed or loaded extension.
-
-The current background-audio settings are `enabled`, `gain`, and `ignoreApps`. Older `mode`, `apps`,
-and `excludeApps` fields are rejected with migration guidance:
-
-- Replace `mode: "off"` with `enabled: false`.
-- Replace `mode: "duck-all"` with `enabled: true`.
-- Rename `excludeApps` to `ignoreApps` and remove `apps`.
-- Old selected-app `mode: "duck"` does not migrate automatically: enabling now includes all supported
-  playback, including calls and alerts. Leave it disabled until that broader behavior is intended.
-
-Older `version`, `stt`, `tts`, `audio`, `turn`, language, and runtime-path preferences are also
-unsupported. Use the [current example](../examples/paj.json), preserving other addon sections.
-
 ## Background-audio diagnostics
 
 `/paj-voice ducking diagnostics` shows current focus status alongside recent safe diagnostics. Both
@@ -313,18 +296,13 @@ The list identifies the client, shared broker, or native helper; the operation; 
 code, with elapsed/timeout milliseconds and sanitized process exit, signal, or OS error codes when
 available. Acknowledgement means the operation was processed, not proof of audible restoration.
 No application names, device IDs, paths, media titles, URLs, transcripts, raw process output, or
-credentials are stored. Existing warning messages remain unchanged. Older loaded Voice clients can display
-safe diagnostic records as warnings; reload affected sessions together when upgrading.
+credentials are stored.
 
 History is memory-only, limited to 32 entries for 15 minutes in this Pi session. It survives Voice
 off/cleanup for inspection, but clears on session change or shutdown. Startup and cleanup diagnostics
 are best effort; a crash may prevent delivery. Diagnostics cannot recover an earlier unlogged cause,
 do not retry gain writes, and do not prove that audio remains quiet. Use normal app volume controls
 if needed. A controlled live duck/restore test is a separate step, not part of this command.
-
-This visibility is prospective, not a sound-loss fix or a diagnosis. Loading a new build resets local
-objects; it cannot inspect an older loaded client's private closure or recover expired history. No
-broker/native wire operation or recovery behavior is added.
 
 The broker prepares its socket inside a unique private directory, verifies owner/type and mode
 `0600`, then publishes the public pathname atomically without replacing an existing entry. This
