@@ -32,7 +32,7 @@ in
     src = source;
     npmDeps = fetchNpmDeps {
       src = source;
-      hash = "sha256-CcSp1qqxEb0v2QYyj2XOKGz0HfrIOddSIbwTqtl6GXg=";
+      hash = "sha256-EXSDQe4rYuCdTqIx/IQ1O5N4s1T1XMKqiraJtT1z8jQ=";
     };
     npmFlags = ["--ignore-scripts"];
     nativeBuildInputs = [makeWrapper nodejs npmHooks.npmConfigHook pkg-config];

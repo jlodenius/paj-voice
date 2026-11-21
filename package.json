@@ -13,12 +13,15 @@
     "pretest": "npm run build",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
+    "format": "prettier --no-config --write --no-error-on-unmatched-pattern \"**/*.ts\"",
+    "format:check": "prettier --no-config --check --no-error-on-unmatched-pattern \"**/*.ts\"",
     "test": "node --test tests/*.test.js && PYTHONPATH=\"$PWD/audio\" python3 -m unittest discover -s audio/tests -v"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.5.2",
     "@earendil-works/pi-tui": "^1.5.2",
     "@types/node": "^24.0.0",
+    "prettier": "3.10.1",
     "typebox": "^1.4.7",
     "typescript": "^5.9.3"
   },

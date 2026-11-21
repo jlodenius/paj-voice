@@ -1,0 +1,9 @@
+/.git/
+/.cache/
+/.venv/
+/build/
+/dist/
+/vendor/
+/node_modules/
+/result
+/result-*

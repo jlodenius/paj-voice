@@ -1,8 +1,8 @@
-import type { AudioDuckingPreferences } from './config.ts';
+import type { AudioDuckingPreferences } from "./config.ts";
 
 export type Environment = Record<string, string | undefined>;
-export type NotificationLevel = 'info' | 'warning' | 'error';
-export type SpeechPriority = 'normal' | 'urgent';
+export type NotificationLevel = "info" | "warning" | "error";
+export type SpeechPriority = "normal" | "urgent";
 
 export interface VoiceToken {
   generation: string | null;
@@ -12,13 +12,14 @@ export interface VoiceToken {
 export interface SpeechRequest extends Partial<VoiceToken> {
   text?: string;
   priority?: SpeechPriority;
-  purpose?: 'answer' | 'progress' | 'inbox-summary';
+  purpose?: "answer" | "progress" | "inbox-summary";
   key?: string;
   id?: string;
 }
 
 export interface SpeechResult {
-  status: 'unavailable' | 'stale' | 'listening' | 'duplicate' | 'queued' | 'silent';
+  status:
+    "unavailable" | "stale" | "listening" | "duplicate" | "queued" | "silent";
   id?: string;
 }
 
@@ -29,7 +30,7 @@ export interface VoiceState extends VoiceToken {
   sessionId: string | null;
   muted: boolean;
   listening: boolean;
-  inputPause?: 'pausing' | 'paused' | 'warming' | 'held' | 'unconfirmed' | null;
+  inputPause?: "pausing" | "paused" | "warming" | "held" | "unconfirmed" | null;
   inputPauseRemainingMs?: number;
   inputAvailable?: boolean;
   outputAvailable?: boolean;
@@ -82,7 +83,10 @@ export interface SubmissionResult {
 export interface VoiceApi {
   version: 1;
   getState(): VoiceState;
-  registerReporter(options?: { id?: string; instructions?: string }): () => void;
+  registerReporter(options?: {
+    id?: string;
+    instructions?: string;
+  }): () => void;
   speak(request?: SpeechRequest): SpeechResult;
 }
 
@@ -135,14 +139,26 @@ export interface CompanionFrame {
 }
 
 export type CompanionCommand =
-  | { type: 'stop' | 'shutdown' }
-  | { type: 'mute'; muted: boolean }
-  | { type: 'input_pause'; id: string; seconds: number }
-  | { type: 'speak'; id: string; text: string; priority: SpeechPriority; key?: string }
-  | { type: 'configure'; generation: string | null; config: Record<string, unknown> };
+  | { type: "stop" | "shutdown" }
+  | { type: "mute"; muted: boolean }
+  | { type: "input_pause"; id: string; seconds: number }
+  | {
+      type: "speak";
+      id: string;
+      text: string;
+      priority: SpeechPriority;
+      key?: string;
+    }
+  | {
+      type: "configure";
+      generation: string | null;
+      config: Record<string, unknown>;
+    };
 
 export function errorCode(error: unknown): unknown {
-  return error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  return error && typeof error === "object" && "code" in error
+    ? error.code
+    : undefined;
 }
 
 export function errorMessage(error: unknown): string {
