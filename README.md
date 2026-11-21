@@ -36,13 +36,28 @@ In your main Pi session:
 
 ```text
 /paj-voice setup desk
+```
+
+Setup saves your chosen microphone and output without opening audio. Repeat setup with another name,
+such as `headset`, to save another audio selection. Setup asks about speaker protection and keeps
+your preferred route unless you explicitly choose otherwise. See
+[speaker protection](docs/reference.md#speaker-protection).
+
+Before turning Voice on:
+
+- **Continuous open mic, no wake word:** incidental or misheard speech can become a Pi request
+  with the session's normal tool permissions. Existing terminal confirmations remain manual.
+- **Audio is processed locally.** Recognized text submitted to Pi goes to the configured model
+  provider and is recorded in Pi session history.
+- **Wait for closure confirmation.** Bare `/paj-voice pause` and `/paj-voice off` request shutdown
+  of all Voice audio. Do not assume the mic is closed until Voice confirms the audio process has
+  exited. Setting speech volume to zero does not close the mic.
+
+```text
 /paj-voice on
 ```
 
-Setup saves your chosen microphone and output without opening audio. Turning Voice on requires
-confirmation; remain quiet until the ready beep. Repeat setup with another name, such as `headset`,
-to save another audio selection. Setup asks about speaker protection and keeps your preferred route
-unless you explicitly choose otherwise. See [speaker protection](docs/reference.md#speaker-protection).
+Turning Voice on requires confirmation; remain quiet until the ready beep.
 
 ## Usage
 
@@ -116,8 +131,6 @@ see [diagnostic meanings and limits](docs/reference.md#background-audio-diagnost
 
 ## What to know
 
-- **No wake word:** all recognized speech while Voice is on can trigger normal agent tools.
-  Existing terminal confirmations remain manual. Setting speech volume to zero does not close the mic.
 - Headphones allow you to interrupt replies by speaking. With configured speaker-safe audio,
   recognition pauses during replies; wait for LISTENING or use `/paj-voice stop`.
 - Bluetooth microphones use headset call mode, which reduces playback quality.
