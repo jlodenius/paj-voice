@@ -29,10 +29,11 @@ Without Home Manager, run `nix build`, then `pi install ./result/share/paj-voice
 
 ## Setup
 
-Merge `"voice": {}` into `~/.pi/agent/paj.json`, preserving the other addon sections.
-For a NixOS-managed symlink, edit its source file. Omitted options use the defaults below.
+Add `"voice": {}` to `~/.pi/agent/paj.json`, or to `paj.json` in `PI_CODING_AGENT_DIR` if set.
+Keep sibling settings and edit the source of any declaratively managed symlink. For a Voice-only
+file override and where device selections are stored, see [Storage](docs/reference.md#storage).
 
-In your main Pi session:
+In your main interactive Pi session (not a subagent):
 
 ```text
 /paj-voice setup desk
@@ -57,7 +58,8 @@ Before turning Voice on:
 /paj-voice on
 ```
 
-Turning Voice on requires confirmation; remain quiet until the ready beep.
+Turning Voice on requires confirmation; remain quiet until the ready beep. Then ask a short
+question and listen for Pi's reply. If audio is unavailable, check `/paj-voice status`.
 
 ## Usage
 
@@ -76,7 +78,9 @@ Turning Voice on requires confirmation; remain quiet until the ready beep.
 
 `mute` and `unmute` remain aliases for `pause` and `resume`. The panel's `Audio:` row shows the
 current selection. You can also ask to switch to a saved selection while Voice is listening.
-With Paj, incoming agent updates get concise spoken summaries automatically; you do not need to ask.
+When Voice is on, compatible [Paj](https://github.com/jlodenius/paj) can deliver incoming agent
+updates for [spoken summaries](docs/reference.md#incoming-agent-updates). Paj is not needed for
+ordinary voice conversations.
 For automatic laptop fallback on headset loss, see [audio recovery](docs/reference.md#audio-recovery).
 See [timed microphone pause](docs/reference.md#timed-microphone-pause) for duration and resume rules.
 
