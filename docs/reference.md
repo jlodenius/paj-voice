@@ -1,6 +1,73 @@
 # Voice reference
 
-Start with the [README](../README.md) for installation, commands, and settings.
+Start with the [README](../README.md) for installation and your first voice conversation.
+
+## Commands
+
+| Command                         | What it does                                        |
+|---------------------------------|-----------------------------------------------------|
+| `/paj-voice on`                 | Start Voice, with confirmation.                     |
+| `/paj-voice off`                | Request audio shutdown; agent work continues.                  |
+| `/paj-voice pause` / `resume`   | Pause audio / resume with fresh confirmation.       |
+| `/paj-voice pause 10 seconds`   | Pause only the microphone for a bounded duration.   |
+| `/paj-voice stop`               | Stop the current spoken reply, not agent work.      |
+| `/paj-voice route [name]`       | List saved audio selections or switch to one.       |
+| `/paj-voice protection <name>`  | Edit speaker protection while Voice is off.         |
+| `/paj-voice status`             | Show current state and settings location.           |
+| `/paj-voice devices` / `voices` | List audio devices / installed speaking voices.     |
+| `/paj-voice recover`            | Put an overlong dictation in the editor for review. |
+
+`mute` and `unmute` are aliases for `pause` and `resume`. The panel's `Audio:` row shows the
+current selection. You can also ask to switch to a saved selection while Voice is listening.
+
+## Options
+
+These settings go inside the shared file's `voice` section. All are optional.
+Changes apply the next time you start or resume Voice, not while it is already listening.
+
+| Preference                   | Default                | Available options                       | Meaning                                 |
+|------------------------------|------------------------|-----------------------------------------|-----------------------------------------|
+| `voice`                      | `"ljspeech"`           | `ljspeech`; other installed voices      | Speaking voice; `/paj-voice voices`.    |
+| `volume`                     | `40`                   | Number: `0`–`100`                       | Speech volume, not system volume.       |
+| `speed`                      | `1`                    | Number: `0.5`–`2`                       | Speaking speed; `1` is normal.          |
+| `pauseSeconds`               | `0.8`                  | Number: `0.3`–`5`                       | Silence before submitting, in seconds.  |
+| `maxMessageSeconds`          | `120`                  | Number: `5`–`120`                       | Dictation limit, in seconds.            |
+| `feedback.receipt`           | `"Got it."`            | Text: 1–8 words, at most 60 characters  | New request acknowledgement.            |
+| `feedback.steeringReceipt`   | `"Steering received."` | Text: 1–8 words, at most 60 characters  | Acknowledgement during active work.     |
+| `feedback.progressUpdates`   | `true`                 | `true` / `false`                        | Brief updates during long tasks.        |
+| `feedback.idleReminders`     | `true`                 | `true` / `false`                        | Up to three idle reminders.             |
+| `backgroundAudio.enabled`    | `false`                | `true` / `false`                        | Lower other playback, calls and alerts. |
+| `backgroundAudio.gain`       | `0.2`                  | Number: `0.05`–`1`                      | Multiply each app's existing gain.      |
+| `backgroundAudio.ignoreApps` | `[]`                   | List: 0–32 exact app IDs / binary names | Apps never lowered; no wildcards.       |
+
+Dotted names mean nested JSON objects: `feedback.receipt` goes inside `"feedback": { ... }`.
+Receipt text cannot contain control characters. The included speaking voice is LJSpeech.
+See [all defaults](../examples/paj.json) for a complete example.
+
+### Background audio
+
+To lower other playback while Voice speaks, use:
+
+```json
+{
+  "voice": {
+    "backgroundAudio": {
+      "enabled": true,
+      "gain": 0.2,
+      "ignoreApps": []
+    }
+  }
+}
+```
+
+Pi Voice itself is always excluded. A gain of `0.2` lowers playback; `1` leaves it unchanged.
+To exempt an app, add its exact ID or executable name to `ignoreApps`, such as `[".spotify-wrapped"]`.
+
+Only supported PipeWire playback can be lowered. Music keeps playing; it is not paused. Volume
+restoration is best effort: if a warning says audio may remain quiet, adjust the app's volume manually.
+`/paj-voice ducking preview` lists eligible apps without changing volume.
+`/paj-voice ducking diagnostics` shows read-only current focus status and bounded recent history;
+see [diagnostic meanings and limits](#background-audio-diagnostics).
 
 ## Audio recovery
 
@@ -50,6 +117,10 @@ older runtimes without this protocol, means `not_observed`, never “healthy.”
 raw errors, transcripts or media are retained.
 
 ## Speaker protection
+
+Headphones allow spoken interruption with protection off. With protection on, wait for LISTENING
+or use `/paj-voice stop`. Bluetooth microphones may switch to headset call mode, reducing
+playback quality.
 
 Ordinary `/paj-voice setup <name>` asks you to explicitly choose speakers/uncertain playback
 (protection ON) or confirm headphones (protection OFF). Protection ON is the conservative first
