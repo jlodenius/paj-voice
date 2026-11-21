@@ -5,10 +5,10 @@ import { errorMessage } from './types.ts';
 import type { Environment, NotificationLevel, PajApi, SpeechPriority, SpeechRequest, VoiceApi,
   VoicePreferences, VoiceToken, DeviceSelection, CompanionFrame, PajMessageDelivery, SpeechResult } from './types.ts';
 
-type Companion = Pick<ReturnType<typeof startCompanion>, 'send' | 'close'> & {
+type Companion = Pick<ReturnType<typeof startCompanion>, 'send' | 'close' | 'waitClosed'> & {
   diagnostics?(): string;
-  waitClosed?(): Promise<void>;
 };
+type RetiringAudio = { worker: Companion; result: Promise<boolean>; state: 'closing' | 'unconfirmed' };
 interface VoiceOptions {
   layout: VoiceLayout;
   env?: Environment;
@@ -61,6 +61,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     (options.saveRoute ?? saveRoute)(deviceSettingsPath(env), name, selection, expected);
   let ctx: ExtensionContext | undefined;
   let companion: Companion | undefined;
+  let retiringAudio: RetiringAudio | undefined;
   let admission: ReturnType<typeof createAdmission> | undefined;
   let promptDepth = 0;
   let closed = false;
@@ -98,7 +99,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const fallback = state.enabled && !state.muted && state.usingFallback;
     const display: VoiceDisplayState = { ...state, route: fallback ? activeFallback?.name : activeRoute ?? selected,
       preferredRoute: activeRoute ?? selected, fallbackRoute: activeFallback?.name,
-      routeActive: !!activeRoute && state.enabled && !state.muted, switchingRoute };
+      routeActive: !!activeRoute && state.enabled && !state.muted, switchingRoute, audioTeardown: retiringAudio?.state };
     ctx.ui.setStatus('paj-voice', voiceStatus(display, ctx.ui.theme));
     if (ctx.mode === 'tui') ctx.ui.setWidget?.('paj-voice', voiceWidget(display, options.layout), { placement: 'aboveEditor' });
   };
@@ -428,18 +429,52 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       availabilityConnection = {};
     } catch { finish(new Error('Cannot start selected audio route')); }
   });
-  const closeAudio = async () => {
-    const old = companion;
+  const retireCompanion = () => {
+    const worker = companion;
+    if (!worker) return retiringAudio;
     companion = undefined;
-    old?.close();
-    await closeFocus();
-    if (old?.waitClosed) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([old.waitClosed(), new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error('Previous audio process did not close')), 3500);
-        })]);
-      } finally { clearTimeout(timer); }
+    let finish!: (confirmed: boolean) => void;
+    const result = new Promise<boolean>(resolve => { finish = resolve; });
+    const retirement: RetiringAudio = { worker, result, state: 'closing' };
+    retiringAudio = retirement;
+    const refresh = () => { try { if (!closed) updateDisplay(); } catch {} };
+    const unconfirmed = () => {
+      retirement.state = 'unconfirmed';
+      finish(false);
+      refresh();
+    };
+    const timer = setTimeout(unconfirmed, 3500);
+    const confirmed = () => {
+      clearTimeout(timer);
+      if (retiringAudio === retirement) retiringAudio = undefined;
+      finish(true);
+      refresh();
+    };
+    // A timeout ends the wait, not ownership: only observed termination permits another launch.
+    try { void retirement.worker.waitClosed().then(confirmed, () => { clearTimeout(timer); unconfirmed(); }); }
+    catch { clearTimeout(timer); unconfirmed(); }
+    try { retirement.worker.close(); } catch {}
+    refresh();
+    return retirement;
+  };
+  const closeAudioForRoute = async () => {
+    const retirement = retireCompanion();
+    const focusClosed = closeFocus();
+    if (retirement && !await retirement.result) throw new Error('Previous audio process closure is unconfirmed');
+    await focusClosed;
+  };
+  const reportAudioStop = async (label: string, retirement: RetiringAudio | undefined, current: ExtensionContext) => {
+    const activation = lifetime;
+    const sessionId = current.sessionManager.getSessionId();
+    if (retirement?.state === 'closing') {
+      notify(`${label}; audio process closing. Microphone closure is not yet confirmed. Agent work continues.`);
+    }
+    const confirmed = !retirement || await retirement.result;
+    if (closed || activation !== lifetime || sessionId !== ctx?.sessionManager.getSessionId()) return;
+    if (!confirmed && retiringAudio === retirement) {
+      notify(`${label}; audio process closure is unconfirmed. Do not assume microphone privacy. Agent work continues.`, 'warning');
+    } else {
+      notify(`${label}; the audio process is closed. Agent work and tool permissions are unchanged.`);
     }
   };
   const switchRoute = async (name: string, signal?: AbortSignal): Promise<Record<string, unknown>> => {
@@ -483,7 +518,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       activeRoute = undefined;
       controller.routeChanging();
       closingOld = true;
-      await closeAudio();
+      await closeAudioForRoute();
       closedOld = true;
       if (!valid()) return { status: 'cancelled' };
       await launchRoute(selection, name, activation);
@@ -504,7 +539,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
       if (!valid()) return { status: 'cancelled' };
       if (closedOld && previous) {
         try {
-          await closeAudio();
+          await closeAudioForRoute();
           if (!valid()) return { status: 'cancelled' };
           activeRoute = undefined;
           switchingRoute = previousRoute;
@@ -519,8 +554,10 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           return { status: 'failed', recovered: true, ...(suspended ? { suspended: true } : {}), ...routeSummary() };
         } catch {}
       }
+      if (!valid()) return { status: 'cancelled' };
       if (closingOld) stop();
-      return { status: 'failed', recovered: false };
+      return { status: 'failed', recovered: false, ...(retiringAudio?.state === 'unconfirmed'
+        ? { message: 'Previous audio process closure is unconfirmed. Voice stopped; do not assume microphone privacy.' } : {}) };
     } finally {
       signal?.removeEventListener('abort', abort);
       switching = false;
@@ -541,15 +578,15 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     inboxRunIds.clear();
     retriedInbox.clear();
     cancelledInboxRetry = false;
-    const old = companion;
-    companion = undefined;
+    const retirement = retireCompanion();
     void closeFocus();
     activeRoute = switchingRoute = undefined;
     activeFallback = armedFallback = undefined;
     controller.stop();
     const oldAdmission = admission;
     admission = undefined;
-    try { old?.close(); } finally { oldAdmission?.close(); }
+    oldAdmission?.close();
+    return retirement;
   };
   const onQuery = (value: unknown) => {
     const request = value as { reply?(api: VoiceApi): void } | undefined;
@@ -606,7 +643,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     promptDepth = 0;
     try { pi.events.emit('paj-voice:state:v1', controller.state()); } catch {}
   });
-  pi.on('session_shutdown', () => {
+  pi.on('session_shutdown', async () => {
     recoveries.length = 0;
     closed = true;
     availabilityDiagnostics.clear();
@@ -614,15 +651,16 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     focusDiagnostics.clear();
     focusTrace = newFocusTrace();
     cachedRoutes = undefined;
-    stop();
+    const retirement = stop();
     controller.dispose();
     unsubscribe?.();
     unsubscribePaj?.();
     unsubscribeInbox?.();
     ctx = undefined;
+    await retirement?.result;
   });
   pi.on('session_tree', () => { availabilityDiagnostics.clear(); recoveries.length = 0; stop(); });
-  pi.on('model_select', () => stop());
+  pi.on('model_select', () => { stop(); });
   pi.on('before_agent_start', (event, current) => {
     if (current.sessionManager.getSessionId() !== ctx?.sessionManager.getSessionId()) return;
     backgroundTurn = event.messageType === 'custom';
@@ -933,18 +971,19 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
         } catch { notify('Cannot update the editor. The incomplete transcript remains saved for recovery.', 'error'); }
         return;
       }
-      if (command === 'off') { stop(); notify('Voice off. Agent work continues.'); return; }
+      if (command === 'off') { await reportAudioStop('Voice off', stop(), current); return; }
       if (command === 'stop') { controller.silence(); notify('Speech stopped. Agent work continues.'); return; }
       if (command === 'pause') {
         lifetime++;
         cancelSwitch?.();
-        const old = companion, oldAdmission = admission;
-        companion = admission = undefined;
+        const retirement = retireCompanion();
+        const oldAdmission = admission;
+        admission = undefined;
         void closeFocus();
         activeRoute = switchingRoute = undefined;
         controller.mute(true);
-        try { old?.close(); } finally { oldAdmission?.close(); }
-        notify('Voice paused; the audio process is closed. Agent work and tool permissions are unchanged.');
+        oldAdmission?.close();
+        await reportAudioStop('Voice paused', retirement, current);
         return;
       }
       if ((command === 'on' || command === 'resume') && recoveries.length >= 4) {
@@ -953,12 +992,11 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
       }
       if (command === 'resume') {
         if (!controller.state().muted && !controller.state().inputPause) { notify('Voice is not paused; use on to arm it.'); return; }
-        stop();
+        if (!controller.state().muted) stop();
         command = 'on';
       }
-      if (command === 'on' && controller.state().muted) stop();
       if (command === 'status') {
-        notify(`${JSON.stringify(controller.state())}\nRoutes: ${JSON.stringify(routeSummary(true))}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio focus status: ${JSON.stringify(focusStatus())}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}\nAvailability diagnostics: ${JSON.stringify(availabilitySummary())}`);
+        notify(`${JSON.stringify(controller.state())}\nAudio process teardown: ${retiringAudio?.state ?? (companion ? 'not_requested' : 'closed')}\nRoutes: ${JSON.stringify(routeSummary(true))}\nExtension build: ${options.buildId ?? import.meta.url}\nPreferences: ${configPath(env)}\nBackground audio focus status: ${JSON.stringify(focusStatus())}\nBackground audio diagnostics: ${JSON.stringify(focusDiagnostics.snapshot())}\nAvailability diagnostics: ${JSON.stringify(availabilitySummary())}`);
         return;
       }
       if (!['on', 'devices', 'setup', 'voices'].includes(command)) {
@@ -1051,6 +1089,34 @@ Voice stays off; arming remains a separate confirmation.`);
             : `Voice route saved. ${!before || activate ? `${setupName} is preferred.` : 'Preferred route unchanged.'} Voice remains off.`);
           return;
         }
+        if (!controller.state().muted && (controller.state().enabled || controller.state().starting)) {
+          notify('Voice is already enabled for this session.'); return;
+        }
+        if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
+            env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID || (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
+          throw new Error('Enable voice in a main Pi TUI session');
+        }
+        if (arming || configuring) throw new Error('Voice arming or device selection is already in progress');
+        arming = true;
+        ownsArming = true;
+        let activation = lifetime;
+        const id = current.sessionManager.getSessionId();
+        const currentArm = () => !closed && lifetime === activation && current.hasUI &&
+          ctx?.mode === 'tui' && ctx.hasUI && id === ctx.sessionManager.getSessionId();
+        const retirement = retiringAudio;
+        if (retirement) {
+          if (retirement.state === 'closing') notify('Waiting for the previous audio process to close before arming Voice.');
+          await retirement.result;
+          if (!currentArm()) return;
+          if (retiringAudio) {
+            notify('Cannot arm Voice: previous audio process closure is unconfirmed. Check status and try again after it exits.', 'warning');
+            return;
+          }
+        }
+        if (controller.state().muted) {
+          stop();
+          activation = lifetime;
+        }
         const selectedPreferences = validateConfig((options.loadConfig ?? loadConfig)(configPath(env)));
         const selectedDevices = (options.loadDevices ?? loadDevices)(deviceSettingsPath(env));
         const savedRoutes = readRoutes();
@@ -1061,16 +1127,6 @@ Voice stays off; arming remains a separate confirmation.`);
           ? { ...savedRoutes.routes[fallback], name: fallback } : undefined;
         const runtimeFallback = selectedFallback?.name !== selectedRoute ? selectedFallback : undefined;
         const config = runtimeConfig(selectedPreferences, selectedDevices, runtimeFallback);
-        if (controller.state().enabled || controller.state().starting) { notify('Voice is already enabled for this session.'); return; }
-        if (closed || current.mode !== 'tui' || !current.hasUI || env.PAJ_PARENT_PI_SESSION_ID ||
-            env.PAJ_SPAWN_ID || env.PAJ_TASK_ID || env.PAJ_PARENT_TASK_ID || (env.PAJ_ROLE && env.PAJ_ROLE !== 'primary')) {
-          throw new Error('Enable voice in a main Pi TUI session');
-        }
-        if (arming || configuring) throw new Error('Voice arming or device selection is already in progress');
-        arming = true;
-        ownsArming = true;
-        const activation = lifetime;
-        const id = current.sessionManager.getSessionId();
         const fallbackNotice = selectedFallback
           ? `Configured fallback ${selectedFallback.name} can automatically open its microphone and speakers if either preferred endpoint fails. It stays active until an explicit route switch or rearm. ` : '';
         const speakerNotice = selectedFallback || selectedDevices.speakerMode
@@ -1079,8 +1135,8 @@ Voice stays off; arming remains a separate confirmation.`);
         const duckNotice = duckSettings?.enabled
           ? `All other inspectable playback, including calls and alerts, may be lowered during readouts (linear gain ${duckSettings.gain}), except ignored apps. Pi Voice outputs stay unchanged. Restoration is best effort. This is not echo cancellation or a background-speech filter. ` : '';
         if (!await current.ui.confirm('Arm continuous open mic with normal tools?',
-          `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}${duckNotice}Off/pause or session shutdown stops audio and recovery; fatal runtime errors also stop audio. Existing terminal confirmations cannot be approved by voice.`)) return;
-        if (closed || lifetime !== activation || id !== ctx?.sessionManager.getSessionId()) throw new Error('Voice arming was cancelled');
+          `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}${duckNotice}Off/pause or session shutdown requests audio shutdown and stops recovery. Do not assume microphone closure until audio process termination is confirmed. Existing terminal confirmations cannot be approved by voice.`)) return;
+        if (!currentArm()) return;
         preferences = selectedPreferences;
         armedFallback = selectedFallback;
         activeFallback = runtimeFallback;
@@ -1121,9 +1177,9 @@ Voice stays off; arming remains a separate confirmation.`);
         activeSelection = selectedDevices;
         updateDisplay();
         if (!current.isIdle()) controller.newRun({ summaryExpected: !backgroundTurn });
-        notify('Open mic starting. Remain quiet through warm-up; wait for the ready beep. All recognized speech is actionable in this session. Off/pause stops audio, not agent work.');
+        notify('Open mic starting. Remain quiet through warm-up; wait for the ready beep. All recognized speech is actionable in this session. Off/pause requests audio shutdown; wait for closure confirmation. Agent work continues.');
       } catch (error) {
-        if (command === 'on') stop();
+        if (ownsArming) stop();
         notify(`Voice unavailable: ${errorMessage(error)}`, 'error');
       } finally {
         if (ownsArming) arming = false;

@@ -35,7 +35,10 @@ export function fixture(overrides = {}, register = registerVoice) {
     saveRouteBinding: forbidden, updateRouteProtection: forbidden,
     startAudioFocus: forbidden, previewBackgroundAudio: forbidden,
     startCompanion(args) {
-      const worker = { args, closed: false, send: frame => frames.push(frame), close() { this.closed = true; } };
+      let confirmExit;
+      const exited = new Promise(resolve => { confirmExit = resolve; });
+      const worker = { args, closed: false, send: frame => frames.push(frame), close() { this.closed = true; confirmExit(); },
+        waitClosed: () => exited };
       workers.push(worker);
       return worker;
     } };

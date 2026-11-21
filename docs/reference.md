@@ -126,8 +126,12 @@ unconfirmed exit, Voice cancels timed resume, reports a sanitized privacy error,
 recorder for cleanup retries. Failure may stop speech output too. If cleanup still cannot confirm
 exit, the error is not a claim that the microphone is physically closed.
 
-Bare `/paj-voice pause` or `/paj-voice mute` still closes **all** audio. `/paj-voice resume` always
-uses the normal confirmation flow, including when ending a timed pause early.
+Bare `/paj-voice pause` or `/paj-voice mute` requests shutdown of **all** Voice audio, as does
+`/paj-voice off`. Wait for the audio process closure notice before assuming microphone privacy.
+`/paj-voice status` distinguishes `closing`, `closed`, and `unconfirmed` teardown. If closure
+cannot be confirmed in time, Voice will not rearm until it observes the previous process exit;
+request `on` or `resume` again after that. A late exit never rearms Voice by itself. `/paj-voice
+resume` always uses fresh confirmation, including when ending a timed pause early.
 
 ## Recovering long dictation
 

@@ -9,6 +9,7 @@ export type VoiceDisplayState = Partial<VoiceState> & {
   fallbackRoute?: string;
   routeActive?: boolean;
   switchingRoute?: string;
+  audioTeardown?: 'closing' | 'unconfirmed';
 };
 type Tone = 'muted' | 'warning' | 'dim';
 interface Theme {
@@ -20,6 +21,13 @@ interface Theme {
 function appearance(state: VoiceDisplayState): {
   badge: string; tone: Tone; activity: string; detail: string; controls: string;
 } | null {
+  if (state.audioTeardown) return {
+    badge: state.audioTeardown === 'closing' ? 'AUDIO CLOSING' : 'CLOSURE UNCONFIRMED', tone: 'warning',
+    activity: 'Microphone closure unconfirmed - do not assume privacy',
+    detail: state.audioTeardown === 'closing' ? 'Waiting for the previous audio process to exit.'
+      : 'Audio cannot restart until the previous process exits.',
+    controls: 'Check: /paj-voice status',
+  };
   if (state.muted) return { badge: 'MIC CLOSED', tone: 'muted',
     activity: state.processing ? 'Agent working - audio paused' : 'Voice paused - microphone closed',
     detail: 'Pause does not stop agent work.', controls: 'Resume: /paj-voice resume   Off: /paj-voice off' };
