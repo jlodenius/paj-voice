@@ -26,7 +26,7 @@ interface VoiceOptions {
   startAudioFocus?: typeof startAudioFocus;
   previewBackgroundAudio?: (settings: BackgroundAudioSettings) => Promise<FocusPreview>;
 }
-import { configPath, loadConfig, validateConfig, runtimeConfig, validateBackgroundAudio, backgroundAudioPolicy } from './config.ts';
+import { configPath, loadConfig, validateConfig, runtimeConfig, validateAudioDucking, audioDuckingPolicy } from './config.ts';
 import { startAudioFocus } from './audio-focus-client.ts';
 import { createFocusDiagnosticLog, focusErrorCode, safeFocusDiagnostic } from './audio-focus-diagnostics.ts';
 import { createAudioFocus } from './audio-focus.ts';
@@ -152,8 +152,8 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     })();
     const state = controller.state();
     const armed = state.enabled || state.starting || state.muted ? preferences : undefined;
-    return { armedPolicy: armed ? { enabled: armed.backgroundAudio?.enabled ?? false,
-      gain: armed.backgroundAudio?.gain ?? 0.2 } : null, client, trace: { ...focusTrace } };
+    return { armedPolicy: armed ? { enabled: armed.audioDucking?.enabled ?? false,
+      gain: armed.audioDucking?.gain ?? 0.2 } : null, client, trace: { ...focusTrace } };
   };
   const idleFocus = () => {
     const token = focusToken;
@@ -197,7 +197,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
     const token = `${scope}:${frame.outputEpoch}:${frame.playbackGeneration}:${frame.id}`;
     if (!frame.playing) { if (token === focusToken) idleFocus(); return; }
     const state = controller.state();
-    const settings = preferences?.backgroundAudio;
+    const settings = preferences?.audioDucking;
     if (!settings?.enabled || state.muted || !state.outputAvailable ||
         (!state.enabled && !state.starting)) {
       focusTrace.lastSkip = !settings?.enabled ? 'policy_off' : 'inactive_output_unavailable'; return;
@@ -217,7 +217,7 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
         retireFocusWarnings = retireWarnings;
         focusDiagnosticOwner = diagnosticLifetime;
         try {
-          audioFocus = (options.startAudioFocus ?? startAudioFocus)(backgroundAudioPolicy(settings), { env,
+          audioFocus = (options.startAudioFocus ?? startAudioFocus)(audioDuckingPolicy(settings), { env,
             onWarning: message => {
               if (!closed && !retired && diagnosticLifetime === focusDiagnosticLifetime) notify(message, 'warning');
             },
@@ -853,12 +853,12 @@ export function registerVoice(pi: ExtensionAPI, Type: typeof TypeBuilder, option
           notify('Use /paj-voice ducking preview or diagnostics. Enable or disable background audio lowering in shared preferences, then rearm.', 'warning'); return;
         }
         try {
-          const settings = validateBackgroundAudio((preferences ?? (options.loadConfig ?? loadConfig)(configPath(env))).backgroundAudio);
+          const settings = validateAudioDucking((preferences ?? (options.loadConfig ?? loadConfig)(configPath(env))).audioDucking);
           let preview: FocusPreview;
-          if (options.previewBackgroundAudio) preview = await options.previewBackgroundAudio(backgroundAudioPolicy(settings));
+          if (options.previewBackgroundAudio) preview = await options.previewBackgroundAudio(audioDuckingPolicy(settings));
           else {
             const focus = createAudioFocus(createPipeWireFocusGraph());
-            try { preview = await focus.preview(backgroundAudioPolicy(settings)); } finally { await focus.close(); }
+            try { preview = await focus.preview(audioDuckingPolicy(settings)); } finally { await focus.close(); }
           }
           notify(`Background audio preview (read-only): ${JSON.stringify({ enabled: settings.enabled, ...preview })}`);
         } catch { notify('Cannot inspect background audio; no volume changed.', 'warning'); }
@@ -1131,7 +1131,7 @@ Voice stays off; arming remains a separate confirmation.`);
           ? `Configured fallback ${selectedFallback.name} can automatically open its microphone and speakers if either preferred endpoint fails. It stays active until an explicit route switch or rearm. ` : '';
         const speakerNotice = selectedFallback || selectedDevices.speakerMode
           ? 'Speaker mode pauses recognition during Voice readouts and until quiet; wait for listening before speaking, and use /paj-voice stop to interrupt. ' : '';
-        const duckSettings = selectedPreferences.backgroundAudio;
+        const duckSettings = selectedPreferences.audioDucking;
         const duckNotice = duckSettings?.enabled
           ? `All other inspectable playback, including calls and alerts, may be lowered during readouts (linear gain ${duckSettings.gain}), except ignored apps. Pi Voice outputs stay unchanged. Restoration is best effort. This is not echo cancellation or a background-speech filter. ` : '';
         if (!await current.ui.confirm('Arm continuous open mic with normal tools?',

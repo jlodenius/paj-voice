@@ -1,4 +1,4 @@
-import type { BackgroundAudioPreferences } from './config.ts';
+import type { AudioDuckingPreferences } from './config.ts';
 
 export type Environment = Record<string, string | undefined>;
 export type NotificationLevel = 'info' | 'warning' | 'error';
@@ -56,7 +56,7 @@ export interface VoicePreferences {
   pauseSeconds: number;
   maxMessageSeconds: number;
   feedback: Feedback;
-  backgroundAudio?: BackgroundAudioPreferences;
+  audioDucking?: AudioDuckingPreferences;
 }
 
 export interface DeviceSelection {

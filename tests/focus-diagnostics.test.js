@@ -159,7 +159,7 @@ test('native adapter diagnostics distinguish exit, timeout and malformed acknowl
 
 test('the read-only diagnostics command retains safe failures after Voice cleanup and clears on session change', async () => {
   const callbacks = [];
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus(_settings, options) {
       callbacks.push(options.onDiagnostic);
       return { playing() {

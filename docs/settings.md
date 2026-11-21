@@ -18,22 +18,22 @@ Changes apply the next time you start or resume Voice, not while it is already l
 | `feedback.steeringReceipt`   | `"Steering received."` | Text: 1–8 words, at most 60 characters  | Acknowledgement during active work.     |
 | `feedback.progressUpdates`   | `true`                 | `true` / `false`                        | Brief updates during long tasks.        |
 | `feedback.idleReminders`     | `true`                 | `true` / `false`                        | Up to three idle reminders.             |
-| `backgroundAudio.enabled`    | `false`                | `true` / `false`                        | Lower other playback, calls and alerts. |
-| `backgroundAudio.gain`       | `0.2`                  | Number: `0.05`–`1`                      | Multiply each app's existing gain.      |
-| `backgroundAudio.ignoreApps` | `[]`                   | List: 0–32 exact app IDs / binary names | Apps never lowered; no wildcards.       |
+| `audioDucking.enabled`       | `false`                | `true` / `false`                        | Lower other playback, calls and alerts. |
+| `audioDucking.gain`          | `0.2`                  | Number: `0.05`–`1`                      | Multiply each app's existing gain.      |
+| `audioDucking.ignoreApps`    | `[]`                   | List: 0–32 exact app IDs / binary names | Apps never lowered; no wildcards.       |
 
 Dotted names mean nested JSON objects: `feedback.receipt` goes inside `"feedback": { ... }`.
 Receipt text cannot contain control characters. The included speaking voice is LJSpeech.
 See [all defaults](../examples/paj.json) for a complete example.
 
-### Background audio
+### Audio ducking
 
 To lower other playback while Voice speaks, use:
 
 ```json
 {
   "voice": {
-    "backgroundAudio": {
+    "audioDucking": {
       "enabled": true,
       "gain": 0.2,
       "ignoreApps": []

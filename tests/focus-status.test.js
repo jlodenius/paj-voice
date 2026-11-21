@@ -110,7 +110,7 @@ function readStatus(f) {
 
 test('extension reads distinguish absent, gated and unavailable clients without dependency calls', async t => {
   let reads = 0, constructs = 0, plays = 0;
-  const f = fixture({ loadConfig() { reads++; return { backgroundAudio: { enabled: true, gain: 0.3 } }; },
+  const f = fixture({ loadConfig() { reads++; return { audioDucking: { enabled: true, gain: 0.3 } }; },
     loadRoutes() { reads++; return undefined; },
     startAudioFocus() { constructs++; return { playing() { plays++; }, idle() {}, async close() {} }; } });
   t.after(() => f.command('off'));
@@ -146,7 +146,7 @@ test('extension reads distinguish absent, gated and unavailable clients without 
 test('failed extension status is observational and session fences discard old callbacks', async t => {
   let dependencies = 0, callbacks;
   const f = fixture({ env: { PIPEWIRE_REMOTE: 'private-remote' },
-    loadConfig() { dependencies++; return { backgroundAudio: { enabled: true } }; },
+    loadConfig() { dependencies++; return { audioDucking: { enabled: true } }; },
     loadRoutes() { dependencies++; return undefined; },
     startAudioFocus(policy, options) { callbacks = options; dependencies++;
       return startAudioFocus(policy, { ...options, connect: forbidden, spawn: forbidden,
@@ -179,7 +179,7 @@ test('failed extension status is observational and session fences discard old ca
 });
 
 test('all three extension counters saturate, normal idle is not a skip, defaults come only from arming', async t => {
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus: () => ({ playing() {}, idle() {}, async close() {} }) });
   t.after(() => f.command('off'));
   await f.command('on'); f.audio({ type: 'ready' });
@@ -202,7 +202,7 @@ test('all three extension counters saturate, normal idle is not a skip, defaults
 
 test('generation, output and construction/dispatch gates keep distinct bounded decisions', async t => {
   let throwConstruction = true;
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus() {
       if (throwConstruction) throw Error('private-construction');
       return { playing() { throw Error('private-dispatch'); }, idle() {}, async close() {} };
@@ -235,7 +235,7 @@ test('generation, output and construction/dispatch gates keep distinct bounded d
 
 test('current cleanup warnings survive off, but retired warning callbacks stay fenced', async () => {
   let warn;
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus(_policy, options) { warn = options.onWarning;
       return { playing() {}, idle() {}, async close() { options.onWarning('Cleanup remains unconfirmed'); } }; } });
   await f.command('on'); f.audio({ type: 'ready' });
@@ -249,7 +249,7 @@ test('current cleanup warnings survive off, but retired warning callbacks stay f
 
 function pendingCleanupFixture() {
   const clients = [];
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus(_policy, options) {
       let resolve, reject;
       const closing = new Promise((done, fail) => { resolve = done; reject = fail; });
@@ -322,7 +322,7 @@ test('session invalidation fences pending cleanup callbacks and close rejection 
 
 test('failed construction retires its warning callback without retiring the replacement client', async () => {
   const callbacks = [];
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus(_policy, options) {
       callbacks.push(options.onWarning);
       if (callbacks.length === 1) throw Error('private-construction');
@@ -344,7 +344,7 @@ test('failed construction retires its warning callback without retiring the repl
 
 test('unknown or unsafe external snapshots never invent a healthy existing client', async t => {
   let value = { state: 'connected', leasePresent: true, terminal: null };
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus: () => ({ playing() {}, idle() {}, async close() {}, snapshot: () => value }) });
   t.after(() => f.command('off'));
   await f.command('on'); f.audio({ type: 'ready' });

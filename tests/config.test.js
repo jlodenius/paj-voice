@@ -125,14 +125,14 @@ test('the shared example contains only supported user preferences', () => {
   const example = JSON.parse(readFileSync(new URL('../examples/paj.json', import.meta.url), 'utf8'));
   assert.deepEqual(Object.keys(example), ['voice']);
   assert.deepEqual(validateConfig(example.voice), { ...valid(),
-    backgroundAudio: { enabled: false, gain: 0.2, ignoreApps: [] } });
+    audioDucking: { enabled: false, gain: 0.2, ignoreApps: [] } });
 });
 
-test('README documents every supported preference', () => {
-  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-  const keys = Object.entries(validateConfig({})).flatMap(([key, value]) =>
-    key === 'feedback' ? Object.keys(value).map(name => `feedback.${name}`) : [key]);
+test('settings reference documents every supported preference', () => {
+  const docs = readFileSync(new URL('../docs/settings.md', import.meta.url), 'utf8');
+  const keys = Object.entries(validateConfig({ audioDucking: {} })).flatMap(([key, value]) =>
+    key === 'feedback' || key === 'audioDucking' ? Object.keys(value).map(name => `${key}.${name}`) : [key]);
   for (const key of keys) {
-    assert.ok(readme.includes('`' + key + '`'), `Undocumented preference: ${key}`);
+    assert.ok(docs.includes('`' + key + '`'), `Undocumented preference: ${key}`);
   }
 });

@@ -32,7 +32,7 @@ async function focused(t, enabled = true) {
   };
   const engine = createAudioFocus(graph, { releaseMs: 5, pollMs: 20 });
   const broker = await runAudioFocusBroker({ engine, runtimeDir, idleMs: 10000, env: {}, filesystem: focusFileSystem });
-  const f = fixture({ loadConfig: () => enabled ? { backgroundAudio: settings } : {},
+  const f = fixture({ loadConfig: () => enabled ? { audioDucking: settings } : {},
     startAudioFocus: value => startAudioFocus(value, { runtimeDir, env: {}, filesystem: focusFileSystem,
       spawn: () => assert.fail('The private fake-graph broker is already running') }) });
   t.after(async () => { await f.command('off'); await broker.close();

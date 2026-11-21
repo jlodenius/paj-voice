@@ -11,7 +11,7 @@
       "progressUpdates": true,
       "idleReminders": true
     },
-    "backgroundAudio": {
+    "audioDucking": {
       "enabled": false,
       "gain": 0.2,
       "ignoreApps": []

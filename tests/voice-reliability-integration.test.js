@@ -6,7 +6,7 @@ const final = text => ({ role: 'assistant', stopReason: 'stop', content: [{ type
 
 test('rejected noise and a confirmed mic pause preserve fresh inbox narration and cleanup diagnostics', async t => {
   let diagnostic;
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true } }),
     startAudioFocus(_settings, options) {
       diagnostic = options.onDiagnostic;
       return {

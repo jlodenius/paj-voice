@@ -41,54 +41,54 @@ export function isBackgroundAudioSelector(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 128 && /^\.?[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(value);
 }
 
-export interface BackgroundAudioPreferences {
+export interface AudioDuckingPreferences {
   enabled: boolean;
   gain: number;
   ignoreApps: string[];
 }
 
-export function validateBackgroundAudio(value: unknown = {}): BackgroundAudioPreferences {
+export function validateAudioDucking(value: unknown = {}): AudioDuckingPreferences {
   if (object(value) && ['mode', 'apps', 'excludeApps'].some(key => Object.hasOwn(value, key))) {
-    fail('backgroundAudio legacy mode/apps/excludeApps are unsupported; migrate to enabled and ignoreApps. ' +
+    fail('audioDucking legacy mode/apps/excludeApps are unsupported; migrate to enabled and ignoreApps. ' +
       'Use enabled:false for off; enabled:true for duck-all. Selected-app duck requires explicit consent ' +
       'to lower all other playback. Rename excludeApps to ignoreApps; remove apps.');
   }
-  keys(value, ['enabled', 'gain', 'ignoreApps'], 'backgroundAudio');
+  keys(value, ['enabled', 'gain', 'ignoreApps'], 'audioDucking');
   const ignoreApps = value.ignoreApps === undefined ? [] : value.ignoreApps;
   if (!Array.isArray(ignoreApps) || ignoreApps.length > 32 || !ignoreApps.every(isBackgroundAudioSelector)) {
-    fail('backgroundAudio.ignoreApps must contain at most 32 exact application IDs or binary names');
+    fail('audioDucking.ignoreApps must contain at most 32 exact application IDs or binary names');
   }
   return {
-    enabled: boolean(value.enabled, false, 'backgroundAudio.enabled must be true or false'),
-    gain: number(value.gain, 0.2, 0.05, 1, 'backgroundAudio.gain must be 0.05–1 linear gain'),
+    enabled: boolean(value.enabled, false, 'audioDucking.enabled must be true or false'),
+    gain: number(value.gain, 0.2, 0.05, 1, 'audioDucking.gain must be 0.05–1 linear gain'),
     ignoreApps: [...new Set(ignoreApps as string[])],
   };
 }
 
-export function backgroundAudioPolicy(settings: BackgroundAudioPreferences): BackgroundAudioSettings {
+export function audioDuckingPolicy(settings: AudioDuckingPreferences): BackgroundAudioSettings {
   return { mode: settings.enabled ? 'duck-all' : 'off', gain: settings.gain,
     apps: [], excludeApps: [...settings.ignoreApps] };
 }
 
 export function validateFocusPolicy(value: unknown = {}): BackgroundAudioSettings {
-  keys(value, ['mode', 'gain', 'apps', 'excludeApps'], 'backgroundAudio');
+  keys(value, ['mode', 'gain', 'apps', 'excludeApps'], 'focusPolicy');
   const mode = value.mode === undefined ? 'off' : value.mode;
-  if (mode !== 'off' && mode !== 'duck' && mode !== 'duck-all') fail('backgroundAudio.mode must be off, duck or duck-all');
+  if (mode !== 'off' && mode !== 'duck' && mode !== 'duck-all') fail('focusPolicy.mode must be off, duck or duck-all');
   const apps = (name: 'apps' | 'excludeApps') => {
     const list = value[name] === undefined ? [] : value[name];
     if (!Array.isArray(list) || list.length > 32 || !list.every(isBackgroundAudioSelector)) {
-      fail(`backgroundAudio.${name} must contain at most 32 exact application IDs or binary names`);
+      fail(`focusPolicy.${name} must contain at most 32 exact application IDs or binary names`);
     }
     return [...new Set(list as string[])];
   };
   const selected = apps('apps');
-  if (mode === 'duck' && selected.length === 0) fail('backgroundAudio.apps must explicitly select applications before ducking');
-  return { mode, gain: number(value.gain, 0.2, 0.05, 1, 'backgroundAudio.gain must be 0.05–1 linear gain'),
+  if (mode === 'duck' && selected.length === 0) fail('focusPolicy.apps must explicitly select applications before ducking');
+  return { mode, gain: number(value.gain, 0.2, 0.05, 1, 'focusPolicy.gain must be 0.05–1 linear gain'),
     apps: selected, excludeApps: apps('excludeApps') };
 }
 
 export function validateConfig(value: unknown) {
-  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback', 'backgroundAudio'],
+  keys(value, ['voice', 'volume', 'speed', 'pauseSeconds', 'maxMessageSeconds', 'feedback', 'audioDucking'],
     'use only supported voice preferences; device IDs and runtime tuning are not preferences');
   const voice = value.voice === undefined ? 'ljspeech' : value.voice;
   if (typeof voice !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/u.test(voice)) fail('voice must name an installed voice');
@@ -96,7 +96,7 @@ export function validateConfig(value: unknown) {
   keys(feedback, ['receipt', 'steeringReceipt', 'progressUpdates', 'idleReminders'], 'feedback');
   return {
     voice,
-    ...(value.backgroundAudio !== undefined ? { backgroundAudio: validateBackgroundAudio(value.backgroundAudio) } : {}),
+    ...(value.audioDucking !== undefined ? { audioDucking: validateAudioDucking(value.audioDucking) } : {}),
     volume: number(value.volume, 40, 0, 100, 'volume must be 0–100'),
     speed: number(value.speed, 1, 0.5, 2, 'speed must be 0.5–2'),
     pauseSeconds: number(value.pauseSeconds, 0.8, 0.3, 5, 'pauseSeconds must be 0.3–5'),

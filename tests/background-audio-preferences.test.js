@@ -14,7 +14,7 @@ test('preview exposes the enabled switch and ignores apps without writing gains'
     async compareAndSet() { assert.fail('Preview must never write gains'); },
   });
   t.after(() => focus.close());
-  const f = fixture({ loadConfig: () => ({ backgroundAudio: { enabled: true, ignoreApps: ['calls'] } }),
+  const f = fixture({ loadConfig: () => ({ audioDucking: { enabled: true, ignoreApps: ['calls'] } }),
     previewBackgroundAudio: settings => focus.preview(settings) });
   await f.command('ducking preview');
   const notice = f.notices.at(-1)[0];
@@ -25,7 +25,7 @@ test('preview exposes the enabled switch and ignores apps without writing gains'
 });
 
 test('arming snapshots enabled and ignored apps until the next manual off/on', async t => {
-  const preferences = { backgroundAudio: { enabled: true, ignoreApps: ['calls'], gain: 0.3 } };
+  const preferences = { audioDucking: { enabled: true, ignoreApps: ['calls'], gain: 0.3 } };
   const policies = [];
   const f = fixture({ loadConfig: () => preferences,
     startAudioFocus: settings => {
@@ -35,8 +35,8 @@ test('arming snapshots enabled and ignored apps until the next manual off/on', a
   t.after(() => f.command('off'));
   await f.command('on');
   f.audio({ type: 'ready' });
-  preferences.backgroundAudio.enabled = false;
-  preferences.backgroundAudio.ignoreApps.push('music');
+  preferences.audioDucking.enabled = false;
+  preferences.audioDucking.ignoreApps.push('music');
   f.audio({ type: 'playback_state', id: 'first', playing: true, outputEpoch: 1, playbackGeneration: 1 });
   assert.deepEqual(policies, [{ mode: 'duck-all', gain: 0.3, apps: [], excludeApps: ['calls'] }]);
   await f.command('off');
