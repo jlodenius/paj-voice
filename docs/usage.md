@@ -144,6 +144,12 @@ be rejected. Potential speech can still interrupt a readout before recognition r
 the
 request if needed. No raw audio or rejected transcript is saved by these checks.
 
+## Spoken answers
+
+Voice reads concise plain-text answers aloud by default, even after a progress update or with a
+reporting integration active. An already queued spoken answer is not repeated. Longer or formatted
+replies need a separate spoken summary from the model; Voice does not read the full reply aloud.
+
 ## Incoming agent updates
 
 With compatible Paj, incoming updates request a concise summary from your current Pi model. The

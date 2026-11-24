@@ -40,6 +40,37 @@ test('an unsummarized inbox batch requests one fresh summary instead of telling 
   assert.equal(retries.length, 1);
 });
 
+test('an internal Pi continuation retains the inbox batch for the one summary retry', async t => {
+  const f = fixture();
+  t.after(() => f.command('off'));
+  const retries = [];
+  f.pi.sendMessage = message => retries.push(message);
+  await f.command('on'); f.audio({ type: 'ready' });
+  deliver(f, ['worker-outcome']);
+  await start(f, ['worker-outcome']);
+  await f.event('agent_start');
+  await f.event('context', { messages: messages(f, ['worker-outcome']) });
+  await f.event('agent_settled');
+  assert.deepEqual(retries.map(message => message.details.messageIds), [['worker-outcome']]);
+});
+
+test('a new capture cannot carry an old matched inbox batch into a fresh retry', async t => {
+  const f = fixture();
+  t.after(() => f.command('off'));
+  const retries = [];
+  f.pi.sendMessage = message => retries.push(message);
+  await f.command('on'); f.audio({ type: 'ready' });
+  deliver(f, ['old']);
+  await start(f, ['old']);
+  f.audio({ type: 'addressed', id: 'barge-in' });
+  f.audio({ type: 'cancelled', id: 'barge-in' });
+  deliver(f, ['fresh']);
+  await f.event('agent_start');
+  await f.event('context', { messages: messages(f, ['old', 'fresh']) });
+  await f.event('agent_settled');
+  assert.deepEqual(retries.map(message => message.details.messageIds), [['fresh']]);
+});
+
 test('a failed automatic retry is bounded and does not ask the user to request another summary', async t => {
   const f = fixture();
   t.after(() => f.command('off'));

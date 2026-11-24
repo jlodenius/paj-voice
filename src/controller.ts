@@ -425,7 +425,7 @@ export function createVoiceController({
         activity();
         if (purpose === "inbox-summary" && inboxEpoch === epoch)
           inboxSummaryEpoch = epoch;
-        else {
+        else if (purpose !== "progress") {
           turnSpoken = true;
           if (purpose === "answer") finalAnswerSpoken = true;
         }
@@ -762,6 +762,7 @@ export function createVoiceController({
         !turnSpoken &&
         !(inboxSummaryEpoch === epoch && !userOutcomeExpected) &&
         (!reporters.size ||
+          userOutcomeExpected ||
           idleAcknowledgementEpoch === epoch ||
           inboxEpoch === epoch) &&
         text

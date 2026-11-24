@@ -1138,6 +1138,7 @@ export function registerVoice(
   const inboxIds = new Set<string>();
   const pendingInbox = new Map<string, VoiceToken & { retry?: boolean }>();
   const inboxRunIds = new Set<string>();
+  let inboxRunToken: VoiceToken | undefined;
   const retriedInbox = new Set<string>();
   let cancelledInboxRetry = false;
   let inboxRetryTrigger: VoiceToken | undefined;
@@ -1258,7 +1259,6 @@ export function registerVoice(
     )
       return;
     admission?.started();
-    inboxRunIds.clear();
     cancelledInboxRetry = false;
     responseContextMissing = false;
     controller.newRun({ summaryExpected: !backgroundTurn });
@@ -1271,9 +1271,14 @@ export function registerVoice(
       return;
     admission?.settled();
     let retryScheduled = false;
-    const retryIds = [...inboxRunIds].filter(
-      (id) => inboxIds.has(id) && !retriedInbox.has(id),
-    );
+    const retryIds =
+      responseToken &&
+      inboxRunToken?.generation === responseToken.generation &&
+      inboxRunToken?.epoch === responseToken.epoch
+        ? [...inboxRunIds].filter(
+            (id) => inboxIds.has(id) && !retriedInbox.has(id),
+          )
+        : [];
     if (
       !event.aborted &&
       backgroundTurn &&
@@ -1364,6 +1369,13 @@ export function registerVoice(
               .join(""),
       );
     responseContextMissing = !!latestPrompt && !users.includes(latestPrompt);
+    if (
+      inboxRunToken?.generation !== state.generation ||
+      inboxRunToken?.epoch !== state.epoch
+    ) {
+      inboxRunIds.clear();
+      inboxRunToken = { generation: state.generation, epoch: state.epoch };
+    }
     for (const message of event.messages) {
       if (
         responseContextMissing ||
@@ -1448,8 +1460,8 @@ export function registerVoice(
         : cancelledInboxRetry
           ? "An obsolete inbox-summary retry started this run. Do not narrate its old subject or treat it as a user answer. Automatic final speech is disabled for this retry. If a genuinely newer user request is represented here, answer it explicitly with voice_speak purpose=answer and its current generation and epoch; do not rebind old summary text."
           : "The latest voice request has not reached this model context yet; do not call voice_speak for an older request.",
-      reporter ||
-        "For a simple answer, a short final plain-text reply is spoken automatically. For longer coding results, use voice_speak for a separate brief outcome, blocker or question. Do not narrate tool output. Avoid duplicate spoken summaries.",
+      reporter ?? "",
+      "For a simple answer, a short final plain-text reply is spoken automatically if the answer has not already been queued. For longer coding results, use voice_speak for a separate brief outcome, blocker or question. Do not narrate tool output. Avoid duplicate spoken summaries.",
       preferences?.feedback?.progressUpdates === false ||
       preferences?.feedback?.idleReminders === false
         ? "User feedback preferences apply to all reporting integrations: do not generate unsolicited progress or idle notices when that preference is disabled."

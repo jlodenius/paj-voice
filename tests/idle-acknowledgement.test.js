@@ -106,7 +106,7 @@ test('stale or unavailable acknowledgement cannot silence another generation or 
   assert.equal(f.controller.acknowledgeIdle(old).status, 'stale');
 });
 
-test('acknowledgement confirmation works once with a reporting integration without taking over later replies', async t => {
+test('acknowledgement confirmation and later short answers work with a reporting integration', async t => {
   const f = extension();
   t.after(() => f.command('off'));
   f.controller.api.registerReporter({ id: 'reporter', instructions: 'Report outcomes aloud.' });
@@ -122,7 +122,7 @@ test('acknowledgement confirmation works once with a reporting integration witho
   await f.event('agent_start'); await f.event('context', { messages: [] });
   await f.event('message_end', { message: { role: 'assistant', stopReason: 'stop',
     content: [{ type: 'text', text: 'A different result.' }] } });
-  assert.equal(f.frames.some(frame => frame.text === 'A different result.'), false);
+  assert.equal(f.frames.filter(frame => frame.text === 'A different result.').length, 1);
 });
 
 test('the agent acknowledgement tool changes only reminders and supports one plain final confirmation', async t => {

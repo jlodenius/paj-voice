@@ -115,7 +115,7 @@ test('inbox progress or its summary cannot discharge a real user outcome obligat
       text: 'The worker is still reviewing.', ...(purpose ? { purpose } : {}) });
     await f.event('message_end', { message: reply('') });
     await f.event('agent_settled');
-    assert.match(speech(f).at(-1).text, purpose === 'progress' ? /finished for now/ : /did not produce a spoken summary/);
+    assert.match(speech(f).at(-1).text, /did not produce a spoken summary/);
     assert.equal(speech(f).length, 3);
   }
 });

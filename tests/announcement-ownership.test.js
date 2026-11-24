@@ -81,5 +81,5 @@ test('explicit progress remains distinct from an actual answer', async t => {
   await f.tools.get('voice_speak').execute('progress', { ...f.controller.state(),
     purpose: 'progress', text: 'I am checking the tests.' });
   await f.event('agent_settled');
-  assert.equal(speech(f).at(-1).key, 'completion');
+  assert.equal(speech(f).at(-1).key, 'fallback');
 });
