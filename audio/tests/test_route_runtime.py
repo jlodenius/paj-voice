@@ -103,7 +103,7 @@ class RouteRuntimeTests(unittest.TestCase):
             def __init__(self, sink, emit):
                 self.sink, self.closed = sink, False
 
-            def play(self, pcm, ident=None):
+            def play(self, pcm, ident=None, *, rate=None):
                 test.played.append((self.sink.selected.name, test.clock()))
 
             def cancel(self):
@@ -115,6 +115,7 @@ class RouteRuntimeTests(unittest.TestCase):
         models = types.SimpleNamespace(rate=16000, transcribe=Mock(), synthesize=Mock(),
             np=types.SimpleNamespace(arange=lambda size: Vector(), sin=lambda value: Vector(),
                                      hanning=lambda size: Vector(), pi=3.14))
+        models.output = types.SimpleNamespace(rate=models.rate, synthesize=models.synthesize)
         segments = open_mic.Segments
         for name, replacement in [('SpeechInference', lambda **kwargs: models),
                                   ('Segments', lambda *args, **kwargs: segments(*args, clock=self.clock, **kwargs)),

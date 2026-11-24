@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from paj_voice_audio.open_mic import validate
-from paj_voice_audio.speech import SpeechInference
+from paj_voice_audio.speech import SpeechOutput
 from paj_voice_audio.voices import installed_voices
 
 
@@ -46,9 +46,7 @@ class VoicePreferencesTests(unittest.TestCase):
         def synthesize(text, syn_config):
             configs.append(syn_config)
             return [chunk]
-        models = SpeechInference.__new__(SpeechInference)
-        models.voice = types.SimpleNamespace(synthesize=synthesize)
-        models.rate, models.volume, models.length_scale = 16000, 0.25, 0.5
+        models = SpeechOutput(types.SimpleNamespace(synthesize=synthesize), 16000, 0.25, 0.5)
         with patch.dict('sys.modules', {'piper': types.SimpleNamespace(
                 SynthesisConfig=lambda **kwargs: kwargs)}):
             self.assertEqual(models.synthesize('A short answer.'), b'\0\0')

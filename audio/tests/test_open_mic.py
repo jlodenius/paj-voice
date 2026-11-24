@@ -75,6 +75,8 @@ class OpenMicTests(unittest.TestCase):
                                        np=types.SimpleNamespace(arange=lambda size: Vector(), sin=lambda value: Vector(),
                                                                 hanning=lambda size: Vector(), pi=3.14))
 
+        models.output = types.SimpleNamespace(rate=models.rate, synthesize=models.synthesize)
+
         def load(**kwargs):
             load_entered.set()
             if hold_load:
@@ -115,7 +117,7 @@ class OpenMicTests(unittest.TestCase):
             def abort(self):
                 pass
 
-            def write(self, pcm, current):
+            def write(self, pcm, current, *, rate):
                 return write(pcm, current) if write else current()
 
             def drain(self, current):
@@ -131,7 +133,7 @@ class OpenMicTests(unittest.TestCase):
             def __init__(self, sink, emit):
                 self.paused = self.closed = False
 
-            def play(self, pcm, ident=None):
+            def play(self, pcm, ident=None, *, rate=None):
                 if self.closed:
                     raise AssertionError("Playback after close")
                 played.append(ident)

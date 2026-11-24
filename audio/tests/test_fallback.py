@@ -216,7 +216,7 @@ class FallbackTests(unittest.TestCase):
         runtime.using_fallback = True
         runtime.config = {'turn': {'silenceMs': 800}}
         entered, release = threading.Event(), threading.Event()
-        def write(pcm, current):
+        def write(pcm, current, *, rate):
             writes.append(runtime._capture_allowed(pcm, True, now[0]))
             entered.set()
             release.wait(1)

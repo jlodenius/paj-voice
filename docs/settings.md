@@ -5,7 +5,8 @@
 ## Options
 
 These settings go inside the shared file's `voice` section. All are optional.
-Changes apply the next time you start or resume Voice, not while it is already listening.
+Changes apply the next time you start or resume Voice. While Voice is active,
+`/paj-voice reload` can apply just the output voice, volume, and speed.
 
 | Preference                 | Default                | Available options                         | Meaning                                 |
 | -------------------------- | ---------------------- | ----------------------------------------- | --------------------------------------- |
@@ -30,9 +31,9 @@ See [all defaults](../examples/paj.json) for a complete example.
 
 Run `/paj-voice voices` to list installed voices. In the shared `paj.json`, set
 `"voice": "amy"` **inside the existing `voice` section** to select Piper Amy (US English, medium).
-Leave other fields alone. The choice applies the next time you start or resume Voice. To switch
-back, set that field to `"ljspeech"` or remove it to use the LJSpeech default. This changes speech
-output only.
+Leave other fields alone. Use `/paj-voice reload` to apply the saved output settings while Voice
+is active, or wait until the next start or resume. To switch back, set the field to `"ljspeech"`
+or remove it to use the LJSpeech default.
 
 ### Audio ducking
 

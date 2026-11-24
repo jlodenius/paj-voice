@@ -463,8 +463,10 @@ class PipeSink:
         self.closed = False
         self.draining = False
 
-    def write(self, pcm, current):
-        if len(pcm) % 2 or len(pcm) > self.rate * 2 * 60:
+    def write(self, pcm, current, *, rate=None):
+        rate = self.rate if rate is None else rate
+        if (type(rate) is not int or not 8000 <= rate <= 48000
+                or len(pcm) % 2 or len(pcm) > rate * 120):
             raise RuntimeError("Synthesized audio exceeds safety limit")
         with self.lock:
             serial = self.serial
@@ -481,12 +483,12 @@ class PipeSink:
                     if self.child is None:
                         try:
                             self.child = self.launch(
-                                self.executable, self.node, self.rate, False
+                                self.executable, self.node, rate, False
                             )
                         except ChildStartError as error:
                             self.child = error.child
                             raise
-                        lead_in = self.rate * self.LEAD_IN_MS // 1000 * 2
+                        lead_in = rate * self.LEAD_IN_MS // 1000 * 2
                     child = self.child
                     child.health()
                     fd = child.process.stdin.fileno()

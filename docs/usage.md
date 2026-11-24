@@ -9,6 +9,7 @@
 | `/paj-voice on`                 | Start Voice, with confirmation.                     |
 | `/paj-voice off`                | Request audio shutdown; agent work continues.       |
 | `/paj-voice pause` / `resume`   | Pause audio / resume with fresh confirmation.       |
+| `/paj-voice reload`             | Apply saved speaking voice, speed, and volume.      |
 | `/paj-voice pause 10 seconds`   | Pause only the microphone for a bounded duration.   |
 | `/paj-voice stop`               | Stop the current spoken reply, not agent work.      |
 | `/paj-voice route [name]`       | List saved audio selections or switch to one.       |
@@ -21,6 +22,12 @@
 current selection. You can also ask to switch to a saved selection while Voice is listening.
 
 For device loss or fallback, see [audio recovery](troubleshooting.md#audio-recovery).
+
+Type `/paj-voice reload` in the active terminal session after saving [output settings](settings.md).
+Speech already synthesizing or playing keeps the previous settings. Queued speech uses the new
+settings if it starts synthesizing after the swap. An invalid setting or unavailable voice leaves
+all three active settings unchanged. Reload does not arm Voice, reopen a paused microphone, or
+apply changes to other preferences.
 
 ## Speaker protection
 

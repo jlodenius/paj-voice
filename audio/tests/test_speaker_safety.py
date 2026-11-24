@@ -197,7 +197,7 @@ class SpeakerSafetyTests(unittest.TestCase):
             deliver.wait(2)
             segments.feed(pcm, voiced, captured_at=captured_at)
         runtime.gate.receiver.receiver = types.SimpleNamespace(feed=feed, close=segments.close)
-        def write(pcm, current):
+        def write(pcm, current, *, rate):
             audible.set()
             finish.wait(2)
             return current()

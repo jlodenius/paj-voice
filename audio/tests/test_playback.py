@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from paj_voice_audio.audio import Speaker
 from paj_voice_audio.devices import Node, PipeSink
-from paj_voice_audio.speech import SpeechInference
+from paj_voice_audio.speech import SpeechOutput
 
 
 class OutputPipe:
@@ -58,8 +58,9 @@ class PlaybackTests(unittest.TestCase):
     def sink(self, discard=0):
         outputs = []
 
-        def launch(*args):
+        def launch(executable, node, rate, capture):
             output = OutputPipe(discard)
+            output.rate = rate
             outputs.append(output)
             return output
 
@@ -71,7 +72,7 @@ class PlaybackTests(unittest.TestCase):
     def pcm(self):
         return b"\x12\x34\x56\x78" * 5000 + b"\x7f\x01"
 
-    def play(self, sink, pcm):
+    def play(self, sink, pcm, rate=None):
         done = threading.Event()
         events = []
 
@@ -81,7 +82,7 @@ class PlaybackTests(unittest.TestCase):
 
         speaker = Speaker(sink, emit)
         self.addCleanup(speaker.close)
-        speaker.play(pcm, ident="receipt")
+        speaker.play(pcm, ident="receipt", rate=rate)
         self.assertTrue(done.wait(2), events)
         self.assertEqual(events, [{"type": "played", "id": "receipt"}])
         self.assertIsNone(sink.child)
@@ -90,7 +91,7 @@ class PlaybackTests(unittest.TestCase):
     def assert_original(self, transport, original):
         written = bytes(transport.written)
         self.assertTrue(written.endswith(original))
-        self.assertEqual(written[:-len(original)], bytes(self.rate * 300 // 1000 * 2))
+        self.assertEqual(written[:-len(original)], bytes(transport.rate * 300 // 1000 * 2))
         self.assertTrue(transport.stopped)
         self.assertFalse(transport.thread.is_alive())
 
@@ -123,13 +124,11 @@ class PlaybackTests(unittest.TestCase):
     def test_synthesis_chunks_survive_speaker_write_and_eof_exactly(self):
         original = self.pcm()
         chunks = [original[:14], original[14:5000], original[5000:]]
-        inference = SpeechInference.__new__(SpeechInference)
-        inference.rate = self.rate
-        inference.volume, inference.length_scale = 0.4, 1
-        inference.voice = SimpleNamespace(synthesize=lambda *args, **kwargs: [
+        voice = SimpleNamespace(synthesize=lambda *args, **kwargs: [
             SimpleNamespace(sample_channels=1, sample_width=2, sample_rate=self.rate,
                             audio_int16_bytes=chunk) for chunk in chunks
         ])
+        inference = SpeechOutput(voice, self.rate, 0.4, 1)
         with patch.dict("sys.modules", {"piper": SimpleNamespace(SynthesisConfig=lambda **kw: kw)}):
             synthesized = inference.synthesize("Got it.")
         self.assertEqual(synthesized, original)
@@ -137,6 +136,14 @@ class PlaybackTests(unittest.TestCase):
         self.play(sink, synthesized)
         self.assertEqual(len(outputs), 1)
         self.assert_original(outputs[0], original)
+
+    def test_playback_uses_the_jobs_native_rate_for_the_stream_and_lead_in(self):
+        sink, outputs = self.sink()
+        original = self.pcm()
+        self.play(sink, original, rate=16000)
+        self.assertEqual(outputs[0].rate, 16000)
+        self.assert_original(outputs[0], original)
+        self.assertEqual(sink.rate, self.rate)
 
     def test_partial_writes_and_multiple_chunks_prime_only_once(self):
         sink, outputs = self.sink()

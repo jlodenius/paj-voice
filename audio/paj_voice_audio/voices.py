@@ -28,3 +28,22 @@ def installed_voices(root):
             paths[key] = str(Path(path) if Path(path).is_absolute() else root / path)
         result[ident] = {'label': label, **paths}
     return result
+
+
+def resolve_voice(root, ident):
+    catalog = installed_voices(root)
+    if not isinstance(ident, str) or ident not in catalog:
+        raise ValueError('Voice is not installed; use /paj-voice voices to list packaged choices')
+    return {key: catalog[ident][key] for key in ('model', 'config')}
+
+
+def validate_voice_assets(model, config):
+    for path in (model, config):
+        if not isinstance(path, str) or not Path(path).is_absolute():
+            raise ValueError("Speech assets must be absolute local paths")
+        if not Path(path).is_file():
+            raise ValueError("Missing local speech asset; build the bundled package first")
+    metadata = json.loads(Path(config).read_text())
+    language = metadata.get("language", {}).get("code") or metadata.get("espeak", {}).get("voice")
+    if not isinstance(language, str) or not re.fullmatch(r"en(?:[-_][a-z0-9]+)*", language.lower()):
+        raise ValueError("An English Piper voice is required")

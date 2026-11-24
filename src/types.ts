@@ -122,6 +122,7 @@ export interface CompanionFrame {
   id?: unknown;
   text?: unknown;
   completed?: unknown;
+  applied?: unknown;
   input?: unknown;
   output?: unknown;
   fallback?: unknown;
@@ -142,6 +143,11 @@ export type CompanionCommand =
   | { type: "stop" | "shutdown" }
   | { type: "mute"; muted: boolean }
   | { type: "input_pause"; id: string; seconds: number }
+  | {
+      type: "reload_tts";
+      id: string;
+      tts: { voice: string; volume: number; lengthScale: number };
+    }
   | {
       type: "speak";
       id: string;

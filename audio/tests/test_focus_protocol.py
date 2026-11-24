@@ -18,7 +18,7 @@ class FocusProtocolTests(unittest.TestCase):
             original = open_mic.Speaker
 
             class Speaker(ActualSpeaker):
-                def play(self, pcm, ident=None):
+                def play(self, pcm, ident=None, *, rate=None):
                     original.play(self, pcm, ident)
                     super().play(pcm, ident)
 
@@ -28,7 +28,7 @@ class FocusProtocolTests(unittest.TestCase):
                 def __init__(self, *args):
                     pass
 
-                def write(self, pcm, current):
+                def write(self, pcm, current, *, rate):
                     writing.set()
                     while not gate.wait(0.005):
                         if not current():

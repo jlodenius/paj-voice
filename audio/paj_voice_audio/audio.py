@@ -121,14 +121,15 @@ class Speaker:
         self.thread = threading.Thread(target=self._run, daemon=True, name="voice-playback")
         self.thread.start()
 
-    def play(self, pcm, ident=None):
-        if not isinstance(pcm, bytes) or len(pcm) % 2 or len(pcm) > self.sink.rate * 120:
+    def play(self, pcm, ident=None, *, rate=None):
+        rate = self.sink.rate if rate is None else rate
+        if not isinstance(pcm, bytes) or len(pcm) % 2 or len(pcm) > rate * 120:
             raise ValueError("Invalid bounded playback")
         with self.cv:
             if self.closed:
                 return
             self.generation += 1
-            self.active = {"pcm": pcm, "offset": 0, "id": ident}
+            self.active = {"pcm": pcm, "offset": 0, "id": ident, "rate": rate}
             self.cv.notify_all()
 
     def cancel(self):
@@ -157,11 +158,11 @@ class Speaker:
                     continue
                 if self.activity:
                     self.activity({"type": "playing", "id": item["id"], "generation": generation})
-                size = max(2, self.sink.rate // 25 * 2)
+                size = max(2, item['rate'] // 25 * 2)
                 while self._current(generation, item) and item["offset"] < len(item["pcm"]):
                     end = min(len(item["pcm"]), item["offset"] + size)
                     if not self.sink.write(item["pcm"][item["offset"]:end],
-                                           lambda: self._current(generation, item)):
+                                           lambda: self._current(generation, item), rate=item['rate']):
                         break
                     with self.cv:
                         if self._current(generation, item):

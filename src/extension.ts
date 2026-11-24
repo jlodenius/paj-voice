@@ -214,6 +214,33 @@ export function registerVoice(
     (VoiceToken & { text: string; purpose?: "inbox-summary" }) | undefined;
   let latestPrompt: string | undefined;
   let preferences: VoicePreferences | undefined;
+  let pendingTts:
+    | {
+        id: string;
+        settings: Pick<VoicePreferences, "voice" | "volume" | "speed">;
+      }
+    | undefined;
+  const ttsReloadEvent = (frame: CompanionFrame, generation: string | null) => {
+    if (frame.type !== "tts_reloaded") return false;
+    if (
+      pendingTts &&
+      frame.id === pendingTts.id &&
+      typeof frame.applied === "boolean" &&
+      generation === controller.state().generation
+    ) {
+      const { settings } = pendingTts;
+      pendingTts = undefined;
+      if (frame.applied && preferences) {
+        preferences = { ...preferences, ...settings };
+        notify("Voice output reloaded.");
+      } else
+        notify(
+          "Could not reload Voice output; the previous output is unchanged.",
+          "warning",
+        );
+    }
+    return true;
+  };
   const voiceInputs = new Map<string, VoiceToken>();
   const recoveries: { sessionId: string; text: string }[] = [];
   const notify = (text: string, level: NotificationLevel = "info") => {
@@ -760,7 +787,11 @@ export function registerVoice(
           onEvent(frame) {
             if (activation !== lifetime || closed || companion !== launched)
               return;
-            if (availabilityEvent(frame, generation)) return;
+            if (
+              availabilityEvent(frame, generation) ||
+              ttsReloadEvent(frame, generation)
+            )
+              return;
             focusEvent(frame, generation, focusNamespace);
             if (frame.type === "error") {
               if (settled) {
@@ -810,6 +841,7 @@ export function registerVoice(
     const worker = companion;
     if (!worker) return retiringAudio;
     companion = undefined;
+    pendingTts = undefined;
     let finish!: (confirmed: boolean) => void;
     const result = new Promise<boolean>((resolve) => {
       finish = resolve;
@@ -1443,13 +1475,14 @@ export function registerVoice(
   });
   pi.registerCommand("paj-voice", {
     description:
-      "Continuous open mic: on, off, pause, resume, stop, status, devices, setup <name>, protection <name> [speakers|headphones], route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, availability diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.",
+      "Continuous open mic: on, off, pause, resume, reload, stop, status, devices, setup <name>, protection <name> [speakers|headphones], route [name], fallback [name|off|setup <name>], ducking preview/diagnostics, availability diagnostics, voices, recover. Compatibility aliases: mute, unmute. Armed speech goes to this Pi model with normal tool permissions.",
     getArgumentCompletions: (prefix) =>
       [
         "on",
         "off",
         "pause",
         "resume",
+        "reload",
         "stop",
         "status",
         "devices",
@@ -1796,6 +1829,52 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
         }
         return;
       }
+      if (command === "reload") {
+        const state = controller.state();
+        if (
+          closed ||
+          !current.hasUI ||
+          current.mode !== "tui" ||
+          !companion ||
+          !preferences ||
+          !state.enabled ||
+          state.starting ||
+          state.muted ||
+          switching ||
+          arming ||
+          promptDepth ||
+          state.sessionId !== current.sessionManager.getSessionId()
+        ) {
+          notify(
+            "Voice output can only be reloaded in its active terminal session.",
+            "warning",
+          );
+          return;
+        }
+        if (pendingTts) {
+          notify("A Voice output reload is already pending.", "warning");
+          return;
+        }
+        try {
+          const { voice, volume, speed } = validateConfig(
+            (options.loadConfig ?? loadConfig)(configPath(env)),
+          );
+          const id = randomUUID();
+          pendingTts = { id, settings: { voice, volume, speed } };
+          if (
+            companion.send({
+              type: "reload_tts",
+              id,
+              tts: { voice, volume: volume / 100, lengthScale: 1 / speed },
+            }) === false
+          )
+            throw new Error("Voice worker unavailable");
+        } catch {
+          pendingTts = undefined;
+          notify("Could not request a Voice output reload.", "warning");
+        }
+        return;
+      }
       if (command === "off") {
         await reportAudioStop("Voice off", stop(), current);
         return;
@@ -1844,7 +1923,7 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
       }
       if (!["on", "devices", "setup", "voices"].includes(command)) {
         notify(
-          "Usage: /paj-voice [on|off|pause|resume|stop|status|devices|setup <name>|protection <name> [speakers|headphones]|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|availability diagnostics|voices|recover]. Compatibility aliases: mute, unmute.",
+          "Usage: /paj-voice [on|off|pause|resume|reload|stop|status|devices|setup <name>|protection <name> [speakers|headphones]|route [name]|fallback [name|off|setup <name>]|ducking preview|ducking diagnostics|availability diagnostics|voices|recover]. Compatibility aliases: mute, unmute.",
           "warning",
         );
         return;
@@ -2169,7 +2248,11 @@ Voice stays off; arming remains a separate confirmation.`,
           generation: state.generation,
           onEvent(frame, generation) {
             if (companion !== launched) return;
-            if (availabilityEvent(frame, generation)) return;
+            if (
+              availabilityEvent(frame, generation) ||
+              ttsReloadEvent(frame, generation)
+            )
+              return;
             focusEvent(frame, generation, focusNamespace);
             if (
               controller.state().generation === generation &&

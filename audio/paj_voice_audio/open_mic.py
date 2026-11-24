@@ -1,5 +1,4 @@
 import array
-import json
 import math
 import os
 from pathlib import Path
@@ -11,7 +10,8 @@ import time
 from .input_ready import InputReady
 from .audio import Capture, Segments, Speaker
 from .devices import CaptureFault, Graph, Node, PipeSink, exact_name
-from .speech import SpeechInference
+from .speech import SpeechInference, SpeechOutput
+from .voices import resolve_voice, validate_voice_assets
 
 
 def validate(value):
@@ -29,11 +29,7 @@ def validate(value):
     stt.setdefault("model", str(bundle / "stt"))
     stt.setdefault("computeType", "int8")
     if "voice" in tts:
-        from .voices import installed_voices
-        catalog = installed_voices(bundle)
-        if not isinstance(tts['voice'], str) or tts['voice'] not in catalog:
-            raise ValueError('Voice is not installed; use /paj-voice voices to list packaged choices')
-        tts.update({key: catalog[tts['voice']][key] for key in ('model', 'config')})
+        tts.update(resolve_voice(bundle, tts['voice']))
     for key, default, low, high in (("volume", 0.4, 0, 1), ("lengthScale", 1, 0.5, 2)):
         tts.setdefault(key, default)
         if type(tts[key]) not in (int, float) or not math.isfinite(tts[key]) or not low <= tts[key] <= high:
@@ -42,18 +38,15 @@ def validate(value):
     tts.setdefault("config", tts["model"] + ".json")
     if stt["computeType"] not in ("int8", "float32"):
         raise ValueError("Invalid STT compute type")
-    for path, directory in ((stt["model"], True), (tts["model"], False), (tts["config"], False)):
-        if not isinstance(path, str) or not Path(path).is_absolute():
-            raise ValueError("Speech assets must be absolute local paths")
-        if not (Path(path).is_dir() if directory else Path(path).is_file()):
-            raise ValueError("Missing local speech asset; build the bundled package first")
+    path = stt["model"]
+    if not isinstance(path, str) or not Path(path).is_absolute():
+        raise ValueError("Speech assets must be absolute local paths")
+    if not Path(path).is_dir():
+        raise ValueError("Missing local speech asset; build the bundled package first")
+    validate_voice_assets(tts['model'], tts['config'])
     for name in ("model.bin", "config.json", "tokenizer.json"):
-        if not (Path(stt["model"]) / name).is_file():
+        if not (Path(path) / name).is_file():
             raise ValueError("Incomplete local Whisper model")
-    metadata = json.loads(Path(tts["config"]).read_text())
-    language = metadata.get("language", {}).get("code") or metadata.get("espeak", {}).get("voice")
-    if not isinstance(language, str) or not re.fullmatch(r"en(?:[-_][a-z0-9]+)*", language.lower()):
-        raise ValueError("An English Piper voice is required")
     audio = value.get("audio", {})
     if (not isinstance(audio, dict) or set(audio) - {"input", "output", "echoCancellation", "inputDevice", "outputDevice", "fallback", "speakerMode"}
             or audio.get("echoCancellation") not in ("none", "external")
@@ -121,6 +114,8 @@ class Runtime:
         self.clock = clock
         self.lock = threading.RLock()
         self.model_lock = threading.Lock()
+        self.speech_bundle = Path(os.environ.get('PAJ_VOICE_SPEECH_BUNDLE', '/nonexistent'))
+        self.tts_reload_inflight = False
         self.input_cleanup_lock = threading.Lock()
         self.retired_inputs = []
         self.closed = self.failed = self.configured = self.ready = self.muted = False
@@ -164,6 +159,9 @@ class Runtime:
             return
         if kind == 'input_pause':
             self._pause_input(frame)
+            return
+        if kind == 'reload_tts':
+            self._reload_tts(frame)
             return
         with self.lock:
             if self.closed:
@@ -220,6 +218,77 @@ class Runtime:
             self._mute()
         else:
             raise ValueError("Unknown command; resume requires a fresh companion")
+
+    def _reload_tts(self, frame):
+        ident = frame.get('id')
+        if not isinstance(ident, str) or not re.fullmatch(r'[\w-]{1,128}', ident):
+            return
+        tts = frame.get('tts')
+        valid = (set(frame) == {'type', 'id', 'tts'} and isinstance(tts, dict)
+                 and set(tts) == {'voice', 'volume', 'lengthScale'}
+                 and isinstance(tts['voice'], str) and re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', tts['voice'])
+                 and type(tts['volume']) in (int, float) and 0 <= tts['volume'] <= 1
+                 and type(tts['lengthScale']) in (int, float) and 0.5 <= tts['lengthScale'] <= 2)
+        with self.lock:
+            if self.closed or self.failed:
+                return
+            if not valid or not self._tts_reload_ready() or self.tts_reload_inflight:
+                self.emit({'type': 'tts_reloaded', 'id': ident, 'applied': False})
+                return
+            fence = self.epoch, self.output_epoch
+            self.tts_reload_inflight = True
+            completed = threading.Event()
+
+            def expire():
+                with self.lock:
+                    if completed.is_set() or self.closed or self.failed:
+                        return
+                    completed.set()
+                    self.emit({'type': 'tts_reloaded', 'id': ident, 'applied': False})
+
+            timer = threading.Timer(30, expire)
+            timer.daemon = True
+            try:
+                timer.start()
+                threading.Thread(target=self._load_tts, args=(ident, dict(tts), fence, timer, completed),
+                                 daemon=True, name='voice-tts-reload').start()
+            except RuntimeError:
+                completed.set()
+                timer.cancel()
+                self.tts_reload_inflight = False
+                self.emit({'type': 'tts_reloaded', 'id': ident, 'applied': False})
+
+    def _tts_reload_ready(self):
+        return self.configured and self.ready and not self.muted and self.models is not None
+
+    def _load_tts(self, ident, tts, fence, timer, completed):
+        candidate = None
+        try:
+            paths = resolve_voice(self.speech_bundle, tts['voice'])
+            validate_voice_assets(paths['model'], paths['config'])
+            # Loading owns no inference lock; recognition and the current output can keep working.
+            candidate = SpeechOutput.load(paths['model'], paths['config'], volume=tts['volume'],
+                                          length_scale=tts['lengthScale'])
+        except Exception:
+            pass
+        retired = None
+        try:
+            with self.lock:
+                timer.cancel()
+                self.tts_reload_inflight = False
+                if self.closed or self.failed or completed.is_set():
+                    return
+                completed.set()
+                applied = (candidate is not None and self._tts_reload_ready()
+                           and fence == (self.epoch, self.output_epoch))
+                if applied:
+                    # Hold the retired session until outside the runtime lock, including its cleanup.
+                    retired, self.models.output = self.models.output, candidate
+                self.emit({'type': 'tts_reloaded', 'id': ident, 'applied': applied})
+        except Exception as error:
+            self.fail(error)
+        finally:
+            del retired
 
     def _pause_state(self):
         pause = self.input_pause
@@ -735,10 +804,12 @@ class Runtime:
                     with self.lock:
                         if not self._speech_current(job):
                             continue
+                        output = self.models.output
                         self.busy["synthesis"] = (self.clock(), 10)
                     try:
-                        pcm = self.models.synthesize(job["text"])
+                        rate, pcm = output.rate, output.synthesize(job["text"])
                     finally:
+                        del output
                         self.busy["synthesis"] = None
                 with self.lock:
                     if self.active_speech is job:
@@ -747,7 +818,7 @@ class Runtime:
                         done = threading.Event()
                         self.current_playback = (job["id"], done)
                         try:
-                            self.speaker.play(pcm, ident=job["id"])
+                            self.speaker.play(pcm, ident=job["id"], rate=rate)
                             played = True
                             self.emit({"type": "speech_start", "id": job["id"]})
                         except Exception:

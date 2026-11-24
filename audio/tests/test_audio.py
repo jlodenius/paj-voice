@@ -177,7 +177,7 @@ class Sink:
         self.aborted = 0
         self.closed = False
 
-    def write(self, pcm, current):
+    def write(self, pcm, current, *, rate):
         self.started.set()
         while not self.release.wait(0.005):
             if not current():
