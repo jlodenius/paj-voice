@@ -2374,8 +2374,18 @@ Voice stays off; arming remains a separate confirmation.`,
         armedFallback = selectedFallback;
         activeFallback = runtimeFallback;
         controller.configureFeedback(selectedPreferences.feedback);
+        if (!currentArm() || (reloadPlan && promptDepth)) return;
         const state = controller.start(id);
-        admission = createAdmission({
+        const canLaunch = () => {
+          if (!currentArm()) return false;
+          if (reloadPlan && promptDepth) {
+            stop();
+            return false;
+          }
+          return true;
+        };
+        if (!canLaunch()) return;
+        const nextAdmission = createAdmission({
           pi,
           getContext: () => ctx,
           queryPaj,
@@ -2383,7 +2393,14 @@ Voice stays off; arming remains a separate confirmation.`,
           generation: state.generation,
           env,
         });
-        admission.validate();
+        try {
+          nextAdmission.validate();
+        } catch (error) {
+          if (canLaunch()) throw error;
+          return;
+        }
+        if (!canLaunch()) return;
+        admission = nextAdmission;
         let launched: Companion | undefined;
         const namespace = captureNamespace();
         const focusNamespace = randomUUID();

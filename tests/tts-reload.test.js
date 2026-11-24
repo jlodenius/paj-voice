@@ -105,6 +105,32 @@ test('a synchronous off during reload shutdown cancels replacement', async () =>
   assert.equal(f.controller.state().enabled, false);
 });
 
+for (const command of ['off', 'pause']) {
+  for (const phase of ['starting', 'validation']) {
+    test(`synchronous ${command} during replacement ${phase} prevents capture startup`, async () => {
+      let settings = {};
+      const f = fixture({ loadConfig: () => settings });
+      await f.command('on');
+      f.audio({ type: 'ready' });
+      const original = f.controller.state().generation;
+      let cancellation;
+      const cancel = () => {
+        const state = f.controller.state();
+        if (state.starting && state.generation !== original)
+          cancellation = f.command(command);
+      };
+      f.events.on(phase === 'starting' ? 'paj-voice:state:v1' : 'paj:external:v1', cancel);
+      settings = { pauseSeconds: 2 };
+      await f.command('reload');
+      assert.ok(cancellation);
+      await cancellation;
+      assert.equal(f.workers.length, 1);
+      assert.equal(f.workers[0].closed, true);
+      assert.equal(f.controller.state().muted, command === 'pause');
+    });
+  }
+}
+
 test('reload rejects invalid preferences, negative acknowledgements, and stale worker events', async t => {
   let settings = {};
   const f = fixture({ loadConfig: () => settings });
