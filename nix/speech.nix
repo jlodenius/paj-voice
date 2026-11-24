@@ -2,7 +2,6 @@
   pkgs ? import ./pkgs.nix {},
   voiceModels ? {},
 }:
-assert builtins.length (builtins.attrNames voiceModels) <= 31;
 assert builtins.all (name: builtins.match "[a-z][a-z0-9_-]{0,63}" name != null) (builtins.attrNames voiceModels);
 let
   manifest = builtins.fromJSON (builtins.readFile ../models/manifest.json);
@@ -12,11 +11,17 @@ let
     value;
   voiceCatalog = {
     ljspeech = { label = "LJSpeech — US English"; model = "tts/model.onnx"; config = "tts/model.onnx.json"; };
+    amy = { label = "Amy — US English (medium)"; model = "tts/amy/model.onnx"; config = "tts/amy/model.onnx.json"; };
   } // pkgs.lib.mapAttrs (_: voice: {
     inherit (voice) label;
     model = packagedPath voice.model;
     config = packagedPath voice.config;
   }) voiceModels;
+  assetsForCatalog = builtins.filter
+    (entry: !(voiceModels ? amy)
+      || (!(pkgs.lib.hasPrefix "tts/amy/" entry.path) && entry.path != "voice-notices/amy.txt"))
+    assets;
+  sources = removeAttrs manifest.models (pkgs.lib.optional (voiceModels ? amy) "amy");
   models = pkgs.runCommand "paj-voice-speech-models" {} ''
     mkdir -p "$out"
     cp ${pkgs.writeText "paj-voice-catalog.json" (builtins.toJSON voiceCatalog)} "$out/voices.json"
@@ -34,10 +39,8 @@ let
         mkdir -p "$out/$(dirname '${entry.path}')"
         ln -s ${source} "$out/${entry.path}"
       '')
-      assets}
-    cp ${pkgs.writeText "speech-source.json" (builtins.toJSON {
-      inherit (manifest.models) stt tts;
-    })} "$out/source.json"
+      assetsForCatalog}
+    cp ${pkgs.writeText "speech-source.json" (builtins.toJSON sources)} "$out/source.json"
   '';
   ps = pkgs.python313.pkgs;
   piper = (pkgs.piper-tts.override {
@@ -53,6 +56,8 @@ let
     ps.pysilero-vad
     (ps.toPythonModule piper)
   ]);
-in {
+in
+assert builtins.length (builtins.attrNames voiceCatalog) <= 32;
+{
   inherit python models;
 }

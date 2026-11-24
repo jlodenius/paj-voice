@@ -7,24 +7,32 @@
 These settings go inside the shared file's `voice` section. All are optional.
 Changes apply the next time you start or resume Voice, not while it is already listening.
 
-| Preference                   | Default                | Available options                       | Meaning                                 |
-| ---------------------------- | ---------------------- | --------------------------------------- | --------------------------------------- |
-| `voice`                      | `"ljspeech"`           | `ljspeech`; other installed voices      | Speaking voice; `/paj-voice voices`.    |
-| `volume`                     | `40`                   | Number: `0`–`100`                       | Speech volume, not system volume.       |
-| `speed`                      | `1`                    | Number: `0.5`–`2`                       | Speaking speed; `1` is normal.          |
-| `pauseSeconds`               | `0.8`                  | Number: `0.3`–`5`                       | Silence before submitting, in seconds.  |
-| `maxMessageSeconds`          | `120`                  | Number: `5`–`120`                       | Dictation limit, in seconds.            |
-| `feedback.receipt`           | `"Got it."`            | Text: 1–8 words, at most 60 characters  | New request acknowledgement.            |
-| `feedback.steeringReceipt`   | `"Steering received."` | Text: 1–8 words, at most 60 characters  | Acknowledgement during active work.     |
-| `feedback.progressUpdates`   | `true`                 | `true` / `false`                        | Brief updates during long tasks.        |
-| `feedback.idleReminders`     | `true`                 | `true` / `false`                        | Up to three idle reminders.             |
-| `audioDucking.enabled`       | `false`                | `true` / `false`                        | Lower other playback, calls and alerts. |
-| `audioDucking.gain`          | `0.2`                  | Number: `0.05`–`1`                      | Multiply each app's existing gain.      |
-| `audioDucking.ignoreApps`    | `[]`                   | List: 0–32 exact app IDs / binary names | Apps never lowered; no wildcards.       |
+| Preference                 | Default                | Available options                         | Meaning                                 |
+| -------------------------- | ---------------------- | ----------------------------------------- | --------------------------------------- |
+| `voice`                    | `"ljspeech"`           | `ljspeech`, `amy`, other installed voices | Speaking voice; `/paj-voice voices`.    |
+| `volume`                   | `40`                   | Number: `0`–`100`                         | Speech volume, not system volume.       |
+| `speed`                    | `1`                    | Number: `0.5`–`2`                         | Speaking speed; `1` is normal.          |
+| `pauseSeconds`             | `0.8`                  | Number: `0.3`–`5`                         | Silence before submitting, in seconds.  |
+| `maxMessageSeconds`        | `120`                  | Number: `5`–`120`                         | Dictation limit, in seconds.            |
+| `feedback.receipt`         | `"Got it."`            | Text: 1–8 words, at most 60 characters    | New request acknowledgement.            |
+| `feedback.steeringReceipt` | `"Steering received."` | Text: 1–8 words, at most 60 characters    | Acknowledgement during active work.     |
+| `feedback.progressUpdates` | `true`                 | `true` / `false`                          | Brief updates during long tasks.        |
+| `feedback.idleReminders`   | `true`                 | `true` / `false`                          | Up to three idle reminders.             |
+| `audioDucking.enabled`     | `false`                | `true` / `false`                          | Lower other playback, calls and alerts. |
+| `audioDucking.gain`        | `0.2`                  | Number: `0.05`–`1`                        | Multiply each app's existing gain.      |
+| `audioDucking.ignoreApps`  | `[]`                   | List: 0–32 exact app IDs / binary names   | Apps never lowered; no wildcards.       |
 
 Dotted names mean nested JSON objects: `feedback.receipt` goes inside `"feedback": { ... }`.
-Receipt text cannot contain control characters. The included speaking voice is LJSpeech.
+Receipt text cannot contain control characters.
 See [all defaults](../examples/paj.json) for a complete example.
+
+### Speaking voice
+
+Run `/paj-voice voices` to list installed voices. In the shared `paj.json`, set
+`"voice": "amy"` **inside the existing `voice` section** to select Piper Amy (US English, medium).
+Leave other fields alone. The choice applies the next time you start or resume Voice. To switch
+back, set that field to `"ljspeech"` or remove it to use the LJSpeech default. This changes speech
+output only.
 
 ### Audio ducking
 

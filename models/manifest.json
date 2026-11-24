@@ -12,6 +12,12 @@
       "revision": "e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c",
       "path": "en/en_US/ljspeech/medium",
       "licensing": "Model card describes public-domain LJSpeech dataset, not an independent model-weight license grant. Local evaluation only; review before redistribution."
+    },
+    "amy": {
+      "repository": "rhasspy/piper-voices",
+      "revision": "e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c",
+      "path": "en/en_US/amy/medium",
+      "licensing": "Piper Voices lists MIT at repository level, but the Piper maintainer identifies the Amy/Mycroft weights as CC BY-SA 4.0 and says the training dataset terms are unknown. The Hi-Fi TTS base dataset is CC BY 4.0. See docs/development.md before redistributing weights."
     }
   },
   "assets": [
@@ -54,6 +60,21 @@
       "path": "tts/MODEL_CARD",
       "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c/en/en_US/ljspeech/medium/MODEL_CARD",
       "sha256": "fbee1529c89d36b3fe76d7e9f3f832dce17f44900a52d76a9bda735654766b4d"
+    },
+    {
+      "path": "tts/amy/model.onnx",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c/en/en_US/amy/medium/en_US-amy-medium.onnx",
+      "sha256": "cf9ccdec59f05adee47173f6fb4d89e8b0c5f30c178748d2572fe4efd1d2724c"
+    },
+    {
+      "path": "tts/amy/model.onnx.json",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c/en/en_US/amy/medium/en_US-amy-medium.onnx.json",
+      "sha256": "8c9b8aa3ee122c6a63678bd68e586a067c6775116d32e13b7ec919520d8948bf"
+    },
+    {
+      "path": "voice-notices/amy.txt",
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c/en/en_US/amy/medium/MODEL_CARD",
+      "sha256": "01937275ee0231667fdfb8eec381948acdc9ace98d4bab625dd30dc55c0f3cfe"
     },
     {
       "path": "stt/LICENSE",
