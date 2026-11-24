@@ -61,11 +61,18 @@ settings files, opens audio, connects/spawns, acquires/sends/pings/retries, sche
 timers, closes/restores, or changes gain/configuration. Status uses cached route information; use
 `/paj-voice route` to read saved routes afresh.
 
-After a temporary restore fault, Voice retries against a fresh graph snapshot. It restores only a
-matching stream whose gain still matches the last known ducked value. If it cannot confirm
-restoration within the retry limit, it warns and skips further ducking of that stream while the
-broker retains the record. This does not reset an app's volume: a gain left low by a prior run or
-broker exit may need manual adjustment once no ducking is active.
+Voice saves original channel gains in a private write-ahead journal under
+`$XDG_RUNTIME_DIR/paj-voice-focus` before lowering a stream. It first retries against fresh graph
+snapshots, then backs off while the broker runs. Restarting Voice or its broker in the same login
+and PipeWire instance does not discard a saved gain. Recovery requires the original stream and
+client identity and a gain matching one of the recorded write states. A different gain on the same
+stream is respected. Unresolved streams are not ducked again; a different PipeWire instance blocks
+writes rather than guessing what to restore.
+
+The journal is not a cross-login backup. It cannot recover gains lost before journaling, identify a
+replacement stream, or distinguish a manual change to the exact same recorded value. For ambiguous
+or stale entries, leave ducking inactive and use the app's own volume control; do not replay saved
+gains onto new streams. The journal contains stream identity metadata and gains, not audio.
 
 Current status contains only these memory-only, independent copies:
 

@@ -6,6 +6,7 @@ import type {
 } from "./audio-focus-types.ts";
 import { isFocusMetadataLabel } from "./audio-focus-types.ts";
 import { validateFocusPolicy } from "./config.ts";
+import type { FocusRecoveryRecord } from "./audio-focus-journal.ts";
 
 const printable = (value: string) =>
   typeof value === "string" && /^[\x20-\x7e]{1,256}$/.test(value);
@@ -119,6 +120,13 @@ export function createAudioFocus(
     pollMs?: number;
     releaseMs?: number;
     onWarning?: (message: string) => void;
+    journal?: {
+      load(): FocusRecoveryRecord[];
+      save(records: FocusRecoveryRecord[]): Promise<void>;
+    };
+    recoveryEpoch?: () => Promise<string>;
+    recoveryDelayMs?: number;
+    onRecoveryDrained?: () => void;
   } = {},
 ) {
   const owners = new Map<string, BackgroundAudioSettings>();
@@ -127,6 +135,32 @@ export function createAudioFocus(
     { baseline: number[]; stream: FocusStream; restoreFaults: number }
   >();
   const maxRestoreFaults = 3;
+  const recoveryKey = (generation: string, serial: string) =>
+    JSON.stringify([generation, serial]);
+  const durable = new Map(
+    (options.journal?.load() ?? []).map(
+      (entry) =>
+        [recoveryKey(entry.generation, entry.stream.serial), entry] as const,
+    ),
+  );
+  const initialRecoveryDelay = Math.min(
+    60_000,
+    Math.max(1, options.recoveryDelayMs ?? 1000),
+  );
+  let recoveryDelay = initialRecoveryDelay;
+  let nextRecovery = 0;
+  let recoverNow = false;
+  const maxRecoveryDelay = 60_000;
+  async function saveRecord(key: string, record?: FocusRecoveryRecord) {
+    if (!options.journal) return;
+    const next = new Map(durable);
+    if (record) next.set(key, record);
+    else next.delete(key);
+    await options.journal.save([...next.values()]);
+    if (record) durable.set(key, record);
+    else if (durable.delete(key) && !durable.size)
+      options.onRecoveryDrained?.();
+  }
   let snapshotFaults = 0;
   let graphUnavailable = false;
   const tombstones = new Set<string>();
@@ -191,8 +225,12 @@ export function createAudioFocus(
   }
   async function reconcile(version: number): Promise<boolean | undefined> {
     if (failed) return;
+    const epoch = options.journal ? await options.recoveryEpoch?.() : undefined;
+    if (options.journal && !epoch) throw new Error("Missing recovery epoch");
     const snapshot = await graph.snapshot();
     if (version !== revision) return;
+    if (options.journal && (await options.recoveryEpoch?.()) !== epoch)
+      throw new Error("Recovery epoch changed during snapshot");
     if (!printable(snapshot.generation) || !Array.isArray(snapshot.streams))
       throw new Error("Invalid graph snapshot");
     if (
@@ -216,7 +254,6 @@ export function createAudioFocus(
       const key = keyFor(stream);
       present.set(key, present.has(key) ? undefined : stream);
     }
-    snapshotFaults = 0;
     let retry = false;
     const restoreFault = (held: { restoreFaults: number }, reason: string) => {
       if (held.restoreFaults >= maxRestoreFaults) return;
@@ -224,6 +261,73 @@ export function createAudioFocus(
       else warnUnconfirmed(reason);
     };
     const incomplete = new Set<string>();
+    const due = recoverNow || performance.now() >= nextRecovery;
+    let attemptedRecovery = false;
+    recoverNow = false;
+    for (const [key, entry] of durable) {
+      if (entry.epoch !== epoch || entry.generation !== snapshot.generation) {
+        warnUnconfirmed(
+          "Saved audio gains belong to a different PipeWire instance; manual review required",
+        );
+        graphUnavailable = true;
+        nextRecovery = performance.now() + maxRecoveryDelay;
+        return;
+      }
+      const held = owned.get(key);
+      if (held && held.restoreFaults < maxRestoreFaults) continue;
+      incomplete.add(key);
+      if (!due) continue;
+      attemptedRecovery = true;
+      const stream = present.get(key);
+      if (!stream || !supported(stream)) {
+        warnUnconfirmed("Saved audio stream could not be identified");
+        continue;
+      }
+      if (
+        !identity(stream, entry.stream) ||
+        stream.muted !== entry.stream.muted ||
+        voiceStream(stream)
+      ) {
+        warnUnconfirmed(
+          "Saved audio stream identity no longer matches; manual review required",
+        );
+        continue;
+      }
+      if (
+        sameVector(stream.volumes, entry.baseline) ||
+        (!sameVector(stream.volumes, entry.stream.volumes) &&
+          !(entry.candidate && sameVector(stream.volumes, entry.candidate)))
+      ) {
+        // Either the restore already landed or the user chose a different value.
+        await saveRecord(key);
+        owned.delete(key);
+        tombstone(key);
+        continue;
+      }
+      if (version !== revision || (await options.recoveryEpoch?.()) !== epoch)
+        return;
+      if (version !== revision) return;
+      try {
+        if (
+          await graph.compareAndSet(
+            snapshot.generation,
+            stream,
+            entry.baseline,
+            true,
+          )
+        ) {
+          await saveRecord(key);
+          owned.delete(key);
+          tombstone(key);
+        } else warnUnconfirmed("Saved audio restore could not be confirmed");
+      } catch {
+        warnUnconfirmed("Saved audio restore could not be confirmed");
+      }
+    }
+    if (attemptedRecovery) {
+      nextRecovery = performance.now() + recoveryDelay;
+      recoveryDelay = Math.min(maxRecoveryDelay, recoveryDelay * 2);
+    }
     for (const [key, held] of owned) {
       const current = present.get(key);
       if (
@@ -245,6 +349,12 @@ export function createAudioFocus(
         association(current) !== association(held.stream) ||
         !sameVector(current.volumes, held.stream.volumes)
       ) {
+        // An observed external gain change cancels durable recovery as well as ownership.
+        if (
+          current.id === held.stream.id &&
+          association(current) === association(held.stream)
+        )
+          await saveRecord(key);
         owned.delete(key);
         tombstone(key);
       }
@@ -296,6 +406,22 @@ export function createAudioFocus(
         continue;
       }
       const restoring = held !== undefined && gain === undefined;
+      if (options.journal) {
+        if (!restoring) {
+          if (!epoch || (!durable.has(key) && durable.size >= 128)) continue;
+          // Keep both possible gain vectors across the write/ack crash window.
+          await saveRecord(key, {
+            generation: snapshot.generation,
+            epoch,
+            stream: structuredClone(stream),
+            baseline: [...baseline],
+            candidate: volumes,
+          });
+        }
+        if (version !== revision || (await options.recoveryEpoch?.()) !== epoch)
+          return;
+        if (version !== revision) return;
+      }
       let acknowledged = false;
       try {
         acknowledged = await graph.compareAndSet(
@@ -316,18 +442,17 @@ export function createAudioFocus(
         tombstone(key);
         warnUnconfirmed("Audio focus write acknowledgement was not confirmed");
       } else if (gain !== undefined) {
-        owned.set(key, {
-          baseline,
-          restoreFaults: 0,
-          stream: {
-            ...stream,
-            volumes: [...volumes],
-            ...(stream.associatedClient
-              ? { associatedClient: { ...stream.associatedClient } }
-              : {}),
-          },
-        });
+        const current = { ...structuredClone(stream), volumes: [...volumes] };
+        owned.set(key, { baseline, restoreFaults: 0, stream: current });
+        if (epoch)
+          await saveRecord(key, {
+            generation: snapshot.generation,
+            epoch,
+            stream: current,
+            baseline,
+          });
       } else {
+        await saveRecord(key);
         owned.delete(key);
         tombstone(key);
       }
@@ -338,11 +463,19 @@ export function createAudioFocus(
   function schedulePoll() {
     if (poll) clearTimeout(poll);
     poll = undefined;
-    if (!closed && !graphUnavailable && (owners.size || release)) {
+    const active = !graphUnavailable && (owners.size || release);
+    if (!closed && (active || durable.size)) {
+      const delay = active
+        ? pollMs
+        : Math.max(initialRecoveryDelay, nextRecovery - performance.now());
       poll = setTimeout(() => {
         poll = undefined;
+        if (!active) {
+          failed = false;
+          snapshotFaults = 0;
+        }
         void request();
-      }, pollMs);
+      }, delay);
       poll.unref?.();
     }
   }
@@ -355,8 +488,11 @@ export function createAudioFocus(
             dirty = false;
             const version = revision;
             try {
-              if ((await reconcile(version)) && version === revision)
-                dirty = true;
+              const retry = await reconcile(version);
+              if (version === revision) {
+                snapshotFaults = 0;
+                if (retry) dirty = true;
+              }
             } catch {
               if (version === revision) {
                 if (++snapshotFaults < maxRestoreFaults) dirty = true;
@@ -452,8 +588,13 @@ export function createAudioFocus(
         unsupported,
       };
     },
+    recover() {
+      if (!durable.size) return Promise.resolve();
+      recoverNow = true;
+      return request();
+    },
     hasUnconfirmedRestorations(): boolean {
-      return owned.size > 0;
+      return owned.size > 0 || durable.size > 0;
     },
     async close(): Promise<void> {
       if (closed) return running;

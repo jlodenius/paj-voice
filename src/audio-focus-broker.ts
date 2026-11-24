@@ -2,6 +2,7 @@ import { createServer, createConnection } from "node:net";
 import type { Server, Socket } from "node:net";
 import {
   lstat,
+  readFile,
   mkdir,
   mkdtemp,
   chmod,
@@ -39,6 +40,7 @@ interface Engine {
   ): Promise<void>;
   close(): Promise<void>;
   hasUnconfirmedRestorations?(): boolean;
+  recover?(): Promise<void>;
 }
 export interface FocusFileSystem {
   lstat(path: string): Promise<Stats>;
@@ -291,16 +293,56 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
   const server = options.server ?? createServer();
   let engine: Engine;
   try {
-    engine =
-      (typeof options.engine === "function"
-        ? options.engine(warn, diagnostic)
-        : options.engine) ??
-      (await import("./audio-focus.ts")).createAudioFocus(
+    try {
+      const previous = await checkedFocusSocket(path, filesystem);
+      if (await alive(path))
+        throw new Error("Audio focus broker already running");
+      const current = await filesystem.lstat(path);
+      if (previous.dev !== current.dev || previous.ino !== current.ino)
+        throw new Error("Focus socket changed during startup");
+      await unlink(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (options.engine) {
+      engine =
+        typeof options.engine === "function"
+          ? options.engine(warn, diagnostic)
+          : options.engine;
+    } else {
+      const xdgRuntime = (options.env ?? process.env).XDG_RUNTIME_DIR;
+      if (!xdgRuntime || runtimeDir !== join(xdgRuntime, "paj-voice-focus"))
+        throw new Error(
+          "Durable audio focus requires a private XDG runtime directory",
+        );
+      const boot = (
+        await readFile("/proc/sys/kernel/random/boot_id", "utf8")
+      ).trim();
+      const recoveryEpoch = async () => {
+        const socket = await lstat(join(xdgRuntime, "pipewire-0"), {
+          bigint: true,
+        });
+        if (
+          !socket.isSocket() ||
+          socket.uid !== BigInt(process.getuid?.() ?? -1)
+        )
+          throw new Error("PipeWire socket identity is unavailable");
+        return `${boot}:${socket.dev}:${socket.ino}:${socket.ctimeNs}`;
+      };
+      engine = (await import("./audio-focus.ts")).createAudioFocus(
         (await import("./pipewire-focus.ts")).createPipeWireFocusGraph({
           onDiagnostic: diagnostic,
         }),
-        { onWarning: warn },
+        {
+          onWarning: warn,
+          onRecoveryDrained: () => scheduleIdle(),
+          recoveryEpoch,
+          journal: await (
+            await import("./audio-focus-journal.ts")
+          ).openFocusJournal(runtimeDir),
+        },
       );
+    }
   } catch (error) {
     diagnostic({
       component: "broker",
@@ -397,22 +439,23 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
         [...releases.values()].map((release) => release()),
       );
       for (const socket of clients) socket.destroy();
-      await waitForCleanup(engine.close()).catch((error) => {
-        diagnostic({
-          component: "broker",
-          operation: "cleanup",
-          reason: "cleanup_failed",
-          code: focusErrorCode(error),
+      if (published || options.engine)
+        await waitForCleanup(engine.close()).catch((error) => {
+          diagnostic({
+            component: "broker",
+            operation: "cleanup",
+            reason: "cleanup_failed",
+            code: focusErrorCode(error),
+          });
+          warn("Background audio restoration could not be confirmed");
         });
-        warn("Background audio restoration could not be confirmed");
-      });
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await cleanupPublication();
     })();
     return closing;
   };
   server.on("connection", (socket) => {
-    if (stopping || clients.size >= 64) {
+    if (!published || stopping || clients.size >= 64) {
       socket.destroy();
       return;
     }
@@ -613,16 +656,6 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
   });
   let bound = false;
   try {
-    try {
-      const previous = await checkedFocusSocket(path, filesystem);
-      if (await alive(path))
-        throw new Error("Audio focus broker already running");
-      if (!sameFile(previous, await filesystem.lstat(path)))
-        throw new Error("Focus socket changed during startup");
-      await unlink(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
     stagingDirectory = await mkdtemp(join(runtimeDir, "s-"));
     stagingIdentity = await filesystem.lstat(stagingDirectory);
     await privateDirectory(stagingDirectory, false, filesystem);
@@ -669,7 +702,7 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     });
     if (bound) await close();
     else {
-      await waitForCleanup(engine.close()).catch(() => {});
+      if (options.engine) await waitForCleanup(engine.close()).catch(() => {});
       await cleanupPublication();
     }
     throw error;
@@ -687,6 +720,7 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
     warn("Background audio broker socket failed");
     void close();
   });
+  void engine.recover?.().finally(scheduleIdle);
   scheduleIdle();
   return { path, close };
 }
