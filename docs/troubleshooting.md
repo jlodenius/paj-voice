@@ -61,6 +61,12 @@ settings files, opens audio, connects/spawns, acquires/sends/pings/retries, sche
 timers, closes/restores, or changes gain/configuration. Status uses cached route information; use
 `/paj-voice route` to read saved routes afresh.
 
+After a temporary restore fault, Voice retries against a fresh graph snapshot. It restores only a
+matching stream whose gain still matches the last known ducked value. If it cannot confirm
+restoration within the retry limit, it warns and skips further ducking of that stream while the
+broker retains the record. This does not reset an app's volume: a gain left low by a prior run or
+broker exit may need manual adjustment once no ducking is active.
+
 Current status contains only these memory-only, independent copies:
 
 - `armedPolicy`: enabled and linear gain from the validated arm snapshot, not saved preferences.

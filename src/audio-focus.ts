@@ -74,6 +74,7 @@ function supported(stream: FocusStream) {
     (stream.role === "" || printable(stream.role)) &&
     isFocusMetadataLabel(stream.name) &&
     stream.name !== "" &&
+    Array.isArray(stream.volumes) &&
     stream.volumes.length > 0 &&
     stream.volumes.length <= 64 &&
     Array.from(stream.volumes).every(
@@ -121,7 +122,13 @@ export function createAudioFocus(
   } = {},
 ) {
   const owners = new Map<string, BackgroundAudioSettings>();
-  const owned = new Map<string, { baseline: number[]; stream: FocusStream }>();
+  const owned = new Map<
+    string,
+    { baseline: number[]; stream: FocusStream; restoreFaults: number }
+  >();
+  const maxRestoreFaults = 3;
+  let snapshotFaults = 0;
+  let graphUnavailable = false;
   const tombstones = new Set<string>();
   let closed = false;
   let failed = false;
@@ -182,13 +189,12 @@ export function createAudioFocus(
         }
       : undefined;
   }
-  async function reconcile() {
+  async function reconcile(version: number): Promise<boolean | undefined> {
     if (failed) return;
-    const version = revision;
     const snapshot = await graph.snapshot();
     if (version !== revision) return;
-    if (!printable(snapshot.generation))
-      throw new Error("Invalid graph generation");
+    if (!printable(snapshot.generation) || !Array.isArray(snapshot.streams))
+      throw new Error("Invalid graph snapshot");
     if (
       cycleGeneration !== undefined &&
       snapshot.generation !== cycleGeneration
@@ -205,12 +211,36 @@ export function createAudioFocus(
     const streams = snapshot.streams.slice(0, 128);
     const keyFor = (stream: FocusStream) =>
       JSON.stringify([snapshot.generation, stream.serial]);
-    const present = new Map(streams.map((stream) => [keyFor(stream), stream]));
+    const present = new Map<string, FocusStream | undefined>();
+    for (const stream of streams) {
+      const key = keyFor(stream);
+      present.set(key, present.has(key) ? undefined : stream);
+    }
+    snapshotFaults = 0;
+    let retry = false;
+    const restoreFault = (held: { restoreFaults: number }, reason: string) => {
+      if (held.restoreFaults >= maxRestoreFaults) return;
+      if (++held.restoreFaults < maxRestoreFaults) retry = true;
+      else warnUnconfirmed(reason);
+    };
+    const incomplete = new Set<string>();
     for (const [key, held] of owned) {
       const current = present.get(key);
       if (
         !current ||
         !supported(current) ||
+        (current.id === held.stream.id &&
+          (current.volumes.length !== held.stream.volumes.length ||
+            (held.stream.associatedClient && !current.associatedClient)))
+      ) {
+        // The dump omits nodes whose Props or Client are incomplete. Absence is
+        // not evidence that an owned attenuation can be forgotten.
+        incomplete.add(key);
+        restoreFault(
+          held,
+          "Audio focus snapshot omitted a complete owned stream",
+        );
+      } else if (
         current.id !== held.stream.id ||
         association(current) !== association(held.stream) ||
         !sameVector(current.volumes, held.stream.volumes)
@@ -219,12 +249,17 @@ export function createAudioFocus(
         tombstone(key);
       }
     }
-    for (const stream of streams) {
+    for (const [key, stream] of present) {
       if (version !== revision) return;
-      const key = keyFor(stream);
-      if (!supported(stream) || tombstones.has(key)) continue;
+      if (
+        !stream ||
+        !supported(stream) ||
+        tombstones.has(key) ||
+        incomplete.has(key)
+      )
+        continue;
       const held = owned.get(key);
-      if (saturated && !held) continue;
+      if (!held && (saturated || owned.size >= 128)) continue;
       if (voiceStream(stream)) {
         if (held) {
           owned.delete(key);
@@ -236,6 +271,7 @@ export function createAudioFocus(
       const contextChanged =
         held &&
         (!identity(stream, held.stream) || stream.muted !== held.stream.muted);
+      if (held && held.restoreFaults >= maxRestoreFaults) continue;
       const target = contextChanged
         ? undefined
         : gainFor(stream, [...owners.values()]);
@@ -259,20 +295,30 @@ export function createAudioFocus(
         }
         continue;
       }
-      const acknowledged = await graph.compareAndSet(
-        snapshot.generation,
-        stream,
-        volumes,
-        held !== undefined && gain === undefined,
-        target?.allOtherPlayback ?? false,
-      );
-      if (!acknowledged) {
+      const restoring = held !== undefined && gain === undefined;
+      let acknowledged = false;
+      try {
+        acknowledged = await graph.compareAndSet(
+          snapshot.generation,
+          stream,
+          volumes,
+          restoring,
+          target?.allOtherPlayback ?? false,
+        );
+      } catch {}
+      if (!acknowledged && restoring) {
+        restoreFault(
+          held,
+          "Audio focus restore write acknowledgement was not confirmed",
+        );
+      } else if (!acknowledged) {
         owned.delete(key);
         tombstone(key);
         warnUnconfirmed("Audio focus write acknowledgement was not confirmed");
       } else if (gain !== undefined) {
         owned.set(key, {
           baseline,
+          restoreFaults: 0,
           stream: {
             ...stream,
             volumes: [...volumes],
@@ -286,11 +332,13 @@ export function createAudioFocus(
         tombstone(key);
       }
     }
+    return retry;
   }
+  // Exhausted streams stay fenced across owner changes without idle graph polling.
   function schedulePoll() {
     if (poll) clearTimeout(poll);
     poll = undefined;
-    if (!closed && (owners.size || owned.size)) {
+    if (!closed && !graphUnavailable && (owners.size || release)) {
       poll = setTimeout(() => {
         poll = undefined;
         void request();
@@ -305,14 +353,21 @@ export function createAudioFocus(
         .then(async () => {
           while (dirty) {
             dirty = false;
+            const version = revision;
             try {
-              await reconcile();
+              if ((await reconcile(version)) && version === revision)
+                dirty = true;
             } catch {
-              warnUnconfirmed(
-                "Audio focus graph failed; ownership relinquished without stale replay",
-              );
-              failed = true;
-              owned.clear();
+              if (version === revision) {
+                if (++snapshotFaults < maxRestoreFaults) dirty = true;
+                else {
+                  graphUnavailable = true;
+                  for (const held of owned.values())
+                    held.restoreFaults = maxRestoreFaults;
+                  if (!owned.size) failed = true;
+                  warnUnconfirmed("Audio focus graph failed");
+                }
+              }
             }
             resetIdleCycle();
           }
@@ -336,11 +391,17 @@ export function createAudioFocus(
         settings === null ? null : validateFocusPolicy(settings);
       if (validated === null || validated.mode === "off") owners.delete(owner);
       else {
+        if (!owners.size && !release) {
+          tombstones.clear();
+          saturated = false;
+        }
         if (!owners.has(owner) && owners.size >= 32)
           throw new Error("Too many audio focus owners");
         owners.set(owner, validated);
       }
       revision++;
+      snapshotFaults = 0;
+      graphUnavailable = false;
       if (owners.size || immediate) {
         if (release) clearTimeout(release);
         release = undefined;
@@ -348,6 +409,8 @@ export function createAudioFocus(
         release = setTimeout(() => {
           release = undefined;
           revision++;
+          snapshotFaults = 0;
+          graphUnavailable = false;
           void request();
         }, releaseMs);
         release.unref?.();
@@ -389,10 +452,15 @@ export function createAudioFocus(
         unsupported,
       };
     },
+    hasUnconfirmedRestorations(): boolean {
+      return owned.size > 0;
+    },
     async close(): Promise<void> {
+      if (closed) return running;
       closed = true;
       owners.clear();
       revision++;
+      snapshotFaults = 0;
       if (release) clearTimeout(release);
       if (poll) clearTimeout(poll);
       release = undefined;

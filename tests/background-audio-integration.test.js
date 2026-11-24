@@ -21,9 +21,28 @@ async function focused(t, enabled = true) {
   const runtimeDir = await mkdtemp(join(tmpdir(), 'paj-focus-extension-'));
   const stream = { id: 5, serial: '55', appId: 'org.example.Player', binary: 'player', role: 'Music',
     name: 'player', volumes: [1, 0.5], muted: false };
+  const faults = { omissions: 0, restores: 0, snapshotErrors: 0, restoreErrors: 0 };
   const graph = {
-    async snapshot() { return { generation: 'cookie', streams: [structuredClone(stream)] }; },
-    async compareAndSet(generation, before, volumes) {
+    async snapshot() {
+      if (faults.snapshotErrors > 0) {
+        faults.snapshotErrors--;
+        throw new Error('transient snapshot failure');
+      }
+      if (faults.omissions > 0) {
+        faults.omissions--;
+        return { generation: 'cookie', streams: [] };
+      }
+      return { generation: 'cookie', streams: [structuredClone(stream)] };
+    },
+    async compareAndSet(generation, before, volumes, restore) {
+      if (restore && faults.restoreErrors > 0) {
+        faults.restoreErrors--;
+        throw new Error('transient compare-and-set failure');
+      }
+      if (restore && faults.restores > 0) {
+        faults.restores--;
+        return false;
+      }
       if (generation !== 'cookie' || before.serial !== stream.serial ||
           JSON.stringify(before.volumes) !== JSON.stringify(stream.volumes)) return false;
       stream.volumes = [...volumes];
@@ -39,7 +58,29 @@ async function focused(t, enabled = true) {
     await rm(runtimeDir, { recursive: true, force: true }); });
   const playback = (id, playing, playbackGeneration = 1, outputEpoch = 1) =>
     f.audio({ type: 'playback_state', id, playing, playbackGeneration, outputEpoch });
-  return { ...f, stream, playback };
+  return { ...f, stream, playback, faults };
+}
+
+for (const fault of ['omissions', 'restores', 'snapshotErrors', 'restoreErrors']) {
+  test(`a transient ${fault} fault cannot strand attenuation across stop, off and rearm`, async t => {
+    const f = await focused(t);
+    await f.command('on');
+    f.audio({ type: 'ready' });
+    f.playback('readout', true);
+    await until(() => f.stream.volumes[0] === 0.2);
+    await f.command('stop');
+    f.faults[fault] = 1;
+    f.playback('readout', false);
+    await f.command('off');
+    await until(() => f.stream.volumes[0] === 1);
+    await f.command('on');
+    f.audio({ type: 'ready' });
+    f.playback('rearmed', true);
+    await until(() => f.stream.volumes[0] === 0.2);
+    assert.deepEqual(f.stream.volumes, [0.2, 0.1]);
+    f.playback('rearmed', false);
+    await until(() => f.stream.volumes[0] === 1);
+  });
 }
 
 test('actual readouts own ducking across stale idle, output failure and Voice off', async t => {

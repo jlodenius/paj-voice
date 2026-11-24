@@ -471,6 +471,38 @@ for (const action of ['EOF', 'half-close EOF', 'close RPC', 'expiry', 'broker cl
   });
 }
 
+test('abandoned restoration remains fenced after all clients leave the broker', async t => {
+  const graph = fakeGraph();
+  const original = graph.compareAndSet;
+  let reject = false;
+  let attempts = 0;
+  graph.compareAndSet = async (...args) => {
+    if (reject && args[3]) { attempts++; return false; }
+    return original(...args);
+  };
+  const { runtimeDir, broker } = await fixture(t, { idleMs: 15, engine: onWarning =>
+    createAudioFocus(graph, { releaseMs: 0, onWarning }) });
+  const warnings = [];
+  const first = startAudioFocus(duck, { runtimeDir, onWarning: message => warnings.push(message) });
+  t.after(() => first.close());
+  first.playing('readout');
+  await waitFor(() => graph.stream.volumes[0] === 0.3);
+  reject = true;
+  await first.close();
+  await waitFor(() => warnings.some(message => /restoration is not confirmed/.test(message)));
+  assert.ok(attempts >= 2 && attempts <= 5, `bounded attempts: ${attempts}`);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  reject = false;
+  const second = startAudioFocus(duck, { runtimeDir, spawn: () => assert.fail('quarantine lost') });
+  t.after(() => second.close());
+  second.playing('next');
+  await waitFor(() => second.snapshot().state === 'connected');
+  assert.equal((await lstat(broker.path)).isSocket(), true);
+  await second.close();
+  assert.deepEqual(graph.stream.volumes, [0.3, 0.15]);
+  assert.equal((await lstat(broker.path)).isSocket(), true);
+});
+
 test('delayed real-engine restore faults reach the client during idle grace', async t => {
   const graph = fakeGraph();
   const original = graph.compareAndSet;

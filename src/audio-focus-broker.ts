@@ -38,6 +38,7 @@ interface Engine {
     immediate?: boolean,
   ): Promise<void>;
   close(): Promise<void>;
+  hasUnconfirmedRestorations?(): boolean;
 }
 export interface FocusFileSystem {
   lstat(path: string): Promise<Stats>;
@@ -382,9 +383,9 @@ export async function runAudioFocusBroker(options: BrokerOptions = {}) {
   };
   const scheduleIdle = () => {
     clearTimeout(idle);
-    if (!clients.size && !stopping)
+    if (!clients.size && !stopping && !engine.hasUnconfirmedRestorations?.())
       idle = setTimeout(() => {
-        void close();
+        if (!engine.hasUnconfirmedRestorations?.()) void close();
       }, options.idleMs ?? 2000);
   };
   const close = (): Promise<void> => {
