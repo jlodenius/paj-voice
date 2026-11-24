@@ -5,8 +5,8 @@
 ## Options
 
 These settings go inside the shared file's `voice` section. All are optional.
-Changes apply the next time you start or resume Voice. While Voice is active,
-`/paj-voice reload` can apply just the output voice, volume, and speed.
+Changes apply the next time you start or resume Voice. While Voice is active, type
+`/paj-voice reload` to apply saved preferences without a second arm confirmation.
 
 | Preference                 | Default                | Available options                         | Meaning                                 |
 | -------------------------- | ---------------------- | ----------------------------------------- | --------------------------------------- |

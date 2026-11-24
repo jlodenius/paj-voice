@@ -15,7 +15,7 @@ test('reload only sends output settings to the existing worker and waits for its
   f.audio({ type: 'ready' });
   const original = f.controller.state();
   const from = f.frames.length;
-  settings = { voice: 'amy', volume: 30, speed: 1.25, pauseSeconds: 2, feedback: { receipt: 'Changed.' } };
+  settings = { voice: 'amy', volume: 30, speed: 1.25 };
   await f.command('reload');
   await f.command('reload');
   assert.equal(f.workers.length, 1);
@@ -28,6 +28,81 @@ test('reload only sends output settings to the existing worker and waits for its
   assert.equal(f.notices.some(([message]) => message === 'Voice output reloaded.'), false);
   f.audio({ type: 'tts_reloaded', id: request.id, applied: true });
   assert.equal(f.notices.at(-1)[0], 'Voice output reloaded.');
+});
+
+test('reload is a no-op for equivalent defaults and restarts changed settings without a second arm confirmation', async t => {
+  let settings = {};
+  const f = fixture({ loadConfig: () => settings });
+  t.after(() => f.command('off'));
+  let confirmations = 0;
+  f.ctx.ui.confirm = async () => { confirmations++; return true; };
+  await f.command('on');
+  f.audio({ type: 'ready' });
+  settings = { volume: 40, speed: 1, pauseSeconds: 0.8, audioDucking: { enabled: false } };
+  await f.command('reload');
+  assert.match(f.notices.at(-1)[0], /unchanged/);
+  assert.equal(f.workers.length, 1);
+  settings = { pauseSeconds: 2, feedback: { receipt: 'Changed.' } };
+  await f.command('reload');
+  assert.equal(confirmations, 1);
+  assert.equal(f.workers.length, 2);
+  assert.equal(f.workers[0].closed, true);
+  assert.notEqual(f.workers[0].args.generation, f.workers[1].args.generation);
+  assert.equal(f.controller.state().starting, true);
+});
+
+test('changed devices and paused capture do not authorize a restart', async t => {
+  let settings = {};
+  let input = 'laptop';
+  const f = fixture({ loadConfig: () => settings, loadDevices: () => ({ version: 1, input, output: 'headphones' }) });
+  t.after(() => f.command('off'));
+  await f.command('on');
+  f.audio({ type: 'ready' });
+  settings = { pauseSeconds: 2 };
+  input = 'different';
+  await f.command('reload');
+  assert.match(f.notices.at(-1)[0], /endpoint consent/);
+  assert.equal(f.workers.length, 1);
+  assert.equal(f.workers[0].closed, false);
+  input = 'laptop';
+  await f.command('pause 10 seconds');
+  assert.ok(f.controller.state().inputPause);
+  await f.command('reload');
+  assert.match(f.notices.at(-1)[0], /paused microphone/);
+  assert.equal(f.workers.length, 1);
+});
+
+test('reload waits for process closure and a later off cancels replacement', async () => {
+  let settings = {};
+  const f = fixture({ loadConfig: () => settings });
+  await f.command('on');
+  f.audio({ type: 'ready' });
+  const exit = Promise.withResolvers();
+  f.workers[0].waitClosed = () => exit.promise;
+  settings = { pauseSeconds: 2 };
+  const reload = f.command('reload');
+  assert.equal(f.workers[0].closed, true);
+  assert.equal(f.workers.length, 1);
+  const off = f.command('off');
+  exit.resolve();
+  await Promise.all([reload, off]);
+  assert.equal(f.workers.length, 1);
+  assert.equal(f.controller.state().enabled, false);
+});
+
+test('a synchronous off during reload shutdown cancels replacement', async () => {
+  let settings = {};
+  const f = fixture({ loadConfig: () => settings });
+  await f.command('on');
+  f.audio({ type: 'ready' });
+  let off;
+  f.events.once('paj-voice:state:v1', () => { off = f.command('off'); });
+  settings = { pauseSeconds: 2 };
+  await f.command('reload');
+  assert.ok(off);
+  await off;
+  assert.equal(f.workers.length, 1);
+  assert.equal(f.controller.state().enabled, false);
 });
 
 test('reload rejects invalid preferences, negative acknowledgements, and stale worker events', async t => {

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -1088,6 +1089,43 @@ export function registerVoice(
     oldAdmission?.close();
     return retirement;
   };
+  const readArmSettings = () => {
+    const selectedPreferences = validateConfig(
+      (options.loadConfig ?? loadConfig)(configPath(env)),
+    );
+    const selectedDevices = (options.loadDevices ?? loadDevices)(
+      deviceSettingsPath(env),
+    );
+    const savedRoutes = readRoutes();
+    const selectedRoute = !savedRoutes
+      ? "default"
+      : sameDeviceSelection(
+            savedRoutes.routes[savedRoutes.active],
+            selectedDevices,
+          )
+        ? savedRoutes.active
+        : "custom";
+    const fallback = savedRoutes?.fallback;
+    const selectedFallback =
+      fallback && savedRoutes.routes[fallback]
+        ? { ...savedRoutes.routes[fallback], name: fallback }
+        : undefined;
+    const runtimeFallback =
+      selectedFallback?.name !== selectedRoute ? selectedFallback : undefined;
+    const config = runtimeConfig(
+      selectedPreferences,
+      selectedDevices,
+      runtimeFallback,
+    );
+    return {
+      selectedPreferences,
+      selectedDevices,
+      selectedRoute,
+      selectedFallback,
+      runtimeFallback,
+      config,
+    };
+  };
   const onQuery = (value: unknown) => {
     const request = value as { reply?(api: VoiceApi): void } | undefined;
     if (!closed && typeof request?.reply === "function") {
@@ -1503,6 +1541,8 @@ export function registerVoice(
     async handler(args, current) {
       ctx = current;
       let command = args.trim() || "status";
+      let reloadPlan: ReturnType<typeof readArmSettings> | undefined;
+      let reloadStopped = false;
       if (command === "mute") command = "pause";
       if (command === "unmute") command = "resume";
       const parts = command.split(/\s+/u);
@@ -1856,24 +1896,79 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
           return;
         }
         try {
-          const { voice, volume, speed } = validateConfig(
-            (options.loadConfig ?? loadConfig)(configPath(env)),
-          );
-          const id = randomUUID();
-          pendingTts = { id, settings: { voice, volume, speed } };
+          const next = readArmSettings();
           if (
-            companion.send({
-              type: "reload_tts",
-              id,
-              tts: { voice, volume: volume / 100, lengthScale: 1 / speed },
-            }) === false
-          )
-            throw new Error("Voice worker unavailable");
+            state.usingFallback ||
+            !sameDeviceSelection(activeSelection, next.selectedDevices) ||
+            next.selectedRoute !== activeRoute ||
+            !isDeepStrictEqual(armedFallback, next.selectedFallback)
+          ) {
+            notify(
+              "Saved audio routes or endpoint consent differ; use the normal route or off/on commands.",
+              "warning",
+            );
+            return;
+          }
+          const { voice, volume, speed, ...other } = next.selectedPreferences;
+          const {
+            voice: oldVoice,
+            volume: oldVolume,
+            speed: oldSpeed,
+            ...previous
+          } = preferences;
+          if (
+            !isDeepStrictEqual(
+              {
+                ...other,
+                audioDucking: audioDuckingPolicy(
+                  validateAudioDucking(other.audioDucking),
+                ),
+              },
+              {
+                ...previous,
+                audioDucking: audioDuckingPolicy(
+                  validateAudioDucking(previous.audioDucking),
+                ),
+              },
+            )
+          ) {
+            if (state.inputPause) {
+              notify(
+                "These settings require a restart. Reload cannot resume a paused microphone.",
+                "warning",
+              );
+              return;
+            }
+            reloadPlan = next;
+            command = "on";
+          } else if (
+            voice === oldVoice &&
+            volume === oldVolume &&
+            speed === oldSpeed
+          ) {
+            notify("Voice settings are unchanged.");
+            return;
+          } else {
+            const id = randomUUID();
+            pendingTts = { id, settings: { voice, volume, speed } };
+            if (
+              companion.send({
+                type: "reload_tts",
+                id,
+                tts: { voice, volume: volume / 100, lengthScale: 1 / speed },
+              }) === false
+            )
+              throw new Error("Voice worker unavailable");
+            return;
+          }
         } catch {
           pendingTts = undefined;
-          notify("Could not request a Voice output reload.", "warning");
+          notify(
+            "Could not reload Voice settings; the active settings are unchanged.",
+            "warning",
+          );
+          return;
         }
-        return;
       }
       if (command === "off") {
         await reportAudioStop("Voice off", stop(), current);
@@ -2124,6 +2219,7 @@ Voice stays off; arming remains a separate confirmation.`,
           return;
         }
         if (
+          !reloadPlan &&
           !controller.state().muted &&
           (controller.state().enabled || controller.state().starting)
         ) {
@@ -2157,6 +2253,74 @@ Voice stays off; arming remains a separate confirmation.`,
           ctx?.mode === "tui" &&
           ctx.hasUI &&
           id === ctx.sessionManager.getSessionId();
+        if (reloadPlan) {
+          if (reloadPlan.selectedPreferences.voice !== preferences?.voice) {
+            const listed = await pi.exec(
+              runtimePaths(env).executable,
+              ["--voices"],
+              {
+                timeout: 10000,
+                maxBuffer: 32768,
+              },
+            );
+            if (!currentArm()) return;
+            const voices =
+              listed.code === 0 && !listed.killed && !listed.truncated
+                ? JSON.parse(listed.stdout)
+                : null;
+            if (
+              !Array.isArray(voices) ||
+              !voices.some(
+                (voice) => voice?.id === reloadPlan!.selectedPreferences.voice,
+              )
+            )
+              throw new Error("Reload voice is not in the installed catalogue");
+          }
+          const reloading = controller.state();
+          if (
+            promptDepth ||
+            reloading.inputPause ||
+            reloading.muted ||
+            reloading.usingFallback ||
+            !sameDeviceSelection(activeSelection, reloadPlan.selectedDevices) ||
+            activeRoute !== reloadPlan.selectedRoute ||
+            !isDeepStrictEqual(armedFallback, reloadPlan.selectedFallback) ||
+            !isDeepStrictEqual(readArmSettings(), reloadPlan)
+          )
+            throw new Error(
+              "Voice settings or microphone state changed during reload; try again",
+            );
+          const focusClosed = closeFocus();
+          if (!currentArm()) return;
+          activation = lifetime + 1;
+          reloadStopped = true;
+          const retirement = stop();
+          if (!currentArm()) return;
+          notify(
+            "Voice settings changed; waiting for the existing microphone to close before restarting.",
+          );
+          if ((retirement && !(await retirement.result)) || retiringAudio) {
+            if (currentArm())
+              notify(
+                "Voice remains off: previous audio process closure is unconfirmed.",
+                "warning",
+              );
+            return;
+          }
+          await focusClosed;
+          if (!currentArm()) return;
+          if (promptDepth) {
+            notify(
+              "Voice remains off: a terminal prompt requires attention.",
+              "warning",
+            );
+            return;
+          }
+          if (!isDeepStrictEqual(readArmSettings(), reloadPlan))
+            throw new Error(
+              "Voice settings changed during shutdown; Voice remains off",
+            );
+        }
         const retirement = retiringAudio;
         if (retirement) {
           if (retirement.state === "closing")
@@ -2177,35 +2341,14 @@ Voice stays off; arming remains a separate confirmation.`,
           stop();
           activation = lifetime;
         }
-        const selectedPreferences = validateConfig(
-          (options.loadConfig ?? loadConfig)(configPath(env)),
-        );
-        const selectedDevices = (options.loadDevices ?? loadDevices)(
-          deviceSettingsPath(env),
-        );
-        const savedRoutes = readRoutes();
-        const selectedRoute = !savedRoutes
-          ? "default"
-          : sameDeviceSelection(
-                savedRoutes.routes[savedRoutes.active],
-                selectedDevices,
-              )
-            ? savedRoutes.active
-            : "custom";
-        const fallback = savedRoutes?.fallback;
-        const selectedFallback =
-          fallback && savedRoutes.routes[fallback]
-            ? { ...savedRoutes.routes[fallback], name: fallback }
-            : undefined;
-        const runtimeFallback =
-          selectedFallback?.name !== selectedRoute
-            ? selectedFallback
-            : undefined;
-        const config = runtimeConfig(
+        const {
           selectedPreferences,
           selectedDevices,
+          selectedRoute,
+          selectedFallback,
           runtimeFallback,
-        );
+          config,
+        } = reloadPlan ?? readArmSettings();
         const fallbackNotice = selectedFallback
           ? `Configured fallback ${selectedFallback.name} can automatically open its microphone and speakers if either preferred endpoint fails. It stays active until an explicit route switch or rearm. `
           : "";
@@ -2218,13 +2361,15 @@ Voice stays off; arming remains a separate confirmation.`,
           ? `All other inspectable playback, including calls and alerts, may be lowered during readouts (linear gain ${duckSettings.gain}), except ignored apps. Pi Voice outputs stay unchanged. Restoration is best effort. This is not echo cancellation or a background-speech filter. `
           : "";
         if (
+          !reloadPlan &&
           !(await current.ui.confirm(
             "Arm continuous open mic with normal tools?",
             `Every recognized utterance, including incidental or misheard speech, becomes a request to this session with its normal command/file/tool permissions. Text goes to the configured model provider and Pi history. STT/TTS stay local. Use headphones unless speaker mode is explicitly configured. A selected device may resume automatically after disconnecting, only if its identity is verified. Output loss does not stop the selected microphone. ${fallbackNotice}${speakerNotice}${duckNotice}Off/pause or session shutdown requests audio shutdown and stops recovery. Do not assume microphone closure until audio process termination is confirmed. Existing terminal confirmations cannot be approved by voice.`,
           ))
         )
           return;
-        if (!currentArm()) return;
+        if (reloadPlan && duckNotice) notify(duckNotice.trim());
+        if (!currentArm() || (reloadPlan && promptDepth)) return;
         preferences = selectedPreferences;
         armedFallback = selectedFallback;
         activeFallback = runtimeFallback;
@@ -2309,7 +2454,7 @@ Voice stays off; arming remains a separate confirmation.`,
           "Open mic starting. Remain quiet through warm-up; wait for the ready beep. All recognized speech is actionable in this session. Off/pause requests audio shutdown; wait for closure confirmation. Agent work continues.",
         );
       } catch (error) {
-        if (ownsArming) stop();
+        if (ownsArming && (!reloadPlan || reloadStopped)) stop();
         notify(`Voice unavailable: ${errorMessage(error)}`, "error");
       } finally {
         if (ownsArming) arming = false;
