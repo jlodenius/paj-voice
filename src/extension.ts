@@ -1967,7 +1967,7 @@ Only speaker protection changes. Exact endpoints, preferred route and fallback r
               companion.send({
                 type: "reload_tts",
                 id,
-                tts: { voice, volume: volume / 100, lengthScale: 1 / speed },
+                tts: next.config.tts,
               }) === false
             )
               throw new Error("Voice worker unavailable");
@@ -2266,7 +2266,8 @@ Voice stays off; arming remains a separate confirmation.`,
           ctx.hasUI &&
           id === ctx.sessionManager.getSessionId();
         if (reloadPlan) {
-          if (reloadPlan.selectedPreferences.voice !== preferences?.voice) {
+          const nextVoice = reloadPlan.selectedPreferences.voice;
+          if (nextVoice !== preferences?.voice) {
             const listed = await pi.exec(
               runtimePaths(env).executable,
               ["--voices"],
@@ -2282,8 +2283,10 @@ Voice stays off; arming remains a separate confirmation.`,
                 : null;
             if (
               !Array.isArray(voices) ||
-              !voices.some(
-                (voice) => voice?.id === reloadPlan!.selectedPreferences.voice,
+              !voices.some((voice) =>
+                nextVoice === undefined
+                  ? voice?.id === "amy" || voice?.id === "ljspeech"
+                  : voice?.id === nextVoice,
               )
             )
               throw new Error("Reload voice is not in the installed catalogue");

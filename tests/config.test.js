@@ -5,13 +5,19 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configPath, loadConfig, validateConfig, runtimeConfig } from '../src/config.ts';
 
-export const valid = () => ({ voice: 'ljspeech', volume: 40, speed: 1,
+export const valid = () => ({ volume: 40, speed: 1.2,
   pauseSeconds: 0.8, maxMessageSeconds: 120, feedback: { receipt: 'Got it.',
     steeringReceipt: 'Steering received.', progressUpdates: true, idleReminders: true } });
 
 test('empty preferences provide only normal user choices with documented defaults', () => {
   assert.deepEqual(validateConfig({}), valid());
   assert.deepEqual(validateConfig(valid()), valid());
+  const devices = { input: 'laptop', output: 'headphones' };
+  assert.deepEqual(runtimeConfig({}, devices).tts, { volume: 0.4, lengthScale: 1 / 1.2 });
+  assert.deepEqual(runtimeConfig({ voice: 'ljspeech', speed: 1 }, devices).tts,
+    { voice: 'ljspeech', volume: 0.4, lengthScale: 1 });
+  assert.deepEqual(runtimeConfig({ voice: 'custom_voice' }, devices).tts,
+    { voice: 'custom_voice', volume: 0.4, lengthScale: 1 / 1.2 });
 });
 
 test('technical settings and unknown preferences are rejected rather than silently retained', () => {
@@ -44,7 +50,7 @@ test('runtime compilation hides compute, language, thresholds and local device b
   const config = runtimeConfig({ volume: 25, speed: 2, pauseSeconds: 1.2 },
     { input: 'laptop', output: 'headphones' });
   assert.deepEqual(config.stt, { computeType: 'int8' });
-  assert.deepEqual(config.tts, { voice: 'ljspeech', volume: 0.25, lengthScale: 0.5 });
+  assert.deepEqual(config.tts, { volume: 0.25, lengthScale: 0.5 });
   assert.deepEqual(config.audio, { input: 'laptop', output: 'headphones', echoCancellation: 'none' });
   assert.deepEqual(config.turn, { silenceMs: 1200, maxSeconds: 120, speechThreshold: 0.001 });
   assert.deepEqual(config.languages, ['en']);
@@ -130,7 +136,7 @@ test('the shared example contains only supported user preferences', () => {
 
 test('settings reference documents every supported preference', () => {
   const docs = readFileSync(new URL('../docs/settings.md', import.meta.url), 'utf8');
-  const keys = Object.entries(validateConfig({ audioDucking: {} })).flatMap(([key, value]) =>
+  const keys = Object.entries(validateConfig({ voice: 'amy', audioDucking: {} })).flatMap(([key, value]) =>
     key === 'feedback' || key === 'audioDucking' ? Object.keys(value).map(name => `${key}.${name}`) : [key]);
   for (const key of keys) {
     assert.ok(docs.includes('`' + key + '`'), `Undocumented preference: ${key}`);

@@ -97,6 +97,21 @@ class TtsReloadTests(unittest.TestCase):
         self.assertIs(self.models.output, self.old)
         self.assertFalse(self.runtime.closed)
 
+    def test_reload_resolves_implicit_voice_and_retains_requested_speed_on_fallback(self):
+        tts = {'volume': 0.4, 'lengthScale': 1 / 1.2}
+        self.runtime.command({'type': 'reload_tts', 'id': 'default', 'tts': tts})
+        self.ack('default')
+        self.load.assert_called_with(str(self.model), config_path=str(self.metadata), use_cuda=False)
+        self.assertEqual(self.models.output.length_scale, 1 / 1.2)
+
+        renamed_model = self.model.rename(self.root / 'lj.onnx')
+        (self.root / 'voices.json').write_text(json.dumps({'ljspeech': {
+            'label': 'LJSpeech', 'model': renamed_model.name, 'config': self.metadata.name}}))
+        self.runtime.command({'type': 'reload_tts', 'id': 'fallback', 'tts': tts})
+        self.ack('fallback')
+        self.load.assert_called_with(str(renamed_model), config_path=str(self.metadata), use_cuda=False)
+        self.assertEqual(self.models.output.length_scale, 1 / 1.2)
+
     def test_candidate_failures_leave_old_output_and_allow_retry(self):
         self.load.side_effect = RuntimeError('Bad ONNX model')
         self.command('broken')

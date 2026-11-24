@@ -30,6 +30,20 @@ test('reload only sends output settings to the existing worker and waits for its
   assert.equal(f.notices.at(-1)[0], 'Voice output reloaded.');
 });
 
+test('reload can clear an explicit voice and speed without replacing the worker', async t => {
+  let settings = { voice: 'ljspeech', speed: 1 };
+  const f = fixture({ loadConfig: () => settings });
+  t.after(() => f.command('off'));
+  await f.command('on');
+  assert.deepEqual(f.workers[0].args.config.tts, { voice: 'ljspeech', volume: 0.4, lengthScale: 1 });
+  f.audio({ type: 'ready' });
+  settings = {};
+  await f.command('reload');
+  assert.equal(f.workers.length, 1);
+  const request = f.frames.find(frame => frame.type === 'reload_tts');
+  assert.deepEqual(request.tts, { volume: 0.4, lengthScale: 1 / 1.2 });
+});
+
 test('reload is a no-op for equivalent defaults and restarts changed settings without a second arm confirmation', async t => {
   let settings = {};
   const f = fixture({ loadConfig: () => settings });
@@ -38,7 +52,7 @@ test('reload is a no-op for equivalent defaults and restarts changed settings wi
   f.ctx.ui.confirm = async () => { confirmations++; return true; };
   await f.command('on');
   f.audio({ type: 'ready' });
-  settings = { volume: 40, speed: 1, pauseSeconds: 0.8, audioDucking: { enabled: false } };
+  settings = { volume: 40, speed: 1.2, pauseSeconds: 0.8, audioDucking: { enabled: false } };
   await f.command('reload');
   assert.match(f.notices.at(-1)[0], /unchanged/);
   assert.equal(f.workers.length, 1);

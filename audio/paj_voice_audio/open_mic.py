@@ -11,7 +11,7 @@ from .input_ready import InputReady
 from .audio import Capture, Segments, Speaker
 from .devices import CaptureFault, Graph, Node, PipeSink, exact_name
 from .speech import SpeechInference, SpeechOutput
-from .voices import resolve_voice, validate_voice_assets
+from .voices import DEFAULT_LENGTH_SCALE, resolve_default_voice, resolve_voice, validate_voice_assets
 
 
 def validate(value):
@@ -30,7 +30,9 @@ def validate(value):
     stt.setdefault("computeType", "int8")
     if "voice" in tts:
         tts.update(resolve_voice(bundle, tts['voice']))
-    for key, default, low, high in (("volume", 0.4, 0, 1), ("lengthScale", 1, 0.5, 2)):
+    elif not ({"model", "config"} & tts.keys()):
+        tts.update(resolve_default_voice(bundle))
+    for key, default, low, high in (("volume", 0.4, 0, 1), ("lengthScale", DEFAULT_LENGTH_SCALE, 0.5, 2)):
         tts.setdefault(key, default)
         if type(tts[key]) not in (int, float) or not math.isfinite(tts[key]) or not low <= tts[key] <= high:
             raise ValueError('Invalid speech volume or speed')
@@ -225,8 +227,9 @@ class Runtime:
             return
         tts = frame.get('tts')
         valid = (set(frame) == {'type', 'id', 'tts'} and isinstance(tts, dict)
-                 and set(tts) == {'voice', 'volume', 'lengthScale'}
-                 and isinstance(tts['voice'], str) and re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', tts['voice'])
+                 and set(tts) in ({'volume', 'lengthScale'}, {'voice', 'volume', 'lengthScale'})
+                 and ('voice' not in tts or (isinstance(tts['voice'], str)
+                      and re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', tts['voice'])))
                  and type(tts['volume']) in (int, float) and 0 <= tts['volume'] <= 1
                  and type(tts['lengthScale']) in (int, float) and 0.5 <= tts['lengthScale'] <= 2)
         with self.lock:
@@ -264,7 +267,8 @@ class Runtime:
     def _load_tts(self, ident, tts, fence, timer, completed):
         candidate = None
         try:
-            paths = resolve_voice(self.speech_bundle, tts['voice'])
+            paths = (resolve_voice(self.speech_bundle, tts['voice']) if 'voice' in tts
+                     else resolve_default_voice(self.speech_bundle))
             validate_voice_assets(paths['model'], paths['config'])
             # Loading owns no inference lock; recognition and the current output can keep working.
             candidate = SpeechOutput.load(paths['model'], paths['config'], volume=tts['volume'],

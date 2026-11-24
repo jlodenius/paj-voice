@@ -385,7 +385,7 @@ test('real Pi projects voice custom context and executes only intentional concis
   assert.equal(starting.replies[0].starting, true);
   const opened = starting.journal.find(frame => frame.type === 'opened');
   assert.equal(opened.config.stt.model, undefined);
-  assert.equal(opened.config.tts.voice, 'ljspeech');
+  assert.deepEqual(opened.config.tts, { volume: 0.4, lengthScale: 1 / 1.2 });
   assert.equal(opened.config.stt.hotwords, undefined);
   assert.equal(Object.hasOwn(opened.config, 'voice'), false);
   assert.equal(Object.hasOwn(opened.config, 'subagents'), false);

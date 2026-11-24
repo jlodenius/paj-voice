@@ -10,9 +10,9 @@ Changes apply the next time you start or resume Voice. While Voice is active, ty
 
 | Preference                 | Default                | Available options                         | Meaning                                 |
 | -------------------------- | ---------------------- | ----------------------------------------- | --------------------------------------- |
-| `voice`                    | `"ljspeech"`           | `ljspeech`, `amy`, other installed voices | Speaking voice; `/paj-voice voices`.    |
+| `voice`                    | `"amy"`                | `amy`, `ljspeech`, other installed voices | Speaking voice; `/paj-voice voices`.    |
 | `volume`                   | `40`                   | Number: `0`–`100`                         | Speech volume, not system volume.       |
-| `speed`                    | `1`                    | Number: `0.5`–`2`                         | Speaking speed; `1` is normal.          |
+| `speed`                    | `1.2`                  | Number: `0.5`–`2`                         | Speaking speed; `1` is normal.          |
 | `pauseSeconds`             | `0.8`                  | Number: `0.3`–`5`                         | Silence before submitting, in seconds.  |
 | `maxMessageSeconds`        | `120`                  | Number: `5`–`120`                         | Dictation limit, in seconds.            |
 | `feedback.receipt`         | `"Got it."`            | Text: 1–8 words, at most 60 characters    | New request acknowledgement.            |
@@ -29,11 +29,13 @@ See [all defaults](../examples/paj.json) for a complete example.
 
 ### Speaking voice
 
-Run `/paj-voice voices` to list installed voices. In the shared `paj.json`, set
-`"voice": "amy"` **inside the existing `voice` section** to select Piper Amy (US English, medium).
-Leave other fields alone. Use `/paj-voice reload` to apply the saved output settings while Voice
-is active, or wait until the next start or resume. To switch back, set the field to `"ljspeech"`
-or remove it to use the LJSpeech default.
+With no voice selected, Voice uses Piper Amy (US English, medium) or falls back to LJSpeech if
+Amy is unavailable. The example leaves the voice selection unset to use this default.
+Run `/paj-voice voices` to list installed voices. Set `"voice": "ljspeech"` or another listed ID
+inside the existing `voice` section to choose a specific voice. Explicit voice and speed settings
+are honored independently; a missing explicitly selected voice is not silently replaced.
+Use `/paj-voice reload` to apply saved output settings while Voice is active, or wait until the
+next start or resume.
 
 ### Audio ducking
 

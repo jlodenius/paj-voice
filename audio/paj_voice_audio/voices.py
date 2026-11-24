@@ -3,6 +3,9 @@ from pathlib import Path
 import re
 
 
+DEFAULT_LENGTH_SCALE = 1 / 1.2
+
+
 def installed_voices(root):
     root = Path(root)
     source = root / 'voices.json'
@@ -35,6 +38,20 @@ def resolve_voice(root, ident):
     if not isinstance(ident, str) or ident not in catalog:
         raise ValueError('Voice is not installed; use /paj-voice voices to list packaged choices')
     return {key: catalog[ident][key] for key in ('model', 'config')}
+
+
+def resolve_default_voice(root):
+    try:
+        catalog = installed_voices(root)
+    except FileNotFoundError:
+        root = Path(root)
+        return {'model': str(root / 'tts/model.onnx'), 'config': str(root / 'tts/model.onnx.json')}
+    for ident in ('amy', 'ljspeech'):
+        if ident in catalog:
+            paths = {key: catalog[ident][key] for key in ('model', 'config')}
+            if all(Path(path).is_file() for path in paths.values()):
+                return paths
+    raise ValueError('No default voice is available; use /paj-voice voices and select an installed voice')
 
 
 def validate_voice_assets(model, config):

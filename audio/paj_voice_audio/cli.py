@@ -238,12 +238,19 @@ def main():
         return 0
     if args.check:
         from .speech import SpeechInference
+        from .voices import DEFAULT_LENGTH_SCALE, resolve_default_voice, validate_voice_assets
 
         root = os.environ.get("PAJ_VOICE_SPEECH_BUNDLE")
         if not root:
             parser.exit(1, "Build the project Nix package to select pinned speech models\n")
-        models = SpeechInference(root)
-        models.synthesize("Speech models are ready.")
+        try:
+            paths = resolve_default_voice(root)
+            validate_voice_assets(paths['model'], paths['config'])
+            models = SpeechInference(root, tts=paths['model'], tts_config=paths['config'],
+                                     length_scale=DEFAULT_LENGTH_SCALE)
+            models.synthesize("Speech models are ready.")
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"Cannot check bundled speech models: {error}\n")
         print("Bundled local speech models ready. No capture or playback opened.")
         return 0
     if args.devices:

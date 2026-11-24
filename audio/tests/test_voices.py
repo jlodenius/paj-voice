@@ -39,6 +39,46 @@ class VoicePreferencesTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 installed_voices(root)
 
+    def test_implicit_voice_prefers_amy_then_falls_back_without_changing_explicit_selection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'stt').mkdir()
+            for name in ('model.bin', 'config.json', 'tokenizer.json'):
+                (root / 'stt' / name).touch()
+            catalog = {}
+            for ident in ('amy', 'ljspeech', 'custom'):
+                model, metadata = f'{ident}.onnx', f'{ident}.json'
+                (root / model).touch()
+                (root / metadata).write_text(json.dumps({'language': {'code': 'en_US'}}))
+                catalog[ident] = {'label': ident, 'model': model, 'config': metadata}
+            index = root / 'voices.json'
+            index.write_text(json.dumps(catalog))
+            settings = {'version': 1, 'cacheDir': str(root / 'cache'),
+                        'audio': {'input': 'laptop', 'output': 'headphones', 'echoCancellation': 'none'}}
+            with patch.dict(os.environ, {'PAJ_VOICE_SPEECH_BUNDLE': str(root)}):
+                default = validate(settings)['tts']
+                self.assertEqual(default['model'], str(root / 'amy.onnx'))
+                self.assertEqual(default['lengthScale'], 1 / 1.2)
+                for ident in ('ljspeech', 'custom'):
+                    selected = validate({**settings, 'tts': {'voice': ident, 'lengthScale': 1}})['tts']
+                    self.assertEqual(selected['model'], str(root / f'{ident}.onnx'))
+                    self.assertEqual(selected['lengthScale'], 1)
+                (root / 'amy.onnx').unlink()
+                fallback = validate(settings)['tts']
+                self.assertEqual(fallback['model'], str(root / 'ljspeech.onnx'))
+                self.assertEqual(fallback['lengthScale'], 1 / 1.2)
+                with self.assertRaisesRegex(ValueError, 'Missing local speech asset'):
+                    validate({**settings, 'tts': {'voice': 'amy'}})
+                del catalog['amy']
+                index.write_text(json.dumps(catalog))
+                self.assertEqual(validate(settings)['tts']['model'], str(root / 'ljspeech.onnx'))
+                with self.assertRaisesRegex(ValueError, 'not installed'):
+                    validate({**settings, 'tts': {'voice': 'amy'}})
+                del catalog['ljspeech']
+                index.write_text(json.dumps(catalog))
+                with self.assertRaisesRegex(ValueError, 'select an installed voice'):
+                    validate(settings)
+
     def test_user_volume_and_speed_reach_piper_without_opening_audio(self):
         configs = []
         chunk = types.SimpleNamespace(sample_channels=1, sample_width=2,

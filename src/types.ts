@@ -51,7 +51,7 @@ export interface Feedback {
 }
 
 export interface VoicePreferences {
-  voice: string;
+  voice?: string;
   volume: number;
   speed: number;
   pauseSeconds: number;
@@ -146,7 +146,7 @@ export type CompanionCommand =
   | {
       type: "reload_tts";
       id: string;
-      tts: { voice: string; volume: number; lengthScale: number };
+      tts: { voice?: string; volume: number; lengthScale: number };
     }
   | {
       type: "speak";

@@ -1,8 +1,7 @@
 {
   "voice": {
-    "voice": "ljspeech",
     "volume": 40,
-    "speed": 1,
+    "speed": 1.2,
     "pauseSeconds": 0.8,
     "maxMessageSeconds": 120,
     "feedback": {

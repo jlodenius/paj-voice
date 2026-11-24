@@ -186,8 +186,11 @@ export function validateConfig(value: unknown) {
     ],
     "use only supported voice preferences; device IDs and runtime tuning are not preferences",
   );
-  const voice = value.voice === undefined ? "ljspeech" : value.voice;
-  if (typeof voice !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(voice))
+  const voice = value.voice;
+  if (
+    voice !== undefined &&
+    (typeof voice !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(voice))
+  )
     fail("voice must name an installed voice");
   const feedback = value.feedback === undefined ? {} : value.feedback;
   keys(
@@ -196,12 +199,12 @@ export function validateConfig(value: unknown) {
     "feedback",
   );
   return {
-    voice,
+    ...(voice !== undefined ? { voice } : {}),
     ...(value.audioDucking !== undefined
       ? { audioDucking: validateAudioDucking(value.audioDucking) }
       : {}),
     volume: number(value.volume, 40, 0, 100, "volume must be 0–100"),
-    speed: number(value.speed, 1, 0.5, 2, "speed must be 0.5–2"),
+    speed: number(value.speed, 1.2, 0.5, 2, "speed must be 0.5–2"),
     pauseSeconds: number(
       value.pauseSeconds,
       0.8,
@@ -253,7 +256,7 @@ export function runtimeConfig(
     responseLanguage: "en",
     stt: { computeType: "int8" },
     tts: {
-      voice: settings.voice,
+      ...(settings.voice !== undefined ? { voice: settings.voice } : {}),
       volume: settings.volume / 100,
       lengthScale: 1 / settings.speed,
     },
