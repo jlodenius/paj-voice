@@ -234,7 +234,7 @@ test('short speech only, deduplication, urgent interruption and no full answer f
   assert.equal(f.sent.at(-2).type, 'stop');
   f.controller.newRun();
   f.controller.settled();
-  assert.equal(f.sent.at(-1).text, 'I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.');
+  assert.equal(f.sent.at(-1).text, 'I’ve finished this response, but did not produce a spoken summary.');
   const count = f.sent.length;
   f.controller.settled();
   assert.equal(f.sent.length, count);

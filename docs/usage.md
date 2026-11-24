@@ -149,6 +149,7 @@ request if needed. No raw audio or rejected transcript is saved by these checks.
 Voice reads concise plain-text answers aloud by default, even after a progress update or with a
 reporting integration active. An already queued spoken answer is not repeated. Longer or formatted
 replies need a separate spoken summary from the model; Voice does not read the full reply aloud.
+If the model omits that summary, Voice can report the omission without asking you to request it.
 
 ## Incoming agent updates
 

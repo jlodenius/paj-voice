@@ -228,7 +228,7 @@ test('never reads verbose assistant output or hidden reasoning into playback', a
   ] } });
   assert.equal(f.frames.length, 0);
   await f.event('agent_settled');
-  assert.equal(f.frames.at(-1).text, 'I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.');
+  assert.equal(f.frames.at(-1).text, 'I’ve finished this response, but did not produce a spoken summary.');
 });
 
 test('nested Pi tool call IDs become bounded transport IDs and remain deduplicated', async () => {

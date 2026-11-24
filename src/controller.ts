@@ -821,7 +821,7 @@ export function createVoiceController({
             ? "An agent update could not be summarized automatically."
             : turnSpoken
               ? "I’m finished for now."
-              : "I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.";
+              : "I’ve finished this response, but did not produce a spoken summary.";
         api.speak({
           text,
           generation,

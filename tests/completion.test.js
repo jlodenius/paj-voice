@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './fixtures/extension.js';
 
-const missing = 'I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.';
+const missing = 'I’ve finished this response, but did not produce a spoken summary.';
 const reply = text => ({ role: 'assistant', stopReason: 'stop',
   content: text ? [{ type: 'text', text }] : [] });
 async function start(f, messageType) {

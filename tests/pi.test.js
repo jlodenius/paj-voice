@@ -399,7 +399,7 @@ test('real Pi projects voice custom context and executes only intentional concis
   assertVoiceContext(f.requests.at(-1), true);
   let spoken = (await f.inspect()).journal.filter(frame => frame.type === 'speak');
   assert.deepEqual(spoken.map(frame => frame.text),
-    ['I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.']);
+    ['I’ve finished this response, but did not produce a spoken summary.']);
   f.speakNext();
   const start = f.requests.length;
   await f.prompt('Give one intentional spoken result.');
@@ -407,7 +407,7 @@ test('real Pi projects voice custom context and executes only intentional concis
   for (const request of f.requests.slice(start)) assertVoiceContext(request, true);
   spoken = (await f.inspect()).journal.filter(frame => frame.type === 'speak');
   assert.deepEqual(spoken.map(frame => frame.text),
-    ['I’ve finished this response, but did not produce a spoken summary. Ask me to summarize the result aloud.',
+    ['I’ve finished this response, but did not produce a spoken summary.',
       'The isolated test passed.']);
   const result = f.events.find(event => event.type === 'tool_execution_end' && event.toolName === 'voice_speak');
   assert.equal(result.isError, false);
