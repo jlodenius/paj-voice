@@ -22,6 +22,7 @@ interface ControllerOptions {
   notify?(text: string, level: NotificationLevel): void;
   recover?(text: string): "saved" | "full";
   close?(): void;
+  onSpeechReset?(reason: string): void;
   uuid?: () => string;
   setTimer?: (callback: () => void, milliseconds: number) => Timer;
   clearTimer?: (timer: Timer) => void;
@@ -32,6 +33,7 @@ export function createVoiceController({
   send,
   recover,
   close,
+  onSpeechReset,
   changed = () => {},
   notify = () => {},
   uuid = randomUUID,
@@ -278,6 +280,7 @@ export function createVoiceController({
     playback.interrupt(reason);
     send({ type: "stop" });
     pendingSpeech.clear();
+    onSpeechReset?.(reason);
     speechId = null;
     speaking = false;
   };
@@ -550,11 +553,14 @@ export function createVoiceController({
     turn() {
       return run;
     },
+    canResumeInbox() {
+      return idle() && !inputPause;
+    },
     inboxPending() {
       return inboxEpoch === epoch;
     },
     inboxSummaryNeeded() {
-      return inboxEpoch === epoch && inboxSummaryEpoch !== epoch;
+      return !turnSilent && inboxEpoch === epoch && inboxSummaryEpoch !== epoch;
     },
     userOutcomePending() {
       return userOutcomeExpected;

@@ -122,6 +122,7 @@ export interface CompanionFrame {
   id?: unknown;
   text?: unknown;
   completed?: unknown;
+  preOutputSpeechIds?: unknown;
   applied?: unknown;
   input?: unknown;
   output?: unknown;

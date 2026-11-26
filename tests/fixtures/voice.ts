@@ -98,6 +98,28 @@ export default function (pi) {
     description: "Signal fake audio worker readiness",
     handler: async () => worker.onEvent({ type: "ready" }, worker.generation),
   });
+  pi.registerCommand("voice-test-barge", {
+    description: "Fake an accepted onset with native pre-output proof",
+    handler: async (args) => {
+      const { speechId, text } = JSON.parse(args);
+      const id = `fake-capture-${++serial}`;
+      worker.onEvent(
+        { type: "addressed", id, preOutputSpeechIds: [speechId] },
+        worker.generation,
+      );
+      worker.onEvent({ type: "utterance", id, text }, worker.generation);
+    },
+  });
+  pi.registerCommand("voice-test-drain", {
+    description: "Acknowledge fake audio drain",
+    handler: async (args) => {
+      for (const id of JSON.parse(args))
+        worker.onEvent(
+          { type: "speech_end", id, completed: true },
+          worker.generation,
+        );
+    },
+  });
   pi.registerCommand("voice-test-utterance", {
     description: "Submit fake addressed speech without audio",
     handler: async (text) => {

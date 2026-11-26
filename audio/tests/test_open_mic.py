@@ -1090,27 +1090,53 @@ class OpenMicTests(unittest.TestCase):
                          ["inspect the tests", "focus on the failing ones"])
         self.assertFalse(runtime.pending)
 
-    def test_new_speech_discards_inflight_synthesis_without_cancelling_capture(self):
+    def test_onset_proves_cancellation_of_inflight_synthesis_and_queued_speech(self):
         runtime, events, captures, played, models, *_ = self.fixture()
         started, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)
 
         def synthesize(text):
             started.set()
-            release.wait(1)
+            release.wait()
             return b"\0\0" * 1024
 
         models.synthesize.side_effect = synthesize
-        runtime.command({"type": "speak", "id": "old", "text": "An old answer."})
+        ids = ["synthesizing", "queued-one", "queued-two"]
+        runtime.command({"type": "speak", "id": ids[0], "text": "An old answer."})
         self.assertTrue(started.wait(1))
-        runtime._interrupt(runtime.epoch)
-        runtime._segment({"type": "onset", "id": 1}, runtime.epoch)
+        for ident in ids[1:]:
+            runtime.command({"type": "speak", "id": ident, "text": "Follow-up speech."})
+        epoch = runtime.epoch
+        runtime._segment({"type": "onset", "id": 1}, epoch)
+        runtime._segment({"type": "endpoint", "id": 1, "pcm": b""}, epoch)
+        runtime._segment({"type": "onset", "id": 2}, epoch)
+        self.assertEqual([e for e in events if e["type"] == "addressed"], [
+            {"type": "addressed", "id": f"e{epoch}-t1", "preOutputSpeechIds": ids},
+            {"type": "addressed", "id": f"e{epoch}-t2"},
+        ])
+        runtime._segment({"type": "endpoint", "id": 2, "pcm": b""}, epoch)
         release.set()
-        wait_for(lambda: any(e["type"] == "speech_end" and e["id"] == "old" for e in events))
-        self.assertNotIn("old", played)
+
+        def endings():
+            return {e["id"]: e["completed"] for e in events if e["type"] == "speech_end"}
+
+        wait_for(lambda: len(endings()) == len(ids))
+        self.assertEqual(endings(), dict.fromkeys(ids, False))
+        self.assertTrue(set(ids).isdisjoint(played))
         self.assertFalse(captures[0].closed)
-        ended = next(e for e in events if e["type"] == "speech_end" and e["id"] == "old")
-        self.assertIs(ended.get("completed"), False)
+
+    def test_onset_does_not_claim_current_playback_even_without_playing_callback(self):
+        runtime, events, _, played, *_ = self.fixture()
+        runtime.command({"type": "speak", "id": "scheduled", "text": "Scheduled speech."})
+        wait_for(lambda: "scheduled" in played)
+        runtime.command({"type": "speak", "id": "queued", "text": "Queued speech."})
+        runtime._segment({"type": "onset", "id": 1}, runtime.epoch)
+        self.assertEqual([e for e in events if e["type"] == "addressed"], [
+            {"type": "addressed", "id": f"e{runtime.epoch}-t1", "preOutputSpeechIds": ["queued"]},
+        ])
+        self.assertIn({"type": "speech_end", "id": "scheduled", "completed": False}, events)
+        self.assertTrue(runtime.speaker.paused)
+        self.assertNotIn("queued", played)
 
     def test_normal_speech_waits_for_prior_playback_instead_of_cutting_it_off(self):
         runtime, events, _, played, *_ = self.fixture()

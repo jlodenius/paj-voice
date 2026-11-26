@@ -152,6 +152,7 @@ class Runtime:
         self.stage = "configure"
         self.jobs = queue.Queue(maxsize=2)
         self.speeches = queue.Queue(maxsize=2)
+        self.speech_available = threading.Condition(self.lock)
         self.busy = {"recognition": None, "synthesis": None}
 
     def command(self, frame):
@@ -204,6 +205,7 @@ class Runtime:
                     for previous in kept:
                         self.speeches.put_nowait(previous)
                 self.speeches.put_nowait({"id": ident, "text": text, "revision": self.revision, "key": key})
+                self.speech_available.notify()
                 return
         if kind == "stop":
             with self.lock:
@@ -693,7 +695,16 @@ class Runtime:
         with self.lock:
             if (self.closed or self.muted or self._input_blocked() or self.epoch != epoch
                     or (self.speaker_mode and not self.listening)):
-                return
+                return []
+            # Only this revision's live jobs can be cancelled by this onset. Once a
+            # job crosses into current_playback we cannot prove no output occurred.
+            with self.speeches.mutex:
+                queued = tuple(self.speeches.queue)
+            playback_id = self.current_playback[0] if self.current_playback else None
+            pre_output_ids = list(dict.fromkeys(
+                job['id'] for job in (self.active_speech, *queued)
+                if job and not job.get('ended') and job['id'] != playback_id and self._speech_current(job)
+            ))
             self.input_active = True
             self.revision += 1
             speaker, output_epoch = self.speaker, self.output_epoch
@@ -706,6 +717,7 @@ class Runtime:
                 speaker.cancel()
             except Exception:
                 self._suspend(output_lost=True, output_epoch=output_epoch)
+        return pre_output_ids
 
     def _segment(self, event, epoch):
         try:
@@ -719,11 +731,14 @@ class Runtime:
                     # Admission can race playback; fence the onset before interrupting output.
                     if self.speaker_mode and event.get('at', self.clock()) <= self.acoustic_until:
                         return False
-                    self._interrupt(epoch)
+                    pre_output_ids = self._interrupt(epoch)
                     if len(self.pending) >= 4:
                         raise RuntimeError("Too many pending utterances")
                     self.pending.add(ident)
-                    self.emit({"type": "addressed", "id": ident})
+                    addressed = {"type": "addressed", "id": ident}
+                    if pre_output_ids:
+                        addressed["preOutputSpeechIds"] = pre_output_ids
+                    self.emit(addressed)
                 elif event["type"] == "truncated":
                     self.emit({"type": "limit", "id": ident})
                 elif event["type"] == "endpoint":
@@ -793,14 +808,16 @@ class Runtime:
 
     def _synthesize(self):
         while not self.stopped.is_set():
-            try:
-                job = self.speeches.get(timeout=0.1)
-            except queue.Empty:
-                continue
+            job = None
             played = False
             playback_fault = None
             try:
-                with self.lock:
+                with self.speech_available:
+                    self.speech_available.wait_for(lambda: self.stopped.is_set() or not self.speeches.empty())
+                    if self.stopped.is_set():
+                        return
+                    # Transfer ownership under the same lock that captures onset proof.
+                    job = self.speeches.get_nowait()
                     if not self._speech_current(job):
                         continue
                     self.active_speech = job
@@ -838,12 +855,13 @@ class Runtime:
                 self.fail(error)
             finally:
                 self.busy["synthesis"] = None
-                with self.lock:
-                    if self.active_speech is job:
-                        self.active_speech = None
-                    if not played and not self.closed and not job.get('ended'):
-                        self.emit({"type": "speech_end", "id": job["id"], "completed": False})
-                    job.clear()
+                if job is not None:
+                    with self.lock:
+                        if self.active_speech is job:
+                            self.active_speech = None
+                        if not played and not self.closed and not job.get('ended'):
+                            self.emit({"type": "speech_end", "id": job["id"], "completed": False})
+                        job.clear()
 
     def _new_speaker(self, sink, epoch):
         callback = lambda event: self._speaker_event(event, epoch)
@@ -1282,6 +1300,7 @@ class Runtime:
                 self.epoch += 1
                 self.revision += 1
                 self.stopped.set()
+                self.speech_available.notify_all()
                 self.pending.clear()
                 if self.current_playback:
                     self.current_playback[1].set()

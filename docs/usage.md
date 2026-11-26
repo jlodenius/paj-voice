@@ -162,3 +162,8 @@ once per pending batch. It never replays old audio or substitutes a stale user-r
 Stopping speech or starting a new request cancels an obsolete retry; explicit silence is respected.
 If the retry still cannot produce a summary, Voice reports that failure once rather than repeatedly
 asking you to request a summary. An inbox summary does not complete unrelated user work.
+
+If a new voice request interrupts a structured inbox summary before any audio can be handed off,
+Voice can generate a fresh summary once, after the new request settles and its answer drains.
+It does not retry once output could have begun, when it cannot identify the original messages, or
+after another interruption, a stop, silence, or audio loss. It never retries ordinary answers.

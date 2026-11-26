@@ -217,6 +217,36 @@ test('real Pi narrates a fresh inbox result after cancelled noise without using 
   assert.equal(spoken.some(frame => frame.key === 'fallback'), false);
 });
 
+test('real Pi waits for the interrupting answer to drain before a fresh inbox turn', realPi, async t => {
+  const f = await fixture(t);
+  await f.command('/paj-voice on');
+  await f.command('/voice-test-ready');
+  f.inboxNext();
+  let done = f.settled();
+  await f.command('/voice-test-inbox');
+  await done;
+  const before = await f.inspect();
+  const original = before.journal.findLast(frame => frame.type === 'speak');
+  assert.match(original.text, /worker finished the review/);
+  f.shortNext();
+  done = f.settled();
+  await f.command('/voice-test-barge ' + JSON.stringify({ speechId: original.id, text: 'How many seconds in a minute?' }));
+  await done;
+  assert.equal(f.requests.length, 2);
+  const interrupting = (await f.inspect()).journal.slice(before.journal.length).filter(frame => frame.type === 'speak');
+  assert.deepEqual(interrupting.map(frame => frame.text), ['Got it.', 'There are sixty seconds in one minute.']);
+  await f.command('/voice-test-drain ' + JSON.stringify([interrupting[0].id]));
+  assert.equal(f.requests.length, 2);
+  f.inboxNext();
+  done = f.settled();
+  await f.command('/voice-test-drain ' + JSON.stringify([interrupting[1].id]));
+  await done;
+  assert.equal(f.requests.length, 3);
+  assert.match(JSON.stringify(f.requests[2].payload.messages), /Only summarize the previously interrupted Paj updates/);
+  const after = await f.inspect();
+  assert.match(after.journal.findLast(frame => frame.type === 'speak').text, /worker finished the review/);
+});
+
 test('real Pi automatically generates one fresh summary when the first inbox response is empty', realPi, async t => {
   const f = await fixture(t);
   await f.command('/paj-voice on');
