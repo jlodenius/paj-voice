@@ -66,13 +66,16 @@ Voice saves original channel gains in a private write-ahead journal under
 snapshots, then backs off while the broker runs. Restarting Voice or its broker in the same login
 and PipeWire instance does not discard a saved gain. Recovery requires the original stream and
 client identity and a gain matching one of the recorded write states. A different gain on the same
-stream is respected. Unresolved streams are not ducked again; a different PipeWire instance blocks
-writes rather than guessing what to restore.
+stream is respected. Unresolved streams are not ducked again. When both the PipeWire socket epoch
+and core cookie confirm that a record belongs to a previous instance, Voice removes that record
+from the journal without applying its gains. If only one identifier differs, the identity is
+ambiguous and Voice blocks gain writes rather than guessing. Retirement must be saved before
+Voice can duck current streams.
 
 The journal is not a cross-login backup. It cannot recover gains lost before journaling, identify a
 replacement stream, or distinguish a manual change to the exact same recorded value. For ambiguous
-or stale entries, leave ducking inactive and use the app's own volume control; do not replay saved
-gains onto new streams. The journal contains stream identity metadata and gains, not audio.
+entries, leave ducking inactive and use the app's own volume control; do not replay saved gains
+onto new streams. The journal contains stream identity metadata and gains, not audio.
 
 Current status contains only these memory-only, independent copies:
 

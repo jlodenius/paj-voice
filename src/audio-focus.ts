@@ -226,11 +226,13 @@ export function createAudioFocus(
   async function reconcile(version: number): Promise<boolean | undefined> {
     if (failed) return;
     const epoch = options.journal ? await options.recoveryEpoch?.() : undefined;
-    if (options.journal && !epoch) throw new Error("Missing recovery epoch");
+    if (options.journal && (!epoch || !printable(epoch)))
+      throw new Error("Missing recovery epoch");
     const snapshot = await graph.snapshot();
     if (version !== revision) return;
     if (options.journal && (await options.recoveryEpoch?.()) !== epoch)
       throw new Error("Recovery epoch changed during snapshot");
+    if (version !== revision) return;
     if (!printable(snapshot.generation) || !Array.isArray(snapshot.streams))
       throw new Error("Invalid graph snapshot");
     if (
@@ -264,15 +266,35 @@ export function createAudioFocus(
     const due = recoverNow || performance.now() >= nextRecovery;
     let attemptedRecovery = false;
     recoverNow = false;
-    for (const [key, entry] of durable) {
-      if (entry.epoch !== epoch || entry.generation !== snapshot.generation) {
-        warnUnconfirmed(
-          "Saved audio gains belong to a different PipeWire instance; manual review required",
-        );
-        graphUnavailable = true;
-        nextRecovery = performance.now() + maxRecoveryDelay;
-        return;
+    if (options.journal && durable.size) {
+      const obsolete: string[] = [];
+      for (const [key, entry] of durable) {
+        const sameEpoch = entry.epoch === epoch;
+        const sameCore = entry.generation === snapshot.generation;
+        if (sameEpoch !== sameCore) {
+          warnUnconfirmed(
+            "Saved audio gains cannot be matched to the current PipeWire instance; manual review required",
+          );
+          graphUnavailable = true;
+          nextRecovery = performance.now() + maxRecoveryDelay;
+          return;
+        }
+        if (!sameEpoch) obsolete.push(key);
       }
+      if (obsolete.length) {
+        // Both identifiers must differ. Commit retirement before using the current graph.
+        const keys = new Set(obsolete);
+        const current = [...durable].filter(([key]) => !keys.has(key));
+        if (version !== revision) return;
+        await options.journal.save(current.map(([, entry]) => entry));
+        for (const key of obsolete) durable.delete(key);
+        if (!durable.size) options.onRecoveryDrained?.();
+        if ((await options.recoveryEpoch?.()) !== epoch)
+          throw new Error("Recovery epoch changed during journal retirement");
+        if (version !== revision) return;
+      }
+    }
+    for (const [key, entry] of durable) {
       const held = owned.get(key);
       if (held && held.restoreFaults < maxRestoreFaults) continue;
       incomplete.add(key);
